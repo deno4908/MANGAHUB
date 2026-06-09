@@ -323,7 +323,7 @@ function getTrendingImageSources(item: { slug?: string; thumb?: string }) {
     if (/^https?:\/\//i.test(rawThumb)) {
       if (isMangaDexCoverUrl(rawThumb)) {
         return {
-          src: thumbUrl(rawThumb, slug),
+          src: toMangaDexCoverProxy(rawThumb),
           fallbackSrc: rawThumb,
         };
       }

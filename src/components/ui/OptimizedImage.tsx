@@ -6,8 +6,9 @@ import { cn } from '@/lib/utils';
 
 interface OptimizedImageProps {
   src: string;
-  /** CDN/fallback URL raced in parallel with src from the moment image enters viewport */
+  /** Fallback URL used if the primary image fails or stays too slow */
   fallbackSrc?: string;
+  fallbackDelayMs?: number;
   alt: string;
   className?: string;
   priority?: boolean;
@@ -38,6 +39,7 @@ function isRemoteUrl(value?: string): boolean {
 const OptimizedImage = memo(({
   src,
   fallbackSrc,
+  fallbackDelayMs,
   alt,
   className = '',
   priority = false,
@@ -72,11 +74,17 @@ const OptimizedImage = memo(({
   const hasRemoteCandidate =
     isRemoteUrl(normalizedSrc) || isRemoteUrl(normalizedFallbackSrc);
   const maxRecoverAttempts = Math.max(6, maxRetries + 3);
+  const fallbackSwitchDelayMs =
+    typeof fallbackDelayMs === 'number'
+      ? Math.max(0, fallbackDelayMs)
+      : (isRemoteUrl(normalizedSrc) && isRemoteUrl(normalizedFallbackSrc) ? 1200 : 0);
 
-  // Keep a ref so the CDN race callback can check if proxy already won
-  const loadedRef    = useRef(alreadyCached);
   const containerRef = useRef<HTMLDivElement>(null);
-  loadedRef.current  = loaded;
+  const loadedRef = useRef(alreadyCached);
+
+  useEffect(() => {
+    loadedRef.current = loaded;
+  }, [loaded]);
 
   // ── Intersection observer ──────────────────────────────────────────────────
   useEffect(() => {
@@ -91,30 +99,31 @@ const OptimizedImage = memo(({
     return () => observer.disconnect();
   }, [priority, inView, rootMargin]);
 
-  // ── Parallel CDN race ──────────────────────────────────────────────────────
-  // As soon as the image enters the viewport, start loading the CDN URL in a
-  // hidden Image() in parallel with the visible <img> (which loads the proxy).
-  // Whichever finishes first is displayed — no timeout, no sequential waiting.
+  // ── Delayed fallback ───────────────────────────────────────────────────────
+  // For remote cover URLs, avoid firing primary and fallback in parallel on
+  // every card. Start the fallback only if the primary still has not loaded
+  // after a short delay or if the primary errors first.
   useEffect(() => {
     if (!inView || alreadyCached || !normalizedFallbackSrc) return;
-    // Do not race local placeholder fallback (e.g. /no-cover.svg).
-    // It loads instantly and can incorrectly replace a valid primary image.
-    if (!isRemoteUrl(normalizedFallbackSrc)) return;
+    if (!isRemoteUrl(normalizedSrc) || !isRemoteUrl(normalizedFallbackSrc)) return;
+    if (fallbackSwitchDelayMs <= 0) return;
 
-    let cancelled = false;
-    const cdnImg = new window.Image();
+    const timer = window.setTimeout(() => {
+      setActiveSrc((current) => {
+        if (loadedRef.current) return current;
+        if (current === normalizedFallbackSrc) return current;
+        return normalizedFallbackSrc;
+      });
+    }, fallbackSwitchDelayMs);
 
-    cdnImg.onload = () => {
-      if (cancelled || loadedRef.current) return; // proxy already won, discard
-      loadedCache.add(normalizedFallbackSrc);
-      setActiveSrc(normalizedFallbackSrc);
-      setLoaded(true);
-    };
-    // CDN error: ignore — proxy is still trying; handleError will catch both
-    cdnImg.src = normalizedFallbackSrc;
-
-    return () => { cancelled = true; };
-  }, [inView, normalizedSrc, normalizedFallbackSrc, alreadyCached]);
+    return () => window.clearTimeout(timer);
+  }, [
+    inView,
+    alreadyCached,
+    normalizedSrc,
+    normalizedFallbackSrc,
+    fallbackSwitchDelayMs,
+  ]);
 
   // ── Reset when src prop changes ────────────────────────────────────────────
   useEffect(() => {
@@ -153,8 +162,7 @@ const OptimizedImage = memo(({
   }, [activeSrc, hasRemoteCandidate, recoverAttempts, maxRecoverAttempts]);
 
   const handleError = useCallback(() => {
-    // Proxy failed — if CDN race hasn't resolved yet, force-switch to CDN now.
-    // The CDN Image() may already be in-flight so src switch = near-instant.
+    // Primary failed; switch to the fallback source if available.
     if (normalizedFallbackSrc && activeSrc !== normalizedFallbackSrc) {
       setLoaded(false);
       setActiveSrc(normalizedFallbackSrc);

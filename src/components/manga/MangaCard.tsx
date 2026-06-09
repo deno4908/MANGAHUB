@@ -176,6 +176,9 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
   const chapterLabel = chapterDisplay(lastChapter, manga.status, isMangaDexItem);
   const chapterMetaLabel = chapterTime ? `${chapterLabel} - ${chapterTime}` : chapterLabel;
   const safeCoverFallback = String(manga.coverProxy || '').trim() || DEFAULT_CARD_COVER_FALLBACK;
+  const coverSrc = isMangaDexItem && safeCoverFallback ? safeCoverFallback : manga.cover;
+  const coverFallbackSrc = isMangaDexItem && manga.cover ? manga.cover : safeCoverFallback;
+  const coverFallbackDelayMs = isMangaDexItem ? 600 : undefined;
   const detailLinkState = { previewManga: manga };
   const detailPath = getMangaDetailPath(manga.id);
   const ratingLabel = Number(manga.rating).toFixed(1);
@@ -239,7 +242,7 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
       return (
         <motion.div initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.3, delay: index * 0.04 }}>
           <a href={manga.externalUrl} target="_blank" rel="noreferrer" className="group flex gap-3.5 p-3 rounded-lg hover:bg-muted/60 transition-all border border-transparent hover:border-border">
-            <OptimizedImage src={manga.cover} fallbackSrc={safeCoverFallback} alt={manga.title} className="w-14 h-[78px] object-cover rounded shrink-0 border border-border" priority={index < 4} rootMargin="140px" />
+            <OptimizedImage src={coverSrc} fallbackSrc={coverFallbackSrc} fallbackDelayMs={coverFallbackDelayMs} alt={manga.title} className="w-14 h-[78px] object-cover rounded shrink-0 border border-border" priority={index < 4} rootMargin="140px" />
             <div className="flex-1 min-w-0 py-0.5">
               <h3 className="text-sm font-semibold line-clamp-2 group-hover:text-primary transition-colors">{manga.title}</h3>
               <div className="flex items-center gap-2.5 mt-1.5 text-[11px] text-muted-foreground">
@@ -262,7 +265,7 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
     return (
       <motion.div initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.3, delay: index * 0.04 }}>
         <Link to={detailPath} state={detailLinkState} className="group flex gap-3.5 p-3 rounded-lg hover:bg-muted/60 transition-all border border-transparent hover:border-border" onMouseEnter={prefetchDetail}>
-          <OptimizedImage src={manga.cover} fallbackSrc={safeCoverFallback} alt={manga.title} className="w-14 h-[78px] object-cover rounded shrink-0 border border-border" priority={index < 4} rootMargin="140px" />
+          <OptimizedImage src={coverSrc} fallbackSrc={coverFallbackSrc} fallbackDelayMs={coverFallbackDelayMs} alt={manga.title} className="w-14 h-[78px] object-cover rounded shrink-0 border border-border" priority={index < 4} rootMargin="140px" />
           <div className="flex-1 min-w-0 py-0.5">
             <h3 className="text-sm font-semibold line-clamp-2 group-hover:text-primary transition-colors">{manga.title}</h3>
             <div className="flex items-center gap-2.5 mt-1.5 text-[11px] text-muted-foreground">
@@ -288,7 +291,7 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
       return (
         <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, delay: index * 0.03 }}>
           <a href={manga.externalUrl} target="_blank" rel="noreferrer" className="group flex items-center gap-3 py-2 px-2 rounded-lg hover:bg-muted/60 transition-all">
-            <OptimizedImage src={manga.cover} fallbackSrc={safeCoverFallback} alt={manga.title} className="w-10 h-14 object-cover rounded shrink-0 border border-border" priority={index < 4} rootMargin="140px" />
+            <OptimizedImage src={coverSrc} fallbackSrc={coverFallbackSrc} fallbackDelayMs={coverFallbackDelayMs} alt={manga.title} className="w-10 h-14 object-cover rounded shrink-0 border border-border" priority={index < 4} rootMargin="140px" />
             <div className="flex-1 min-w-0">
               <h3 className="text-xs font-semibold line-clamp-1 group-hover:text-primary transition-colors">{manga.title}</h3>
               {lastChapter && isValidChapterNumber(Number(lastChapter.number)) ? (
@@ -312,7 +315,7 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
     return (
       <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, delay: index * 0.03 }}>
         <Link to={detailPath} state={detailLinkState} className="group flex items-center gap-3 py-2 px-2 rounded-lg hover:bg-muted/60 transition-all" onMouseEnter={prefetchDetail}>
-          <OptimizedImage src={manga.cover} fallbackSrc={safeCoverFallback} alt={manga.title} className="w-10 h-14 object-cover rounded shrink-0 border border-border" priority={index < 4} rootMargin="140px" />
+          <OptimizedImage src={coverSrc} fallbackSrc={coverFallbackSrc} fallbackDelayMs={coverFallbackDelayMs} alt={manga.title} className="w-10 h-14 object-cover rounded shrink-0 border border-border" priority={index < 4} rootMargin="140px" />
           <div className="flex-1 min-w-0">
             <h3 className="text-xs font-semibold line-clamp-1 group-hover:text-primary transition-colors">{manga.title}</h3>
             {lastChapter && isValidChapterNumber(Number(lastChapter.number)) ? (
@@ -340,7 +343,7 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
         <a href={manga.externalUrl} target="_blank" rel="noreferrer" className="group block h-full">
           <div className="ed-card h-full flex flex-col">
             <div className="relative aspect-[2/3] overflow-hidden">
-              <OptimizedImage src={manga.cover} fallbackSrc={safeCoverFallback} alt={manga.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" priority={index < 4} rootMargin="140px" />
+              <OptimizedImage src={coverSrc} fallbackSrc={coverFallbackSrc} fallbackDelayMs={coverFallbackDelayMs} alt={manga.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" priority={index < 4} rootMargin="140px" />
               <div className="absolute inset-0 bg-gradient-to-t from-foreground/90 via-foreground/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-3">
                 <span className="inline-flex items-center gap-1 text-[11px] font-bold text-primary-foreground bg-primary px-3 py-1 rounded w-fit">
                   Đọc ngay <ArrowRight className="w-3 h-3" />
@@ -377,7 +380,7 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
       <Link to={detailPath} state={detailLinkState} className="group block h-full" onMouseEnter={prefetchDetail}>
         <div className="ed-card h-full flex flex-col">
           <div className="relative aspect-[2/3] overflow-hidden">
-            <OptimizedImage src={manga.cover} fallbackSrc={safeCoverFallback} alt={manga.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" priority={index < 4} rootMargin="140px" />
+            <OptimizedImage src={coverSrc} fallbackSrc={coverFallbackSrc} fallbackDelayMs={coverFallbackDelayMs} alt={manga.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" priority={index < 4} rootMargin="140px" />
             
             {/* Hover overlay */}
             <div className="absolute inset-0 bg-gradient-to-t from-foreground/90 via-foreground/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-3">

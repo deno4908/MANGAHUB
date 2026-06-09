@@ -2283,28 +2283,6 @@ const BrowseManga = () => {
     return map;
   }, [mangaDexItems, selectedGenreAliasGroups]);
 
-  // Keep pre-warm lightweight to avoid rate-limit bursts on MangaDex.
-  useEffect(() => {
-    if (!isMangaDexSourceTab) return;
-    if (filters.sort === 'popular') return;
-    if (!mangaDexMangas?.length) return;
-    const cdnUrls = mangaDexMangas
-      .slice(0, 12)
-      .map(item => String((item.cover_url || '')).trim())
-      .filter(u => u.startsWith('https://'));
-    if (!cdnUrls.length) return;
-    const BATCH = 3;
-    for (let i = 0; i < cdnUrls.length; i += BATCH) {
-      const batch = cdnUrls.slice(i, i + BATCH);
-      const delay = (i / BATCH) * 380;
-      setTimeout(() => {
-        fetch(`${API_BASE}/api/images/preload?urls=${encodeURIComponent(batch.join(','))}`, {
-          method: 'GET', priority: 'low',
-        } as RequestInit).catch(() => {});
-      }, delay);
-    }
-  }, [mangaDexMangas, filters.sort, isMangaDexSourceTab]);
-
   // Reset page when filters change
   useEffect(() => { setPage(1); }, [filters.genres, filters.status, filters.sort, filters.year, filters.minRating, hasSearch]);
 
@@ -4375,44 +4353,6 @@ const BrowseManga = () => {
       img.src = url;
     });
   }, [displayItems, isMangaDexSourceTab]);
-
-  // ── Next-page backend preload ──────────────────────────────────────────────
-  // When user is on page N, quietly warm backend disk cache for page N+1's
-  // MangaDex covers so the next page navigation shows images instantly.
-  useEffect(() => {
-    if (!mangaDexMangas?.length && !isMangaDexSourceTab) return;
-
-    let cdnUrls: string[] = [];
-    if (isMangaDexSourceTab) {
-      const nextItems = mergedFiltered.slice(page * pageSize, page * pageSize + pageSize);
-      cdnUrls = nextItems
-        .map(item => String(item.coverProxy || item.cover || '').trim())
-        .filter(u => u.startsWith('https://'));
-    } else {
-      if (isClientPaginationMode || !mangaDexMangas?.length) return;
-      const nextMdxStart = page * mdxSlotPerPage;
-      const nextMdxItems = mangaDexMangas.slice(nextMdxStart, nextMdxStart + mdxSlotPerPage);
-      cdnUrls = nextMdxItems
-        .map(item => String((item.cover_url || '')).trim())
-        .filter(u => u.startsWith('https://'));
-    }
-
-    if (!cdnUrls.length) return;
-    const timer = setTimeout(() => {
-      fetch(`${API_BASE}/api/images/preload?urls=${encodeURIComponent(cdnUrls.join(','))}`, {
-        method: 'GET', priority: 'low',
-      } as RequestInit).catch(() => {});
-    }, 600); // small delay so current page renders first
-    return () => clearTimeout(timer);
-  }, [
-    page,
-    pageSize,
-    mangaDexMangas,
-    isClientPaginationMode,
-    mdxSlotPerPage,
-    isMangaDexSourceTab,
-    mergedFiltered,
-  ]);
 
   useEffect(() => {
     if (isNearMangaDexLoadedLimit) return;
