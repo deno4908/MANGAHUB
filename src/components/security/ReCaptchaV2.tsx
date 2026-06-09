@@ -115,8 +115,8 @@ const ReCaptchaV2 = forwardRef<ReCaptchaV2Handle, ReCaptchaV2Props>(
     if (!siteKey) return null;
 
     return (
-      <div className={`overflow-x-auto pb-1 ${className}`}>
-        <div ref={containerRef} />
+      <div className={`flex w-full justify-center overflow-x-auto pb-1 ${className}`}>
+        <div ref={containerRef} className="inline-block" />
       </div>
     );
   },
