@@ -493,6 +493,17 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
   return null;
 };
 
+const isOAuthPayloadOnRoot = (location: ReturnType<typeof useLocation>) => {
+  if (location.pathname !== "/") return false;
+  const params = new URLSearchParams(location.search);
+  return (
+    params.has("code") ||
+    params.has("error") ||
+    location.hash.includes("access_token=") ||
+    location.hash.includes("refresh_token=")
+  );
+};
+
 const AppContent = () => {
   const location = useLocation();
   const user = useUserStore(s => s.user);
@@ -539,6 +550,9 @@ const AppContent = () => {
 
   if (user?.isBanned && location.pathname !== '/banned') {
     return <Navigate to="/banned" replace />;
+  }
+  if (isOAuthPayloadOnRoot(location)) {
+    return <Navigate to={`/auth/callback${location.search}${location.hash}`} replace />;
   }
   if (lockedByBan && !allowWhenLocked.includes(location.pathname)) {
     return <Navigate to="/banned" replace />;
