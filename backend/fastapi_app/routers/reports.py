@@ -13,6 +13,7 @@ from fastapi_app.utils.anti_spam import (
     request_fingerprint,
 )
 from fastapi_app.utils.email_delivery import send_support_ticket_email, support_email_configured
+from fastapi_app.utils.recaptcha import enforce_recaptcha
 
 router = APIRouter()
 
@@ -25,6 +26,16 @@ REPORT_SAME_TARGET_WINDOW_SECONDS = 10 * 60
 SUPPORT_EMAIL_LIMIT_PER_USER_10_MINUTES = 3
 SUPPORT_EMAIL_LIMIT_PER_USER_HOUR = 8
 SUPPORT_EMAIL_LIMIT_PER_IP_HOUR = 20
+RECAPTCHA_REPORT_TYPES = {
+    "bug",
+    "account",
+    "content",
+    "missing_pages",
+    "wrong_order",
+    "wrong_chapter",
+    "translation",
+    "other",
+}
 
 
 def _enforce_report_submit_limits(request: Request, user_id: str) -> None:
@@ -80,6 +91,9 @@ async def create_report(
     db=Depends(get_supabase),
 ):
     """Create a report/support ticket."""
+    if data.report_type.value in RECAPTCHA_REPORT_TYPES:
+        await enforce_recaptcha(request, data.recaptcha_token)
+
     _enforce_report_submit_limits(request, user["id"])
 
     target_key = hash_value(

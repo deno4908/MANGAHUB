@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { AlertTriangle, Send, CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { reportApi } from '@/lib/api';
+import ReCaptchaV2, { isRecaptchaConfigured, type ReCaptchaV2Handle } from '@/components/security/ReCaptchaV2';
 
 const reportTypes = [
   { value: 'missing_pages', label: 'Thiếu trang / Hình bị lỗi' },
@@ -17,14 +18,21 @@ const ReportPage = () => {
   const [chapterNumber, setChapterNumber] = useState('');
   const [reportType, setReportType] = useState('');
   const [description, setDescription] = useState('');
+  const [captchaToken, setCaptchaToken] = useState('');
   const [submitted, setSubmitted] = useState(false);
   const [loading, setLoading] = useState(false);
+  const captchaRef = useRef<ReCaptchaV2Handle>(null);
+  const captchaRequired = isRecaptchaConfigured();
 
-  const canSubmit = mangaTitle.trim() && chapterNumber.trim() && reportType && description.trim() && !loading;
+  const canSubmit = mangaTitle.trim() && chapterNumber.trim() && reportType && description.trim() && !loading && (!captchaRequired || Boolean(captchaToken));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canSubmit) return;
+    if (captchaRequired && !captchaToken) {
+      toast.error('Vui lòng xác minh reCAPTCHA trước khi gửi báo lỗi.');
+      return;
+    }
     setLoading(true);
     try {
       await reportApi.create({
@@ -32,12 +40,14 @@ const ReportPage = () => {
         target_id: `${mangaTitle}:ch${chapterNumber}`,
         title: `${mangaTitle} - Chương ${chapterNumber}`,
         description,
+        recaptcha_token: captchaToken,
       });
       setSubmitted(true);
       toast.success('Báo lỗi đã được gửi thành công!');
     } catch (err: any) {
       toast.error(err.message || 'Không thể gửi báo lỗi. Vui lòng thử lại.');
     } finally {
+      captchaRef.current?.reset();
       setLoading(false);
     }
   };
@@ -57,7 +67,7 @@ const ReportPage = () => {
           <p className="text-sm text-muted-foreground mb-6 max-w-sm">
             Báo lỗi của bạn đã được ghi nhận. Chúng tôi sẽ xử lý trong thời gian sớm nhất.
           </p>
-          <button onClick={() => { setSubmitted(false); setMangaTitle(''); setChapterNumber(''); setReportType(''); setDescription(''); }}
+          <button onClick={() => { setSubmitted(false); setMangaTitle(''); setChapterNumber(''); setReportType(''); setDescription(''); setCaptchaToken(''); }}
             className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:opacity-90 transition-opacity">
             Gửi báo lỗi khác
           </button>
@@ -127,6 +137,8 @@ const ReportPage = () => {
             rows={4}
             className="w-full px-3 py-2 rounded-lg bg-muted border border-border text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 resize-none" />
         </div>
+
+        <ReCaptchaV2 ref={captchaRef} onTokenChange={setCaptchaToken} />
 
         <button type="submit" disabled={!canSubmit}
           className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed">

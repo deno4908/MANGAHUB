@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Send, AlertTriangle, HelpCircle, Bug, MessageSquare, CheckCircle2 } from 'lucide-react';
@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 import { z } from 'zod';
 import { reportApi } from '@/lib/api';
 import { useUserStore } from '@/store/userStore';
+import ReCaptchaV2, { isRecaptchaConfigured, type ReCaptchaV2Handle } from '@/components/security/ReCaptchaV2';
 
 const ticketSchema = z.object({
   category: z.enum(['bug', 'account', 'content', 'other'], { required_error: 'Chọn loại vấn đề' }),
@@ -29,6 +30,9 @@ const SupportPage = () => {
   const [errors, setErrors] = useState<Partial<Record<keyof TicketForm, string>>>({});
   const [submitted, setSubmitted] = useState(false);
   const [sending, setSending] = useState(false);
+  const [captchaToken, setCaptchaToken] = useState('');
+  const captchaRef = useRef<ReCaptchaV2Handle>(null);
+  const captchaRequired = isRecaptchaConfigured();
 
   const updateField = <K extends keyof TicketForm>(key: K, value: TicketForm[K]) => {
     setForm(prev => ({ ...prev, [key]: value }));
@@ -47,12 +51,17 @@ const SupportPage = () => {
       setErrors(fieldErrors);
       return;
     }
+    if (captchaRequired && !captchaToken) {
+      toast.error('Vui lòng xác minh reCAPTCHA trước khi gửi ticket.');
+      return;
+    }
     setSending(true);
     try {
       const response = await reportApi.create({
         report_type: result.data.category,
         title: result.data.subject,
         description: `[Email: ${result.data.email}]\n${result.data.description}`,
+        recaptcha_token: captchaToken,
       });
       setSubmitted(true);
       const emailStatus = response?.support_email?.status;
@@ -70,6 +79,7 @@ const SupportPage = () => {
     } catch (err: any) {
       toast.error(err.message || 'Không thể gửi ticket. Vui lòng thử lại.');
     } finally {
+      captchaRef.current?.reset();
       setSending(false);
     }
   };
@@ -116,7 +126,7 @@ const SupportPage = () => {
             Chúng tôi sẽ phản hồi qua email trong vòng 24 giờ. Cảm ơn bạn đã báo cáo.
           </p>
           <button
-            onClick={() => { setSubmitted(false); setForm({}); setErrors({}); }}
+            onClick={() => { setSubmitted(false); setForm({}); setErrors({}); setCaptchaToken(''); }}
             className="px-5 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:opacity-90 transition-opacity"
           >
             Gửi ticket mới
@@ -212,10 +222,12 @@ const SupportPage = () => {
             </div>
           </div>
 
+          <ReCaptchaV2 ref={captchaRef} onTokenChange={setCaptchaToken} />
+
           {/* Submit */}
           <button
             type="submit"
-            disabled={sending}
+            disabled={sending || (captchaRequired && !captchaToken)}
             className="flex items-center justify-center gap-2 w-full sm:w-auto px-6 py-2.5 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
           >
             {sending ? (

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Mail, ArrowLeft } from "lucide-react";
@@ -7,22 +7,31 @@ import { Input } from "@/components/ui/input";
 import { authApi } from "@/lib/api";
 import { toast } from "sonner";
 import BrandLogo from "@/components/manga/BrandLogo";
+import ReCaptchaV2, { isRecaptchaConfigured, type ReCaptchaV2Handle } from "@/components/security/ReCaptchaV2";
 
 const ForgotPasswordPage = () => {
   const [email, setEmail] = useState("");
+  const [captchaToken, setCaptchaToken] = useState("");
   const [loading, setLoading] = useState(false);
+  const captchaRef = useRef<ReCaptchaV2Handle>(null);
+  const captchaRequired = isRecaptchaConfigured();
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (captchaRequired && !captchaToken) {
+      toast.error("Vui lòng xác minh reCAPTCHA trước khi gửi.");
+      return;
+    }
     setLoading(true);
     try {
-      await authApi.forgotPassword(email);
+      await authApi.forgotPassword(email, captchaToken);
       toast.success("Đã gửi mã xác minh tới email của bạn!");
       navigate(`/auth/callback?email=${encodeURIComponent(email)}`);
     } catch (err: any) {
       toast.error(err.message || "Không thể gửi mã. Vui lòng thử lại.");
     } finally {
+      captchaRef.current?.reset();
       setLoading(false);
     }
   };
@@ -65,7 +74,9 @@ const ForgotPasswordPage = () => {
                   </div>
                 </div>
 
-                <Button type="submit" className="w-full h-11 font-bold" disabled={loading}>
+                <ReCaptchaV2 ref={captchaRef} onTokenChange={setCaptchaToken} />
+
+                <Button type="submit" className="w-full h-11 font-bold" disabled={loading || (captchaRequired && !captchaToken)}>
                   {loading ? (
                     <span className="flex items-center gap-2">
                       <span className="w-4 h-4 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />

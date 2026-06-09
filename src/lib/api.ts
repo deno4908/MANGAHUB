@@ -807,14 +807,21 @@ export const authApi = {
     password: string,
     username: string,
     displayName?: string,
+    recaptchaToken?: string,
   ) => {
     const hashed = await hashPassword(password, email);
     return auth<any>("/auth/register", {
       method: "POST",
-      body: JSON.stringify({ email, password: hashed, username, displayName }),
+      body: JSON.stringify({
+        email,
+        password: hashed,
+        username,
+        displayName,
+        recaptcha_token: recaptchaToken || "",
+      }),
     });
   },
-  login: async (email: string, password: string) => {
+  login: async (email: string, password: string, recaptchaToken?: string) => {
     const hashed = await hashPassword(password, email);
     const legacyPbkdf2Hash = await hashPasswordV3(password);
     const legacyHash = await hashPasswordLegacy(password);
@@ -825,6 +832,7 @@ export const authApi = {
         password: hashed,
         password_legacy: legacyPbkdf2Hash,
         legacy_password: legacyHash,
+        recaptcha_token: recaptchaToken || "",
       }),
     });
     if (data.session) {
@@ -839,10 +847,10 @@ export const authApi = {
     }),
   getMe: () => auth<any>("/auth/me"),
   ping: () => auth<any>("/auth/ping"),
-  forgotPassword: (email: string) =>
+  forgotPassword: (email: string, recaptchaToken?: string) =>
     auth<any>("/auth/forgot-password", {
       method: "POST",
-      body: JSON.stringify({ email }),
+      body: JSON.stringify({ email, recaptcha_token: recaptchaToken || "" }),
     }),
   verifyOtp: (token: string, type = "email") =>
     auth<any>("/auth/verify-otp", {
@@ -1075,6 +1083,7 @@ export const reportApi = {
     target_id?: string;
     title: string;
     description: string;
+    recaptcha_token?: string;
   }) =>
     api<any>("/api/reports/", { method: "POST", body: JSON.stringify(data) }),
   getOwn: () => api<any>("/api/reports/"),

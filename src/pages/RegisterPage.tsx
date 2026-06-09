@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { Eye, EyeOff, Mail, Lock, User, CheckCircle2, Circle } from "lucide-react";
@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import { authApi } from "@/lib/api";
 import BrandLogo from "@/components/manga/BrandLogo";
+import ReCaptchaV2, { isRecaptchaConfigured, type ReCaptchaV2Handle } from "@/components/security/ReCaptchaV2";
 
 const RegisterPage = () => {
   const [name, setName] = useState("");
@@ -14,7 +15,10 @@ const RegisterPage = () => {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [captchaToken, setCaptchaToken] = useState("");
   const [loading, setLoading] = useState(false);
+  const captchaRef = useRef<ReCaptchaV2Handle>(null);
+  const captchaRequired = isRecaptchaConfigured();
   const { toast } = useToast();
   const navigate = useNavigate();
   const hasUsernameWhitespace = /\s/.test(name);
@@ -47,7 +51,8 @@ const RegisterPage = () => {
     isUsernameValid &&
     email.trim().length > 0 &&
     isPasswordStrong &&
-    isPasswordMatch;
+    isPasswordMatch &&
+    (!captchaRequired || Boolean(captchaToken));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -75,9 +80,18 @@ const RegisterPage = () => {
       return;
     }
 
+    if (captchaRequired && !captchaToken) {
+      toast({
+        title: "Thiếu reCAPTCHA",
+        description: "Vui lòng xác minh bạn không phải robot.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setLoading(true);
     try {
-      await authApi.register(email, password, name, name);
+      await authApi.register(email, password, name, name, captchaToken);
       toast({
         title: "Đăng ký thành công! 🎉",
         description: "Kiểm tra email để xác nhận tài khoản, sau đó đăng nhập.",
@@ -90,6 +104,7 @@ const RegisterPage = () => {
         variant: "destructive",
       });
     } finally {
+      captchaRef.current?.reset();
       setLoading(false);
     }
   };
@@ -292,6 +307,8 @@ const RegisterPage = () => {
                 )}
               </AnimatePresence>
             </div>
+
+            <ReCaptchaV2 ref={captchaRef} onTokenChange={setCaptchaToken} />
 
             <Button type="submit" className="w-full h-11 font-bold" disabled={!canSubmit}>
               {loading ? (

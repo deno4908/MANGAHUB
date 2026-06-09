@@ -18,8 +18,8 @@ interface UserStore {
   hasCheckedSession: boolean;
 
   // Auth
-  login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
-  register: (email: string, password: string, username: string) => Promise<{ success: boolean; error?: string }>;
+  login: (email: string, password: string, recaptchaToken?: string) => Promise<{ success: boolean; error?: string }>;
+  register: (email: string, password: string, username: string, recaptchaToken?: string) => Promise<{ success: boolean; error?: string }>;
   logout: (scope?: 'local' | 'global' | 'others') => void;
   loadUser: (options?: { force?: boolean }) => Promise<void>;
 
@@ -74,9 +74,9 @@ export const useUserStore = create<UserStore>((set, get) => ({
   isLoading: false,
   hasCheckedSession: false,
 
-  login: async (email, password) => {
+  login: async (email, password, recaptchaToken) => {
     try {
-      const data = await authApi.login(email, password);
+      const data = await authApi.login(email, password, recaptchaToken);
       if (data.profile) {
         set({ user: mapProfile(data.profile), isLoggedIn: true, hasCheckedSession: true });
         get().fetchNotifications();
@@ -88,9 +88,9 @@ export const useUserStore = create<UserStore>((set, get) => ({
     }
   },
 
-  register: async (email, password, username) => {
+  register: async (email, password, username, recaptchaToken) => {
     try {
-      const data = await authApi.register(email, password, username);
+      const data = await authApi.register(email, password, username, undefined, recaptchaToken);
       return { success: true };
     } catch (e: any) {
       return { success: false, error: e.message };

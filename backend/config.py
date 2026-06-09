@@ -51,6 +51,15 @@ class Config:
     # Auth
     EMAIL_VERIFY_TIMEOUT_MINUTES: int = int(os.getenv("EMAIL_VERIFY_TIMEOUT_MINUTES", "15"))
 
+    # Google reCAPTCHA v2
+    RECAPTCHA_SECRET_KEY: str = os.getenv("RECAPTCHA_SECRET_KEY", "")
+    RECAPTCHA_REQUIRED: bool = _env_bool("RECAPTCHA_REQUIRED", bool(RECAPTCHA_SECRET_KEY))
+    RECAPTCHA_VERIFY_URL: str = os.getenv(
+        "RECAPTCHA_VERIFY_URL",
+        "https://www.google.com/recaptcha/api/siteverify",
+    )
+    RECAPTCHA_TIMEOUT_SECONDS: int = int(os.getenv("RECAPTCHA_TIMEOUT_SECONDS", "5"))
+
     # Support email / SMTP
     SUPPORT_EMAIL: str = os.getenv("SUPPORT_EMAIL", "cskh.mangahub@gmail.com")
     SMTP_HOST: str = os.getenv("SMTP_HOST") or os.getenv("MAIL_SERVER") or os.getenv("EMAIL_HOST", "")

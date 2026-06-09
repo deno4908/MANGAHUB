@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Eye, EyeOff, Mail, Lock } from "lucide-react";
@@ -7,21 +7,33 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import { useUserStore } from "@/store/userStore";
 import BrandLogo from "@/components/manga/BrandLogo";
+import ReCaptchaV2, { isRecaptchaConfigured, type ReCaptchaV2Handle } from "@/components/security/ReCaptchaV2";
 
 const LoginPage = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [captchaToken, setCaptchaToken] = useState("");
   const [loading, setLoading] = useState(false);
+  const captchaRef = useRef<ReCaptchaV2Handle>(null);
+  const captchaRequired = isRecaptchaConfigured();
   const { toast } = useToast();
   const navigate = useNavigate();
   const login = useUserStore(s => s.login);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (captchaRequired && !captchaToken) {
+      toast({
+        title: "Thiếu reCAPTCHA",
+        description: "Vui lòng xác minh bạn không phải robot.",
+        variant: "destructive",
+      });
+      return;
+    }
     setLoading(true);
     try {
-      const result = await login(email, password);
+      const result = await login(email, password, captchaToken);
       if (result.success) {
         toast({ title: "Đăng nhập thành công!", description: "Chào mừng bạn trở lại." });
         navigate("/");
@@ -39,6 +51,7 @@ const LoginPage = () => {
         variant: "destructive",
       });
     } finally {
+      captchaRef.current?.reset();
       setLoading(false);
     }
   };
@@ -102,7 +115,9 @@ const LoginPage = () => {
               </div>
             </div>
 
-            <Button type="submit" className="w-full h-11 font-bold" disabled={loading}>
+            <ReCaptchaV2 ref={captchaRef} onTokenChange={setCaptchaToken} />
+
+            <Button type="submit" className="w-full h-11 font-bold" disabled={loading || (captchaRequired && !captchaToken)}>
               {loading ? (
                 <span className="flex items-center gap-2">
                   <span className="w-4 h-4 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />

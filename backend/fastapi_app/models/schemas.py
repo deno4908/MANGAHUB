@@ -188,6 +188,7 @@ class ReportCreate(BaseModel):
     target_id: Optional[str] = None
     title: str = Field(..., min_length=1, max_length=255)
     description: str = Field(..., min_length=1, max_length=5000)
+    recaptcha_token: Optional[str] = Field(default=None, max_length=4096)
 
 
 # ============================================================

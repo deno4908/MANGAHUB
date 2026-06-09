@@ -5,6 +5,8 @@ Uses Supabase Auth under the hood.
 import re
 import base64
 import json
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from flask import Blueprint, request, jsonify, g, make_response
 from supabase import create_client
@@ -164,6 +166,64 @@ def _password_candidates(data: dict, field_name: str) -> list[str]:
         if normalized and normalized not in candidates:
             candidates.append(normalized)
     return candidates
+
+
+def _client_ip() -> str:
+    forwarded = str(request.headers.get("X-Forwarded-For", "") or "").split(",")[0].strip()
+    return forwarded or str(request.remote_addr or "").strip()
+
+
+def _verify_recaptcha_token(token: str) -> tuple[bool, str]:
+    secret = str(getattr(config, "RECAPTCHA_SECRET_KEY", "") or "").strip()
+    required = bool(getattr(config, "RECAPTCHA_REQUIRED", False))
+
+    if not secret:
+        if required:
+            return False, "reCAPTCHA chưa được cấu hình trên máy chủ"
+        return True, ""
+
+    response_token = str(token or "").strip()
+    if not response_token:
+        return False, "Vui lòng xác minh reCAPTCHA"
+
+    payload = {
+        "secret": secret,
+        "response": response_token,
+    }
+    remote_ip = _client_ip()
+    if remote_ip:
+        payload["remoteip"] = remote_ip
+
+    try:
+        encoded = urllib.parse.urlencode(payload).encode("utf-8")
+        req = urllib.request.Request(
+            str(getattr(config, "RECAPTCHA_VERIFY_URL", "") or "https://www.google.com/recaptcha/api/siteverify"),
+            data=encoded,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        timeout = max(1, int(getattr(config, "RECAPTCHA_TIMEOUT_SECONDS", 5) or 5))
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return False, "Không thể xác minh reCAPTCHA, vui lòng thử lại"
+
+    if result.get("success") is True:
+        return True, ""
+
+    error_codes = result.get("error-codes") or []
+    if "timeout-or-duplicate" in error_codes:
+        return False, "reCAPTCHA đã hết hạn, vui lòng xác minh lại"
+    return False, "Xác minh reCAPTCHA thất bại"
+
+
+def _require_recaptcha(data: dict):
+    return _verify_recaptcha_token(
+        data.get("recaptcha_token")
+        or data.get("captcha_token")
+        or data.get("g-recaptcha-response")
+        or ""
+    )
 
 
 def _now_iso() -> str:
@@ -481,6 +541,9 @@ def register():
     password = _normalize_password_hash(data.get("password", ""))
     username = data.get("username", "").strip()
     display_name = data.get("displayName", username)
+    captcha_ok, captcha_error = _require_recaptcha(data)
+    if not captcha_ok:
+        return jsonify({"error": captcha_error}), 400
 
     if not email or not data.get("password", "") or not username:
         return jsonify({"error": "Email, password và username là bắt buộc"}), 400
@@ -567,6 +630,9 @@ def login():
     email = _normalize_email(data.get("email", ""))
     raw_password = data.get("password", "")
     password_candidates = _password_candidates(data, "password")
+    captcha_ok, captcha_error = _require_recaptcha(data)
+    if not captcha_ok:
+        return jsonify({"error": captcha_error}), 400
 
     if not email or not raw_password:
         return jsonify({"error": "Email và password là bắt buộc"}), 400
@@ -683,6 +749,9 @@ def forgot_password():
     """Send password reset email."""
     data = request.get_json(silent=True) or {}
     email = data.get("email", "").strip()
+    captcha_ok, captcha_error = _require_recaptcha(data)
+    if not captcha_ok:
+        return jsonify({"error": captcha_error}), 400
 
     if not email:
         return jsonify({"error": "Email là bắt buộc"}), 400
