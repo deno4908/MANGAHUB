@@ -334,13 +334,21 @@ const ANNOUNCEMENT_DISMISS_KEY_PREFIX = 'mb:home-announcement-dismissed:';
 // Proxy URL = primary (local disk cache after startup warmup = instant)
 const toMangaDexCoverProxy = (coverUrl?: string, mangaId?: string) => {
   const raw = String(coverUrl || '').trim();
+  try {
+    const parsed = new URL(raw, API_BASE);
+    if (parsed.pathname === '/api/images/img') {
+      return /^https?:\/\//i.test(raw) ? raw : `${API_BASE}${raw}`;
+    }
+  } catch {
+    // Fall through to the regular cover handling.
+  }
   if (raw.startsWith('http://') || raw.startsWith('https://')) {
     return `${API_BASE}/api/images/img?url=${encodeURIComponent(raw)}`;
   }
   return DEFAULT_CARD_COVER_FALLBACK;
 };
 
-// Direct CDN URL = fallback (fast if proxy fails)
+// Direct CDN URL kept only for metadata/debug. Cards should prefer the local proxy.
 const toMangaDexCoverDirect = (coverUrl?: string): string => {
   const raw = String(coverUrl || '').trim();
   if (raw.startsWith('https://') || raw.startsWith('http://')) return raw;
@@ -1212,10 +1220,10 @@ const Index = () => {
         continue;
       }
       const cover = rawThumb
-        ? thumbUrl(rawThumb, slug)
+        ? (isMdx ? toMangaDexCoverProxy(rawThumb, slug) : thumbUrl(rawThumb, slug))
         : DEFAULT_CARD_COVER_FALLBACK;
       const coverProxy = rawThumb
-        ? (isMdx ? rawThumb : (thumbFallbackUrl(rawThumb, slug) || rawThumb || DEFAULT_CARD_COVER_FALLBACK))
+        ? (isMdx ? DEFAULT_CARD_COVER_FALLBACK : (thumbFallbackUrl(rawThumb, slug) || rawThumb || DEFAULT_CARD_COVER_FALLBACK))
         : DEFAULT_CARD_COVER_FALLBACK;
 
       overlays.push({
@@ -1665,10 +1673,10 @@ const Index = () => {
       const rawThumb = toAbsoluteThumbUrl(String(row.thumb || '').trim());
       const isMdx = Boolean(detailId);
       const cover = rawThumb
-        ? thumbUrl(rawThumb, detailId || slug)
+        ? (isMdx ? toMangaDexCoverProxy(rawThumb, detailId || slug) : thumbUrl(rawThumb, detailId || slug))
         : (base?.cover || DEFAULT_CARD_COVER_FALLBACK);
       const coverProxy = rawThumb
-        ? (isMdx ? toMangaDexCoverDirect(rawThumb) || rawThumb : thumbFallbackUrl(rawThumb, slug) || rawThumb)
+        ? (isMdx ? DEFAULT_CARD_COVER_FALLBACK : thumbFallbackUrl(rawThumb, slug) || rawThumb)
         : (base?.coverProxy || DEFAULT_CARD_COVER_FALLBACK);
       const rowGenres = Array.isArray(row.genres)
         ? row.genres.map((genre) => repairMojibakeText(genre).trim()).filter(Boolean)

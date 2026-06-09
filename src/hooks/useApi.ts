@@ -110,7 +110,7 @@ function resolveThumbSources(
     if (proxyTarget) {
       return {
         primary: toAbsoluteApiUrl(raw),
-        fallback: proxyTarget,
+        fallback: isMangaDexThumbUrl(proxyTarget) ? LOCAL_COVER_FALLBACK : proxyTarget,
       };
     }
 
@@ -118,7 +118,7 @@ function resolveThumbSources(
       if (isMangaDexThumbUrl(raw)) {
         return {
           primary: `${API_BASE}/api/images/img?url=${encodeURIComponent(raw)}`,
-          fallback: raw,
+          fallback: LOCAL_COVER_FALLBACK,
         };
       }
       return { primary: raw, fallback: LOCAL_COVER_FALLBACK };
@@ -129,7 +129,7 @@ function resolveThumbSources(
       if (isMangaDexThumbUrl(full)) {
         return {
           primary: `${API_BASE}/api/images/img?url=${encodeURIComponent(full)}`,
-          fallback: full,
+          fallback: LOCAL_COVER_FALLBACK,
         };
       }
       return { primary: full, fallback: LOCAL_COVER_FALLBACK };

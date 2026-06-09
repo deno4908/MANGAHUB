@@ -13,6 +13,7 @@ import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
@@ -1428,9 +1429,14 @@ async def _warmup_mangadex_catalog() -> None:
         except Exception:
             max_cover_mb = 8
         max_cover_bytes = max(1, min(32, max_cover_mb)) * 1024 * 1024
+        cover_cache_version = (
+            str(os.getenv("MANGADEX_IMAGE_CACHE_VERSION", "2") or "2").strip() or "2"
+        )
 
         async def _cache_one(url: str) -> None:
-            h = hashlib.md5(url.encode()).hexdigest()
+            h = hashlib.md5(
+                f"mangadex-cover-v{cover_cache_version}:{url}".encode()
+            ).hexdigest()
             import os
             ext = os.path.splitext(url.split("?")[0])[1] or ".jpg"
             path = CACHE_DIR / f"{h}{ext}"
@@ -4028,7 +4034,7 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
 
 @router.get("/mangadex-cover/{manga_id}")
 async def mangadex_cover(manga_id: str):
-    """Resolve MangaDex cover image URL by manga ID and redirect to it."""
+    """Resolve MangaDex cover image URL by manga ID and redirect through the local proxy."""
     manga_id = manga_id.strip()
     if not manga_id or len(manga_id) > 64:
         raise HTTPException(status_code=400, detail="Invalid manga ID")
@@ -4037,7 +4043,10 @@ async def mangadex_cover(manga_id: str):
     cache_key = f"mangadex:cover-url:{manga_id}"
     cached = cache.get(cache_key)
     if cached:
-        return RedirectResponse(url=cached, status_code=302)
+        return RedirectResponse(
+            url=f"/api/images/img?url={quote(str(cached), safe='')}",
+            status_code=302,
+        )
 
     # Fetch from MangaDex API
     try:
@@ -4050,7 +4059,7 @@ async def mangadex_cover(manga_id: str):
 
     # Cache for 1 hour
     cache.set(cache_key, cover_url, ttl=3600)
-    return RedirectResponse(url=cover_url, status_code=302)
+    return RedirectResponse(url=f"/api/images/img?url={quote(cover_url, safe='')}", status_code=302)
 
 
 @router.get("/image-url")

@@ -50,6 +50,41 @@ type ProfileCustomList = {
   updatedAt: string;
 };
 
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const LOCAL_COVER_FALLBACK = '/no-cover.svg';
+
+const isMangaDexImageUrl = (value?: string) => {
+  const raw = String(value || '').trim();
+  if (!/^https?:\/\//i.test(raw)) return false;
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host.endsWith('uploads.mangadex.org') || host.endsWith('mangadex.network');
+  } catch {
+    return false;
+  }
+};
+
+const normalizeProfileCoverSources = (primary?: string, fallback?: string) => {
+  const rawPrimary = String(primary || '').trim();
+  const rawFallback = String(fallback || '').trim();
+  if (isMangaDexImageUrl(rawPrimary)) {
+    return {
+      primary: `${API_BASE}/api/images/img?url=${encodeURIComponent(rawPrimary)}`,
+      fallback: LOCAL_COVER_FALLBACK,
+    };
+  }
+  if (!rawPrimary && isMangaDexImageUrl(rawFallback)) {
+    return {
+      primary: `${API_BASE}/api/images/img?url=${encodeURIComponent(rawFallback)}`,
+      fallback: LOCAL_COVER_FALLBACK,
+    };
+  }
+  return {
+    primary: rawPrimary,
+    fallback: isMangaDexImageUrl(rawFallback) ? LOCAL_COVER_FALLBACK : rawFallback,
+  };
+};
+
 const normalizeProfileComment = (c: any) => ({
   id: String(c?.id || ''),
   manga_slug: String(c?.manga_slug || c?.mangaSlug || ''),
@@ -95,13 +130,17 @@ const toProfileListItem = (item: any, fallbackTitle = ''): ProfileListItem | nul
     fallbackTitle ||
     formatMangaSlugLabel(slug)
   ).trim();
+  const coverSources = normalizeProfileCoverSources(
+    item?.manga_thumb || item?.thumb || item?.cover || item?.cover_url,
+    item?.manga_thumb_fallback || item?.coverProxy,
+  );
 
   return {
     ...item,
     manga_slug: slug,
     manga_title: title || formatMangaSlugLabel(slug),
-    manga_thumb: String(item?.manga_thumb || item?.thumb || item?.cover || item?.cover_url || '').trim(),
-    manga_thumb_fallback: String(item?.manga_thumb_fallback || item?.coverProxy || '').trim(),
+    manga_thumb: coverSources.primary,
+    manga_thumb_fallback: coverSources.fallback,
     created_at: String(item?.created_at || item?.createdAt || item?.updated_at || item?.read_at || item?.last_read_at || '').trim(),
     updated_at: String(item?.updated_at || item?.updatedAt || item?.created_at || item?.read_at || '').trim(),
     read_at: String(item?.read_at || item?.readAt || '').trim(),

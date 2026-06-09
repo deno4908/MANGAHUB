@@ -101,6 +101,9 @@ IMAGE_CACHE_PRUNE_COOLDOWN_SECONDS = _env_float(
 )
 MAX_IMAGE_BYTES = _env_int("IMAGE_PROXY_MAX_MB", 16, minimum=1) * 1024 * 1024
 IMAGE_PROXY_CURL_WORKERS = _env_int("IMAGE_PROXY_CURL_WORKERS", 8, minimum=1, maximum=32)
+MANGADEX_IMAGE_CACHE_VERSION = (
+    str(os.getenv("MANGADEX_IMAGE_CACHE_VERSION", "2") or "2").strip() or "2"
+)
 _mangadex_image_semaphore = asyncio.Semaphore(MANGADEX_IMAGE_UPSTREAM_CONCURRENCY)
 _curl_executor = ThreadPoolExecutor(max_workers=IMAGE_PROXY_CURL_WORKERS)
 
@@ -189,7 +192,14 @@ def _reset_curl_session() -> None:
 
 
 def _cache_key(url: str) -> str:
-    h = hashlib.md5(url.encode()).hexdigest()
+    parsed = urlparse(url)
+    host = _normalized_hostname(parsed.hostname)
+    namespace = (
+        f"mangadex-cover-v{MANGADEX_IMAGE_CACHE_VERSION}:"
+        if host == "uploads.mangadex.org" or host.endswith(".mangadex.network")
+        else ""
+    )
+    h = hashlib.md5(f"{namespace}{url}".encode()).hexdigest()
     ext = os.path.splitext(url.split("?")[0])[1] or ".jpg"
     return f"{h}{ext}"
 

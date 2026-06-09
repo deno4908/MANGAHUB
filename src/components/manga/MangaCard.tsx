@@ -22,7 +22,50 @@ const statusClass: Record<string, string> = {
   hiatus: 'tag-hiatus',
   cancelled: 'tag-cancelled',
 };
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const DEFAULT_CARD_COVER_FALLBACK = '/no-cover.svg';
+
+const isImageProxyUrl = (value: string): boolean => {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+  try {
+    return new URL(raw, API_BASE).pathname === '/api/images/img';
+  } catch {
+    return false;
+  }
+};
+
+const isMangaDexImageUrl = (value: string): boolean => {
+  const raw = String(value || '').trim();
+  if (!/^https?:\/\//i.test(raw)) return false;
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host.endsWith('uploads.mangadex.org') || host.endsWith('mangadex.network');
+  } catch {
+    return false;
+  }
+};
+
+const toMangaDexProxyImageUrl = (value: string): string => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (isImageProxyUrl(raw)) return raw;
+  if (!isMangaDexImageUrl(raw)) return '';
+  return `${API_BASE}/api/images/img?url=${encodeURIComponent(raw)}`;
+};
+
+const resolveMangaDexCardCover = (cover?: string, fallback?: string): string => {
+  const candidates = [cover, fallback].map((value) => String(value || '').trim()).filter(Boolean);
+  const proxied = candidates.find(isImageProxyUrl);
+  if (proxied) return proxied;
+
+  for (const candidate of candidates) {
+    const proxiedCandidate = toMangaDexProxyImageUrl(candidate);
+    if (proxiedCandidate) return proxiedCandidate;
+  }
+
+  return candidates[0] || DEFAULT_CARD_COVER_FALLBACK;
+};
 
 const formatCompactViews = (value: number): string => {
   const views = Math.max(0, Math.floor(Number(value) || 0));
@@ -176,9 +219,11 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
   const chapterLabel = chapterDisplay(lastChapter, manga.status, isMangaDexItem);
   const chapterMetaLabel = chapterTime ? `${chapterLabel} - ${chapterTime}` : chapterLabel;
   const safeCoverFallback = String(manga.coverProxy || '').trim() || DEFAULT_CARD_COVER_FALLBACK;
-  const coverSrc = manga.cover;
-  const coverFallbackSrc = safeCoverFallback;
-  const coverFallbackDelayMs = isMangaDexItem ? 2600 : undefined;
+  const coverSrc = isMangaDexItem
+    ? resolveMangaDexCardCover(manga.cover, manga.coverProxy)
+    : manga.cover;
+  const coverFallbackSrc = isMangaDexItem ? DEFAULT_CARD_COVER_FALLBACK : safeCoverFallback;
+  const coverFallbackDelayMs = isMangaDexItem ? 4500 : undefined;
   const detailLinkState = { previewManga: manga };
   const detailPath = getMangaDetailPath(manga.id);
   const ratingLabel = Number(manga.rating).toFixed(1);

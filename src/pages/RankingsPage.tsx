@@ -323,8 +323,8 @@ function getTrendingImageSources(item: { slug?: string; thumb?: string }) {
     if (/^https?:\/\//i.test(rawThumb)) {
       if (isMangaDexCoverUrl(rawThumb)) {
         return {
-          src: rawThumb,
-          fallbackSrc: toMangaDexCoverProxy(rawThumb),
+          src: toMangaDexCoverProxy(rawThumb),
+          fallbackSrc: DEFAULT_TRENDING_THUMB_FALLBACK,
         };
       }
       return { src: rawThumb, fallbackSrc: DEFAULT_TRENDING_THUMB_FALLBACK };
@@ -344,6 +344,14 @@ function getTrendingImageSources(item: { slug?: string; thumb?: string }) {
 
 const toMangaDexCoverProxy = (coverUrl?: string): string => {
   const raw = String(coverUrl || "").trim();
+  try {
+    const parsed = new URL(raw, API_BASE);
+    if (parsed.pathname === "/api/images/img") {
+      return /^https?:\/\//i.test(raw) ? raw : `${API_BASE}${raw}`;
+    }
+  } catch {
+    // Fall through to the regular cover handling.
+  }
   if (raw.startsWith("http://") || raw.startsWith("https://")) {
     return `${API_BASE}/api/images/img?url=${encodeURIComponent(raw)}`;
   }
@@ -1092,10 +1100,10 @@ const RankingsPage = () => {
         continue;
       }
       const cover = rawThumb
-        ? thumbUrl(rawThumb, slug)
+        ? (isMdx ? toMangaDexCoverProxy(rawThumb) : thumbUrl(rawThumb, slug))
         : DEFAULT_CARD_COVER_FALLBACK;
       const coverProxy = rawThumb
-        ? (isMdx ? rawThumb : (thumbFallbackUrl(rawThumb, slug) || rawThumb || DEFAULT_CARD_COVER_FALLBACK))
+        ? (isMdx ? DEFAULT_CARD_COVER_FALLBACK : (thumbFallbackUrl(rawThumb, slug) || rawThumb || DEFAULT_CARD_COVER_FALLBACK))
         : DEFAULT_CARD_COVER_FALLBACK;
 
       overlays.push({

@@ -406,6 +406,14 @@ const toMangaDexCoverDirect = (coverUrl?: string): string => {
 // Proxy URL used as fallback when direct CDN fails
 const toMangaDexCoverProxy = (coverUrl?: string, mangaId?: string): string => {
   const raw = String(coverUrl || '').trim();
+  try {
+    const parsed = new URL(raw, API_BASE);
+    if (parsed.pathname === '/api/images/img') {
+      return /^https?:\/\//i.test(raw) ? raw : `${API_BASE}${raw}`;
+    }
+  } catch {
+    // Fall through to the regular cover handling.
+  }
   if (raw.startsWith('http://') || raw.startsWith('https://')) {
     return `${API_BASE}/api/images/img?url=${encodeURIComponent(raw)}`;
   }
@@ -647,8 +655,8 @@ const getTrendingCoverSources = (item: { slug?: string; thumb?: string }): { cov
 
       if (isMangaDexCoverUrl(rawThumb)) {
         return {
-          cover: rawThumb,
-          coverProxy: toMangaDexCoverProxy(rawThumb, slug),
+          cover: toMangaDexCoverProxy(rawThumb, slug),
+          coverProxy: DEFAULT_CARD_COVER_FALLBACK,
         };
       }
 
@@ -663,9 +671,9 @@ const getTrendingCoverSources = (item: { slug?: string; thumb?: string }): { cov
     const inferredProxyTarget = extractImageProxyTargetUrl(proxiedCover);
 
     return {
-      cover: isMdx ? (toMangaDexCoverDirect(rawThumb) || proxiedCover) : proxiedCover,
+      cover: isMdx ? (toMangaDexCoverProxy(rawThumb, slug) || proxiedCover) : proxiedCover,
       coverProxy: isMdx
-        ? (proxiedCover || inferredProxyTarget || DEFAULT_CARD_COVER_FALLBACK)
+        ? DEFAULT_CARD_COVER_FALLBACK
         : (thumbFallbackUrl(rawThumb, slug) || inferredProxyTarget || DEFAULT_CARD_COVER_FALLBACK),
     };
   }
@@ -2235,16 +2243,15 @@ const BrowseManga = () => {
       }
       const coverDirect = toMangaDexCoverDirect(item.cover_url);
       const coverProxy = toMangaDexCoverProxy(item.cover_url, item.id);
-      // MangaDex CDN is PRIMARY because VPS IPs can be throttled by upstream.
-      // Local proxy remains the fallback/cache path.
+      // Keep MangaDex covers on the local proxy so hotlink placeholders never reach cards.
       return {
         id: String(item.id || '').trim().toLowerCase(),
         title: pickDisplayTitle(item.id, item.title) || 'Chưa có tiêu đề',
         author: item.authors_text || 'MangaDex',
         artist: item.authors_text || 'MangaDex',
         description: '',
-        cover: coverDirect || coverProxy,
-        coverProxy: coverProxy && coverProxy !== coverDirect ? coverProxy : undefined,
+        cover: coverProxy || coverDirect,
+        coverProxy: DEFAULT_CARD_COVER_FALLBACK,
         status: 'ongoing' as const,
         type: 'manga' as const,
         genres: item.genres || [],
@@ -2911,8 +2918,8 @@ const BrowseManga = () => {
               author: repairMojibakeText(item.authors_text) || 'MangaDex',
               artist: repairMojibakeText(item.authors_text) || 'MangaDex',
               description: '',
-              cover: toMangaDexCoverDirect(item.cover_url) || toMangaDexCoverProxy(item.cover_url, detailId),
-              coverProxy: toMangaDexCoverProxy(item.cover_url, detailId) || undefined,
+              cover: toMangaDexCoverProxy(item.cover_url, detailId),
+              coverProxy: DEFAULT_CARD_COVER_FALLBACK,
               status: mapTrendingStatus(String(item.status || 'ongoing')),
               type: 'manga',
               genres: rawGenres,
@@ -3200,12 +3207,12 @@ const BrowseManga = () => {
       }
 
       const cover = rawThumb
-        ? thumbUrl(rawThumb, slug)
+        ? (isMdx ? toMangaDexCoverProxy(rawThumb, slug) : thumbUrl(rawThumb, slug))
         : DEFAULT_CARD_COVER_FALLBACK;
       const coverProxy = rawThumb
         ? (
             isMdx
-              ? (toMangaDexCoverDirect(rawThumb) || DEFAULT_CARD_COVER_FALLBACK)
+              ? DEFAULT_CARD_COVER_FALLBACK
               : (thumbFallbackUrl(rawThumb, slug) || DEFAULT_CARD_COVER_FALLBACK)
           )
         : DEFAULT_CARD_COVER_FALLBACK;
@@ -4126,8 +4133,8 @@ const BrowseManga = () => {
           }
 
           const meta: MangaDexEnrichMeta = {
-            cover: coverUrl ? (toMangaDexCoverDirect(coverUrl) || toMangaDexCoverProxy(coverUrl, detailId)) : undefined,
-            coverProxy: coverUrl ? (toMangaDexCoverProxy(coverUrl, detailId) || undefined) : undefined,
+            cover: coverUrl ? toMangaDexCoverProxy(coverUrl, detailId) : undefined,
+            coverProxy: coverUrl ? DEFAULT_CARD_COVER_FALLBACK : undefined,
             genres,
             tags,
             status,

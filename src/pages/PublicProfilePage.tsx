@@ -82,6 +82,12 @@ const isMangaDexImageUrl = (value: string) => {
 
 const proxyImage = (url: string) => `${API_BASE}/api/images/img?url=${encodeURIComponent(url)}`;
 
+const safeCoverFallback = (value?: string) => {
+  const raw = String(value || '').trim();
+  if (!raw || isMangaDexImageUrl(raw)) return LOCAL_COVER_FALLBACK;
+  return raw;
+};
+
 const resolveCoverSources = (item: PublicActivityItem) => {
   const slug = String(item.manga_slug || '').trim();
   const thumb = String(item.manga_thumb || '').trim();
@@ -90,14 +96,14 @@ const resolveCoverSources = (item: PublicActivityItem) => {
   if (thumb) {
     if (/^https?:\/\//i.test(thumb)) {
       if (isMangaDexImageUrl(thumb)) {
-        return { src: proxyImage(thumb), fallbackSrc: fallback || thumb };
+        return { src: proxyImage(thumb), fallbackSrc: LOCAL_COVER_FALLBACK };
       }
-      return { src: thumb, fallbackSrc: fallback || LOCAL_COVER_FALLBACK };
+      return { src: thumb, fallbackSrc: safeCoverFallback(fallback) };
     }
     if (thumb.startsWith('/api/images/img')) {
-      return { src: `${API_BASE}${thumb}`, fallbackSrc: fallback || LOCAL_COVER_FALLBACK };
+      return { src: `${API_BASE}${thumb}`, fallbackSrc: safeCoverFallback(fallback) };
     }
-    return { src: thumb, fallbackSrc: fallback || LOCAL_COVER_FALLBACK };
+    return { src: thumb, fallbackSrc: safeCoverFallback(fallback) };
   }
 
   const mangaDexId = normalizeMangaDexId(slug);
