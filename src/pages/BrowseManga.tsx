@@ -647,8 +647,8 @@ const getTrendingCoverSources = (item: { slug?: string; thumb?: string }): { cov
 
       if (isMangaDexCoverUrl(rawThumb)) {
         return {
-          cover: thumbUrl(rawThumb, slug),
-          coverProxy: rawThumb,
+          cover: rawThumb,
+          coverProxy: toMangaDexCoverProxy(rawThumb, slug),
         };
       }
 
@@ -663,9 +663,9 @@ const getTrendingCoverSources = (item: { slug?: string; thumb?: string }): { cov
     const inferredProxyTarget = extractImageProxyTargetUrl(proxiedCover);
 
     return {
-      cover: proxiedCover,
+      cover: isMdx ? (toMangaDexCoverDirect(rawThumb) || proxiedCover) : proxiedCover,
       coverProxy: isMdx
-        ? (toMangaDexCoverDirect(rawThumb) || inferredProxyTarget || DEFAULT_CARD_COVER_FALLBACK)
+        ? (proxiedCover || inferredProxyTarget || DEFAULT_CARD_COVER_FALLBACK)
         : (thumbFallbackUrl(rawThumb, slug) || inferredProxyTarget || DEFAULT_CARD_COVER_FALLBACK),
     };
   }
@@ -2235,16 +2235,16 @@ const BrowseManga = () => {
       }
       const coverDirect = toMangaDexCoverDirect(item.cover_url);
       const coverProxy = toMangaDexCoverProxy(item.cover_url, item.id);
-      // Proxy is PRIMARY (local disk cache = instant after startup warmup)
-      // CDN is FALLBACK (in case proxy fails or image not yet cached)
+      // MangaDex CDN is PRIMARY because VPS IPs can be throttled by upstream.
+      // Local proxy remains the fallback/cache path.
       return {
         id: String(item.id || '').trim().toLowerCase(),
         title: pickDisplayTitle(item.id, item.title) || 'Chưa có tiêu đề',
         author: item.authors_text || 'MangaDex',
         artist: item.authors_text || 'MangaDex',
         description: '',
-        cover: coverProxy,                              // primary: local proxy (cached on disk)
-        coverProxy: coverDirect || undefined,           // fallback: direct CDN
+        cover: coverDirect || coverProxy,
+        coverProxy: coverProxy && coverProxy !== coverDirect ? coverProxy : undefined,
         status: 'ongoing' as const,
         type: 'manga' as const,
         genres: item.genres || [],
@@ -2933,8 +2933,8 @@ const BrowseManga = () => {
               author: repairMojibakeText(item.authors_text) || 'MangaDex',
               artist: repairMojibakeText(item.authors_text) || 'MangaDex',
               description: '',
-              cover: toMangaDexCoverProxy(item.cover_url, detailId),
-              coverProxy: toMangaDexCoverDirect(item.cover_url) || undefined,
+              cover: toMangaDexCoverDirect(item.cover_url) || toMangaDexCoverProxy(item.cover_url, detailId),
+              coverProxy: toMangaDexCoverProxy(item.cover_url, detailId) || undefined,
               status: mapTrendingStatus(String(item.status || 'ongoing')),
               type: 'manga',
               genres: rawGenres,
@@ -4148,8 +4148,8 @@ const BrowseManga = () => {
           }
 
           const meta: MangaDexEnrichMeta = {
-            cover: coverUrl ? toMangaDexCoverProxy(coverUrl, detailId) : undefined,
-            coverProxy: coverUrl ? (toMangaDexCoverDirect(coverUrl) || undefined) : undefined,
+            cover: coverUrl ? (toMangaDexCoverDirect(coverUrl) || toMangaDexCoverProxy(coverUrl, detailId)) : undefined,
+            coverProxy: coverUrl ? (toMangaDexCoverProxy(coverUrl, detailId) || undefined) : undefined,
             genres,
             tags,
             status,

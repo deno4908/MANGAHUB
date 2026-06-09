@@ -1,5 +1,5 @@
 """
-Image proxy — caches OTruyen CDN images locally for fast re-reads.
+Image proxy - caches OTruyen CDN images locally for fast re-reads.
 First request: fetches from CDN, saves to disk, returns with cache headers.
 Subsequent requests: served directly from disk cache with ETag support (instant/304).
 """
@@ -44,10 +44,12 @@ _http_client: httpx.AsyncClient | None = None
 _mangadex_http_client: httpx.AsyncClient | None = None
 _curl_executor = ThreadPoolExecutor(max_workers=12)
 _curl_session: Any = None
-_curl_session_lock = threading.Lock()
+_curl_session_lock = threading.RLock()
 _image_cache_prune_lock = threading.Lock()
 _image_cache_prune_running = False
 _last_image_cache_prune_at = 0.0
+_cache_fetch_locks: dict[str, asyncio.Lock] = {}
+_cache_fetch_locks_guard = threading.Lock()
 
 REQUEST_TIMEOUT_SECONDS = 25.0
 REQUEST_CONNECT_TIMEOUT_SECONDS = 10.0
@@ -186,6 +188,49 @@ def _cache_key(url: str) -> str:
     h = hashlib.md5(url.encode()).hexdigest()
     ext = os.path.splitext(url.split("?")[0])[1] or ".jpg"
     return f"{h}{ext}"
+
+
+def _cache_lock_for_key(key: str) -> asyncio.Lock:
+    with _cache_fetch_locks_guard:
+        lock = _cache_fetch_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _cache_fetch_locks[key] = lock
+        return lock
+
+
+def _is_usable_cache_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _remove_broken_cache_file(path: Path) -> None:
+    try:
+        if path.exists() and not _is_usable_cache_file(path):
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _write_cache_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+    )
+    try:
+        with tmp_path.open("wb") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
 
 
 def _header_value(headers: Any, name: str) -> str:
@@ -385,6 +430,39 @@ COMMON_HEADERS = {
 }
 
 
+def _cached_image_response(
+    cached_path: Path,
+    request: Request,
+    *,
+    cache_status: str = "HIT",
+) -> Response | None:
+    if not cached_path.exists():
+        return None
+    if not _is_usable_cache_file(cached_path):
+        _remove_broken_cache_file(cached_path)
+        return None
+
+    try:
+        etag = _etag_for_file(cached_path)
+    except OSError:
+        return None
+
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and if_none_match == etag:
+        return Response(
+            status_code=304,
+            headers={**COMMON_HEADERS, "ETag": etag, "X-Cache": cache_status},
+        )
+
+    ext = cached_path.suffix
+    ct = EXT_CONTENT_TYPE.get(ext, "image/jpeg")
+    return FileResponse(
+        cached_path,
+        media_type=ct,
+        headers={**COMMON_HEADERS, "ETag": etag, "X-Cache": cache_status},
+    )
+
+
 def _normalized_hostname(host: str | None) -> str:
     value = str(host or "").strip().strip(".").lower()
     if not value:
@@ -534,7 +612,7 @@ def _transport_order(url: str) -> list[str]:
     host = (parsed.hostname or "").lower()
     if _is_mangadex_host(host):
         if CurlSession is not None:
-            return ["httpx", "curl_cffi"]
+            return ["curl_cffi", "httpx"]
         return ["httpx"]
     if CurlSession is not None:
         return ["httpx", "curl_cffi"]
@@ -590,42 +668,43 @@ def _fetch_once_curl_sync(url: str) -> tuple[bytes | None, str | None, str, bool
         if validation_error:
             return None, None, validation_error, False
         try:
-            session = _get_curl_session()
-            response = session.get(
-                current_url,
-                headers=_request_headers_for_url(current_url),
-                timeout=REQUEST_TIMEOUT_SECONDS,
-                allow_redirects=False,
-                stream=True,
-            )
+            with _curl_session_lock:
+                session = _get_curl_session()
+                response = session.get(
+                    current_url,
+                    headers=_request_headers_for_url(current_url),
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                    allow_redirects=False,
+                    stream=True,
+                )
+
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("location")
+                    if not location:
+                        _close_response(response)
+                        return None, None, f"HTTP {response.status_code} without redirect target", False
+                    if redirect_count >= MAX_IMAGE_REDIRECTS:
+                        _close_response(response)
+                        return None, None, "Too many image redirects", False
+                    current_url = urljoin(current_url, location)
+                    _close_response(response)
+                    continue
+
+                if response.status_code < 400:
+                    data, content_type, read_error = _read_curl_response_limited(response)
+                    _close_response(response)
+                    if read_error:
+                        return None, None, read_error, False
+                    return data, content_type, "", False
+
+                retryable = response.status_code in {403, 404, 408, 425, 429, 500, 502, 503, 504}
+                if retryable:
+                    _reset_curl_session()
+                _close_response(response)
+                return None, None, f"HTTP {response.status_code}", retryable
         except Exception as error:
             _reset_curl_session()
             return None, None, f"{type(error).__name__}: {error}", True
-
-        if response.status_code in {301, 302, 303, 307, 308}:
-            location = response.headers.get("location")
-            if not location:
-                _close_response(response)
-                return None, None, f"HTTP {response.status_code} without redirect target", False
-            if redirect_count >= MAX_IMAGE_REDIRECTS:
-                _close_response(response)
-                return None, None, "Too many image redirects", False
-            current_url = urljoin(current_url, location)
-            _close_response(response)
-            continue
-
-        if response.status_code < 400:
-            data, content_type, read_error = _read_curl_response_limited(response)
-            _close_response(response)
-            if read_error:
-                return None, None, read_error, False
-            return data, content_type, "", False
-
-        retryable = response.status_code in {403, 404, 408, 425, 429, 500, 502, 503, 504}
-        if retryable:
-            _reset_curl_session()
-        _close_response(response)
-        return None, None, f"HTTP {response.status_code}", retryable
 
     return None, None, "Too many image redirects", False
 
@@ -694,26 +773,23 @@ async def proxy_image(url: str, request: Request, retry: int = 0):
     cached_path = CACHE_DIR / key
 
     force_refetch = retry > 0
-    if cached_path.exists() and not force_refetch:
-        etag = _etag_for_file(cached_path)
-        if_none_match = request.headers.get("if-none-match")
-        if if_none_match and if_none_match == etag:
-            return Response(
-                status_code=304,
-                headers={**COMMON_HEADERS, "ETag": etag, "X-Cache": "HIT"},
-            )
+    if not force_refetch:
+        cached = _cached_image_response(cached_path, request)
+        if cached is not None:
+            return cached
 
-        ext = cached_path.suffix
-        ct = EXT_CONTENT_TYPE.get(ext, "image/jpeg")
-        return FileResponse(
-            cached_path,
-            media_type=ct,
-            headers={**COMMON_HEADERS, "ETag": etag, "X-Cache": "HIT"},
-        )
-
-    data, fetch_info, content_type, transport = await _fetch_image(url, retry_hint=retry)
+    lock = _cache_lock_for_key(key)
+    async with lock:
+        if not force_refetch:
+            cached = _cached_image_response(cached_path, request)
+            if cached is not None:
+                return cached
+        data, fetch_info, content_type, transport = await _fetch_image(url, retry_hint=retry)
     if data is None:
-        logger.warning(f"Image fetch failed: {url} — {fetch_info}")
+        stale = _cached_image_response(cached_path, request, cache_status="STALE")
+        if stale is not None:
+            return stale
+        logger.warning("Image fetch failed: %s - %s", url, fetch_info)
         parsed = urlparse(url)
         if _is_mangadex_host(parsed.hostname or ""):
             return Response(
@@ -728,7 +804,7 @@ async def proxy_image(url: str, request: Request, retry: int = 0):
         return Response(status_code=502, content="CDN unavailable")
 
     try:
-        cached_path.write_bytes(data)
+        _write_cache_atomic(cached_path, data)
         schedule_image_cache_prune()
     except Exception as e:
         logger.warning(f"Cache write failed: {e}")
@@ -771,7 +847,7 @@ async def preload_images(urls: str):
         if data is None:
             return
         try:
-            path.write_bytes(data)
+            _write_cache_atomic(path, data)
             cached += 1
         except Exception:
             pass

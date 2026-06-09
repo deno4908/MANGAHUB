@@ -290,7 +290,7 @@ export function thumbUrl(thumb: string, slug: string): string {
   if (!raw) return `${IMG_CDN}${slug}-thumb.jpg`;
   if (/^https?:\/\//i.test(raw)) {
     if (isMangaDexImageUrl(raw)) {
-      return `${API_BASE}/api/images/img?url=${encodeURIComponent(raw)}`;
+      return raw;
     }
     return raw;
   }
@@ -402,7 +402,10 @@ export function adaptMangaItem(item: any): Manga {
   const thumbRaw = coverRaw || String(item.thumb_url || "").trim();
   const coverDirect = thumbRaw ? thumbUrl(thumbRaw, slug) : thumbUrl("", slug);
   const cover = isOTruyenImageUrl(coverDirect) ? toProxyImageUrl(coverDirect) : coverDirect;
-  const coverProxy = thumbFallbackUrl(thumbRaw, slug) || (isOTruyenImageUrl(coverDirect) ? coverDirect : "");
+  const coverProxy =
+    thumbFallbackUrl(thumbRaw, slug) ||
+    (isMangaDexImageUrl(coverDirect) ? toProxyImageUrl(coverDirect) : "") ||
+    (isOTruyenImageUrl(coverDirect) ? coverDirect : "");
   const categories = item.category || [];
   const ratingRaw = item.rating_average ?? item.average_rating ?? item.rating;
   const rating = Number.isFinite(Number(ratingRaw)) ? Number(ratingRaw) : 0;
@@ -621,7 +624,10 @@ export function adaptMangaDetail(data: any): Manga {
   const thumbRaw = coverRaw || String(item.thumb_url || "").trim();
   const coverDirect = thumbRaw ? thumbUrl(thumbRaw, slug) : thumbUrl("", slug);
   const cover = isOTruyenImageUrl(coverDirect) ? toProxyImageUrl(coverDirect) : coverDirect;
-  const coverProxy = thumbFallbackUrl(thumbRaw, slug) || (isOTruyenImageUrl(coverDirect) ? coverDirect : "");
+  const coverProxy =
+    thumbFallbackUrl(thumbRaw, slug) ||
+    (isMangaDexImageUrl(coverDirect) ? toProxyImageUrl(coverDirect) : "") ||
+    (isOTruyenImageUrl(coverDirect) ? coverDirect : "");
   const categories = item.category || [];
 
   // Build chapters from server_data
