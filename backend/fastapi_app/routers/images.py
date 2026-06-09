@@ -42,8 +42,7 @@ EXT_CONTENT_TYPE = {
 
 _http_client: httpx.AsyncClient | None = None
 _mangadex_http_client: httpx.AsyncClient | None = None
-_curl_executor = ThreadPoolExecutor(max_workers=12)
-_curl_session: Any = None
+_curl_thread_local = threading.local()
 _curl_session_lock = threading.RLock()
 _image_cache_prune_lock = threading.Lock()
 _image_cache_prune_running = False
@@ -68,12 +67,13 @@ _host_validation_cache: dict[str, tuple[float, str | None]] = {}
 _host_validation_lock = threading.Lock()
 
 
-def _env_int(name: str, default: int, minimum: int = 1) -> int:
+def _env_int(name: str, default: int, minimum: int = 1, maximum: int | None = None) -> int:
     raw = str(os.getenv(name, "")).strip()
     if not raw:
         return default
     try:
-        return max(minimum, int(raw))
+        value = max(minimum, int(raw))
+        return min(value, maximum) if maximum is not None else value
     except Exception:
         return default
 
@@ -100,7 +100,9 @@ IMAGE_CACHE_PRUNE_COOLDOWN_SECONDS = _env_float(
     "IMAGE_CACHE_PRUNE_COOLDOWN_SECONDS", 30.0, minimum=1.0
 )
 MAX_IMAGE_BYTES = _env_int("IMAGE_PROXY_MAX_MB", 16, minimum=1) * 1024 * 1024
+IMAGE_PROXY_CURL_WORKERS = _env_int("IMAGE_PROXY_CURL_WORKERS", 8, minimum=1, maximum=32)
 _mangadex_image_semaphore = asyncio.Semaphore(MANGADEX_IMAGE_UPSTREAM_CONCURRENCY)
+_curl_executor = ThreadPoolExecutor(max_workers=IMAGE_PROXY_CURL_WORKERS)
 
 
 async def _get_client() -> httpx.AsyncClient:
@@ -159,29 +161,31 @@ async def _reset_client(*, mangadex: bool = False) -> None:
 def _get_curl_session() -> Any:
     if CurlSession is None:
         raise RuntimeError("curl_cffi not available")
-    global _curl_session
-    if _curl_session is None:
-        with _curl_session_lock:
-            if _curl_session is None:
-                _curl_session = CurlSession(
-                    impersonate="chrome131",
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                        "Accept": "image/*,*/*;q=0.8",
-                    },
-                )
-    return _curl_session
+    session = getattr(_curl_thread_local, "session", None)
+    if session is None:
+        session = CurlSession(
+            impersonate="chrome131",
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "image/*,*/*;q=0.8",
+            },
+        )
+        _curl_thread_local.session = session
+    return session
 
 
 def _reset_curl_session() -> None:
-    global _curl_session
     with _curl_session_lock:
-        if _curl_session is not None:
+        session = getattr(_curl_thread_local, "session", None)
+        if session is not None:
             try:
-                _curl_session.close()
+                session.close()
             except Exception:
                 pass
-        _curl_session = None
+            try:
+                delattr(_curl_thread_local, "session")
+            except Exception:
+                pass
 
 
 def _cache_key(url: str) -> str:
@@ -668,40 +672,39 @@ def _fetch_once_curl_sync(url: str) -> tuple[bytes | None, str | None, str, bool
         if validation_error:
             return None, None, validation_error, False
         try:
-            with _curl_session_lock:
-                session = _get_curl_session()
-                response = session.get(
-                    current_url,
-                    headers=_request_headers_for_url(current_url),
-                    timeout=REQUEST_TIMEOUT_SECONDS,
-                    allow_redirects=False,
-                    stream=True,
-                )
+            session = _get_curl_session()
+            response = session.get(
+                current_url,
+                headers=_request_headers_for_url(current_url),
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                allow_redirects=False,
+                stream=True,
+            )
 
-                if response.status_code in {301, 302, 303, 307, 308}:
-                    location = response.headers.get("location")
-                    if not location:
-                        _close_response(response)
-                        return None, None, f"HTTP {response.status_code} without redirect target", False
-                    if redirect_count >= MAX_IMAGE_REDIRECTS:
-                        _close_response(response)
-                        return None, None, "Too many image redirects", False
-                    current_url = urljoin(current_url, location)
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("location")
+                if not location:
                     _close_response(response)
-                    continue
-
-                if response.status_code < 400:
-                    data, content_type, read_error = _read_curl_response_limited(response)
+                    return None, None, f"HTTP {response.status_code} without redirect target", False
+                if redirect_count >= MAX_IMAGE_REDIRECTS:
                     _close_response(response)
-                    if read_error:
-                        return None, None, read_error, False
-                    return data, content_type, "", False
-
-                retryable = response.status_code in {403, 404, 408, 425, 429, 500, 502, 503, 504}
-                if retryable:
-                    _reset_curl_session()
+                    return None, None, "Too many image redirects", False
+                current_url = urljoin(current_url, location)
                 _close_response(response)
-                return None, None, f"HTTP {response.status_code}", retryable
+                continue
+
+            if response.status_code < 400:
+                data, content_type, read_error = _read_curl_response_limited(response)
+                _close_response(response)
+                if read_error:
+                    return None, None, read_error, False
+                return data, content_type, "", False
+
+            retryable = response.status_code in {403, 404, 408, 425, 429, 500, 502, 503, 504}
+            if retryable:
+                _reset_curl_session()
+            _close_response(response)
+            return None, None, f"HTTP {response.status_code}", retryable
         except Exception as error:
             _reset_curl_session()
             return None, None, f"{type(error).__name__}: {error}", True
