@@ -176,9 +176,9 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
   const chapterLabel = chapterDisplay(lastChapter, manga.status, isMangaDexItem);
   const chapterMetaLabel = chapterTime ? `${chapterLabel} - ${chapterTime}` : chapterLabel;
   const safeCoverFallback = String(manga.coverProxy || '').trim() || DEFAULT_CARD_COVER_FALLBACK;
-  const coverSrc = isMangaDexItem && safeCoverFallback ? safeCoverFallback : manga.cover;
-  const coverFallbackSrc = isMangaDexItem && manga.cover ? manga.cover : safeCoverFallback;
-  const coverFallbackDelayMs = isMangaDexItem ? 600 : undefined;
+  const coverSrc = manga.cover;
+  const coverFallbackSrc = safeCoverFallback;
+  const coverFallbackDelayMs = isMangaDexItem ? 2600 : undefined;
   const detailLinkState = { previewManga: manga };
   const detailPath = getMangaDetailPath(manga.id);
   const ratingLabel = Number(manga.rating).toFixed(1);

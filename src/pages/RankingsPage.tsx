@@ -323,8 +323,8 @@ function getTrendingImageSources(item: { slug?: string; thumb?: string }) {
     if (/^https?:\/\//i.test(rawThumb)) {
       if (isMangaDexCoverUrl(rawThumb)) {
         return {
-          src: toMangaDexCoverProxy(rawThumb),
-          fallbackSrc: rawThumb,
+          src: rawThumb,
+          fallbackSrc: toMangaDexCoverProxy(rawThumb),
         };
       }
       return { src: rawThumb, fallbackSrc: DEFAULT_TRENDING_THUMB_FALLBACK };
@@ -1653,6 +1653,7 @@ const RankingsPage = () => {
                         <OptimizedImage
                           src={src}
                           fallbackSrc={fallbackSrc}
+                          fallbackDelayMs={2500}
                           alt={displayTitle}
                           className="w-10 h-14 object-cover rounded-lg shrink-0"
                           priority={idx < 10}
