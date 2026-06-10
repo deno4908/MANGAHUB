@@ -36,19 +36,50 @@ export const getRecaptchaSiteKey = () =>
 
 export const isRecaptchaConfigured = () => Boolean(getRecaptchaSiteKey());
 
+function isRecaptchaReady(): boolean {
+  return (
+    typeof window.grecaptcha?.render === "function" &&
+    typeof window.grecaptcha?.reset === "function"
+  );
+}
+
+function waitForRecaptchaReady(timeoutMs = 12_000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+
+    const check = () => {
+      if (isRecaptchaReady()) {
+        resolve();
+        return;
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        reject(new Error("reCAPTCHA API did not become ready"));
+        return;
+      }
+      window.setTimeout(check, 50);
+    };
+
+    check();
+  });
+}
+
 function loadRecaptchaScript() {
-  if (window.grecaptcha) return Promise.resolve();
+  if (isRecaptchaReady()) return Promise.resolve();
   if (window.__mangahubRecaptchaScript) return window.__mangahubRecaptchaScript;
 
   window.__mangahubRecaptchaScript = new Promise<void>((resolve, reject) => {
+    const resolveWhenReady = () => {
+      waitForRecaptchaReady().then(resolve).catch(reject);
+    };
     const existing = document.querySelector<HTMLScriptElement>(
       'script[data-mangahub-recaptcha="true"]',
     );
     if (existing) {
-      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("load", resolveWhenReady, { once: true });
       existing.addEventListener("error", () => reject(new Error("reCAPTCHA load failed")), {
         once: true,
       });
+      resolveWhenReady();
       return;
     }
 
@@ -57,9 +88,12 @@ function loadRecaptchaScript() {
     script.async = true;
     script.defer = true;
     script.dataset.mangahubRecaptcha = "true";
-    script.onload = () => resolve();
+    script.onload = resolveWhenReady;
     script.onerror = () => reject(new Error("reCAPTCHA load failed"));
     document.head.appendChild(script);
+  }).catch((error) => {
+    window.__mangahubRecaptchaScript = undefined;
+    throw error;
   });
 
   return window.__mangahubRecaptchaScript;
@@ -92,7 +126,7 @@ const ReCaptchaV2 = forwardRef<ReCaptchaV2Handle, ReCaptchaV2Props>(
       let cancelled = false;
       loadRecaptchaScript()
         .then(() => {
-          if (cancelled || !containerRef.current || !window.grecaptcha) return;
+          if (cancelled || !containerRef.current || !isRecaptchaReady() || !window.grecaptcha) return;
           if (widgetIdRef.current !== null) return;
 
           widgetIdRef.current = window.grecaptcha.render(containerRef.current, {
