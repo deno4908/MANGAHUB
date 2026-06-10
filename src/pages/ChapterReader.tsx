@@ -102,7 +102,10 @@ const ChapterReader = () => {
   const store = useReaderStore();
   const imageLoadingMode = useSettingsStore((s) => s.settings.reader.imageLoading || 'preload');
   const { user, isLoggedIn } = useUserStore();
-  const isMobile = useIsMobile();
+  const detectedMobile = useIsMobile();
+  const mobileReaderRef = useRef(detectedMobile);
+  if (detectedMobile) mobileReaderRef.current = true;
+  const isMobile = mobileReaderRef.current;
   const historySavedRef = useRef(false);
   const viewTrackedRef = useRef(false);
   const viewSessionStartedRef = useRef(false);
@@ -119,6 +122,7 @@ const ChapterReader = () => {
   const [touchStart, setTouchStart] = useState<{ x: number; y: number } | null>(null);
   const [horizontalRetryCount, setHorizontalRetryCount] = useState(0);
   const [horizontalUseFallback, setHorizontalUseFallback] = useState(false);
+  const [horizontalLoaded, setHorizontalLoaded] = useState(false);
 
   const readerRef = useRef<HTMLDivElement>(null);
   const autoScrollTimer = useRef<number>();
@@ -276,6 +280,7 @@ const ChapterReader = () => {
     setShowComments(false);
     setHorizontalRetryCount(0);
     setHorizontalUseFallback(false);
+    setHorizontalLoaded(false);
     historySavedRef.current = false;
     viewTrackedRef.current = false;
     viewSessionStartedRef.current = false;
@@ -290,7 +295,20 @@ const ChapterReader = () => {
   useEffect(() => {
     setHorizontalRetryCount(0);
     setHorizontalUseFallback(false);
+    setHorizontalLoaded(false);
   }, [store.currentPage, id]);
+
+  useEffect(() => {
+    if (store.mode !== 'horizontal' || horizontalLoaded || horizontalUseFallback) return;
+    const page = pages[store.currentPage] || '';
+    const fallback = getMangaDexImageFallback(page);
+    if (!fallback) return;
+    const timeout = window.setTimeout(() => {
+      setHorizontalUseFallback(true);
+      setHorizontalRetryCount(0);
+    }, 6_000);
+    return () => window.clearTimeout(timeout);
+  }, [store.mode, store.currentPage, pages, horizontalLoaded, horizontalUseFallback]);
 
   // ─── Start a server-side read session before a view can be counted ───
   useEffect(() => {
@@ -491,47 +509,30 @@ const ChapterReader = () => {
     if (!pages.length) return;
     const mode = imageLoadingMode;
 
-    const preloadUrls = (urls: string[]) => {
-      urls.forEach(url => {
+    const preloadUrls = (urls: string[], highPriorityCount = 0) => {
+      urls.forEach((url, index) => {
         if (url && !preloadedRef.current.has(url)) {
           preloadedRef.current.add(url);
           const img = new Image();
+          img.fetchPriority = index < highPriorityCount ? 'high' : 'low';
           img.src = url;
         }
       });
     };
 
-    const eagerCount = mode === 'aggressive' ? 6 : mode === 'standard' ? 1 : 3;
+    const eagerCount = mode === 'aggressive' ? 12 : mode === 'standard' ? 2 : 8;
 
-    // Eagerly preload initial pages based on selected loading mode.
-    preloadUrls(pages.slice(0, eagerCount));
-
-    if (mode === 'standard') return;
-
-    // Then load rest in idle time using small batches
-    let idx = eagerCount;
-    const BATCH = mode === 'aggressive' ? 10 : 4;
-    const IDLE_TIMEOUT = mode === 'aggressive' ? 1500 : 3000;
-    const FALLBACK_DELAY = mode === 'aggressive' ? 80 : 200;
-    const scheduleNext = () => {
-      if (idx >= pages.length) return;
-      const batch = pages.slice(idx, idx + BATCH);
-      idx += BATCH;
-      if ('requestIdleCallback' in window) {
-        (window as any).requestIdleCallback(() => { preloadUrls(batch); scheduleNext(); }, { timeout: IDLE_TIMEOUT });
-      } else {
-        setTimeout(() => { preloadUrls(batch); scheduleNext(); }, FALLBACK_DELAY);
-      }
-    };
-    scheduleNext();
+    // Keep bandwidth focused on the current reading area instead of queueing
+    // the whole chapter and delaying images the user is actively viewing.
+    preloadUrls(pages.slice(0, eagerCount), mode === 'aggressive' ? 5 : 3);
   }, [pages, imageLoadingMode]);
 
   // ─── Preload pages around the currently visible page ───
   useEffect(() => {
     if (!pages.length) return;
     const mode = imageLoadingMode;
-    const AHEAD = mode === 'aggressive' ? 12 : mode === 'standard' ? 2 : 6;
-    const HIGH_PRIORITY_AHEAD = mode === 'aggressive' ? 4 : 2;
+    const AHEAD = mode === 'aggressive' ? 20 : mode === 'standard' ? 4 : 12;
+    const HIGH_PRIORITY_AHEAD = mode === 'aggressive' ? 6 : 4;
     const start = visiblePage + 1;
     const end = Math.min(visiblePage + AHEAD + 1, pages.length);
     for (let i = start; i < end; i++) {
@@ -693,10 +694,10 @@ const ChapterReader = () => {
     : activeHorizontalPage;
 
   return (
-    <div className="flex min-h-screen bg-background">
+    <div className="flex min-h-screen w-full max-w-full overflow-x-hidden bg-background">
       <div
         ref={readerRef}
-        className={`flex-1 min-h-screen relative select-none transition-all duration-300 ${showComments && !isMobile ? 'mr-0' : ''}`}
+        className={`relative min-h-screen min-w-0 max-w-full flex-1 select-none overflow-x-hidden transition-all duration-300 ${showComments && !isMobile ? 'mr-0' : ''}`}
         onClick={toggleControlsOnClick}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
@@ -815,12 +816,14 @@ const ChapterReader = () => {
             <AnimatePresence mode="wait">
               <motion.img key={store.currentPage} initial={{ opacity: 0, x: store.pageDirection === 'rtl' ? -20 : 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}
                 src={horizontalPageSrc} alt={`Trang ${store.currentPage + 1}`}
-                className={`select-none ${store.imageFit === 'height' ? 'h-screen w-auto' : store.imageFit === 'width' ? 'w-full max-w-4xl h-auto' : 'max-h-[90vh] max-w-full'} object-contain mx-auto`}
+                className={`select-none ${store.imageFit === 'height' ? 'max-h-screen max-w-full w-auto h-auto' : store.imageFit === 'width' ? 'w-full max-w-4xl h-auto' : 'max-h-[90vh] max-w-full'} object-contain mx-auto`}
                 draggable={false}
+                onLoad={() => setHorizontalLoaded(true)}
                 onError={() => {
                   if (!horizontalUseFallback && horizontalFallbackPage) {
                     setHorizontalUseFallback(true);
                     setHorizontalRetryCount(0);
+                    setHorizontalLoaded(false);
                     return;
                   }
                   setHorizontalRetryCount((prev) => (prev >= 3 ? prev : prev + 1));
@@ -839,7 +842,7 @@ const ChapterReader = () => {
         ) : (
           <div className={`${store.mode === 'webtoon' ? 'max-w-2xl' : 'max-w-4xl'} mx-auto`}>
             {pages.map((page, i) => (
-              <ReaderImage key={`${id}-${i}`} src={page} alt={`Trang ${i + 1}`} index={i} imageFit={store.imageFit} pageGap={store.pageGap} onVisible={handlePageVisible} priority={i < 5} />
+              <ReaderImage key={`${id}-${i}`} src={page} alt={`Trang ${i + 1}`} index={i} imageFit={store.imageFit} pageGap={store.pageGap} onVisible={handlePageVisible} priority={i < 8} />
             ))}
             {/* End of chapter + comments */}
             <div className="text-center py-16 space-y-6" onClick={e => e.stopPropagation()}>

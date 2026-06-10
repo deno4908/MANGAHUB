@@ -89,7 +89,7 @@ def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
 
 
 MANGADEX_IMAGE_UPSTREAM_CONCURRENCY = _env_int(
-    "MANGADEX_IMAGE_UPSTREAM_CONCURRENCY", 2, minimum=1
+    "MANGADEX_IMAGE_UPSTREAM_CONCURRENCY", 3, minimum=1
 )
 MANGADEX_IMAGE_THROTTLE_BACKOFF_SECONDS = _env_float(
     "MANGADEX_IMAGE_THROTTLE_BACKOFF_SECONDS", 1.0, minimum=0.1
