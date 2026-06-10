@@ -7,7 +7,7 @@ import { useUserStore } from '@/store/userStore';
 import { historyApi, mangaApi } from '@/lib/api';
 import { adaptChapterPages, adaptMangaDetail } from '@/lib/adapters';
 import { getMangaDetailPath, normalizeMangaDexId } from '@/lib/mangaLinks';
-import { getMangaDexImageFallback } from '@/lib/mangaDexImages';
+import { getLocalMangaDexChapterPages, getMangaDexImageFallback } from '@/lib/mangaDexImages';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import ReaderImage from '@/components/reader/ReaderImage';
@@ -375,6 +375,18 @@ const ChapterReader = () => {
     const normalizedId = normalizeMangaDexId(chapterId) || chapterId;
     const mangadexId = normalizeMangaDexId(normalizedId);
     if (mangadexId) {
+      try {
+        const localImageUrls = await getLocalMangaDexChapterPages(mangadexId);
+        if (localImageUrls.length > 0) {
+          return {
+            pages: localImageUrls,
+            raw: { data: { item: {} } },
+          };
+        }
+      } catch {
+        // Fall through to backend lookup when direct MangaDex API is blocked.
+      }
+
       const attempts: Array<{ mode: 'saver'; refresh: boolean }> = [
         { mode: 'saver', refresh: false },
         { mode: 'saver', refresh: true },

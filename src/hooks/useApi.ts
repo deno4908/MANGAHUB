@@ -25,6 +25,7 @@ import {
   MANGADEX_EXTRA_GENRES,
 } from "@/lib/adapters";
 import { MANGADEX_ID_RE, normalizeMangaDexId } from "@/lib/mangaLinks";
+import { getLocalMangaDexChapterPages } from "@/lib/mangaDexImages";
 import type { Manga } from "@/types/manga";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -641,6 +642,19 @@ export function useChapter(chapterId: string | undefined) {
       }
 
       if (mangadexChapterId) {
+        try {
+          const localImageUrls = await getLocalMangaDexChapterPages(mangadexChapterId);
+          if (localImageUrls.length > 0) {
+            return {
+              pages: localImageUrls,
+              raw: { data: { item: {} } },
+            };
+          }
+        } catch {
+          // Browser-side MangaDex API can be blocked on some networks.
+          // Fall back to the backend At-Home lookup below.
+        }
+
         const attempts: Array<{ mode: "saver"; refresh: boolean }> = [
           { mode: "saver", refresh: false },
           { mode: "saver", refresh: true },
