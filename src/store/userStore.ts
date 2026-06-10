@@ -117,40 +117,43 @@ export const useUserStore = create<UserStore>((set, get) => ({
     }
 
     const run = (async () => {
-    if (!getAccessToken()) {
-      const refreshed = await authApi.refresh();
-      if (!refreshed) {
-        set({ hasCheckedSession: true });
-        return;
-      }
-    }
     set({ isLoading: true });
     try {
+      if (!getAccessToken()) {
+        const refreshed = await authApi.refresh();
+        if (!refreshed) return;
+      }
+
       const data = await authApi.getMe();
       if (data.profile) {
         const user = mapProfile(data.profile);
+        set({ user, isLoggedIn: true, hasCheckedSession: true, isLoading: false });
+        void get().fetchNotifications();
 
-        // Fetch stats (weeklyActivity) in parallel
-        try {
-          const { userApi } = await import('@/lib/api');
-          const [statsData] = await Promise.allSettled([
-            userApi.getStats(),
-          ]);
-          if (statsData.status === 'fulfilled' && statsData.value?.stats) {
-            const s = statsData.value.stats;
-            user.stats = {
-              ...user.stats,
-              chaptersRead: s.chapters_read ?? user.stats.chaptersRead,
-              totalReadingTime: s.total_reading_time ?? user.stats.totalReadingTime,
-              commentsPosted: s.comments_posted ?? user.stats.commentsPosted,
-              readingStreak: s.reading_streak ?? user.stats.readingStreak,
-              weeklyActivity: s.weekly_activity ?? user.stats.weeklyActivity,
-            };
-          }
-        } catch { /* stats are optional */ }
-
-        set({ user, isLoggedIn: true, hasCheckedSession: true });
-        get().fetchNotifications();
+        // Stats are optional and must never block route rendering.
+        void import('@/lib/api')
+          .then(({ userApi }) => userApi.getStats())
+          .then((statsData) => {
+            const s = statsData?.stats;
+            if (!s) return;
+            set((state) => {
+              if (!state.user || state.user.id !== user.id) return state;
+              return {
+                user: {
+                  ...state.user,
+                  stats: {
+                    ...state.user.stats,
+                    chaptersRead: s.chapters_read ?? state.user.stats.chaptersRead,
+                    totalReadingTime: s.total_reading_time ?? state.user.stats.totalReadingTime,
+                    commentsPosted: s.comments_posted ?? state.user.stats.commentsPosted,
+                    readingStreak: s.reading_streak ?? state.user.stats.readingStreak,
+                    weeklyActivity: s.weekly_activity ?? state.user.stats.weeklyActivity,
+                  },
+                },
+              };
+            });
+          })
+          .catch(() => {});
       }
     } catch (e: any) {
       if (e?.message === 'BANNED') {

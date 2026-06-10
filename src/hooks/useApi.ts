@@ -641,13 +641,10 @@ export function useChapter(chapterId: string | undefined) {
       }
 
       if (mangadexChapterId) {
-        const attempts: Array<{ mode: "saver" | "data"; refresh: boolean }> = [
+        const attempts: Array<{ mode: "saver"; refresh: boolean }> = [
           { mode: "saver", refresh: false },
-          { mode: "data", refresh: false },
           { mode: "saver", refresh: true },
-          { mode: "data", refresh: true },
         ];
-        const apiBase = import.meta.env.VITE_API_URL || "http://localhost:8000";
         let lastError: unknown = null;
 
         for (const attempt of attempts) {
@@ -656,16 +653,14 @@ export function useChapter(chapterId: string | undefined) {
               mangadexChapterId,
               attempt.mode,
               attempt.refresh,
+              8_000,
             );
             const imageUrls = Array.isArray(data?.image_urls)
               ? (data.image_urls as string[]).filter(Boolean)
               : [];
             if (imageUrls.length > 0) {
-              const pages = imageUrls.map(
-                (url) => `${apiBase}/api/images/img?url=${encodeURIComponent(url)}`,
-              );
               return {
-                pages,
+                pages: imageUrls,
                 raw: { data: { item: {} } },
               };
             }
@@ -695,7 +690,7 @@ export function useChapter(chapterId: string | undefined) {
     enabled: !!resolvedChapterId,
     staleTime: isUserUpload ? 5 * 60 * 1000 : isMangaDexChapter ? 30 * 1000 : 60 * 60 * 1000,
     gcTime: isUserUpload ? 10 * 60 * 1000 : isMangaDexChapter ? 5 * 60 * 1000 : 30 * 60 * 1000,
-    retry: 2,
+    retry: isMangaDexChapter ? 0 : 2,
     retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
   });
 }

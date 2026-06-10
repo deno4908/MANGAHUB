@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, memo } from 'react';
 import { RefreshCw } from 'lucide-react';
+import { getMangaDexImageFallback } from '@/lib/mangaDexImages';
 
 interface ReaderImageProps {
   src: string;
@@ -17,7 +18,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
   const [retryCount, setRetryCount] = useState(0);
   const [inView, setInView] = useState(priority);
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
-  const [useDirectSource, setUseDirectSource] = useState(false);
+  const [useFallbackSource, setUseFallbackSource] = useState(false);
   const imgRef = useRef<HTMLDivElement>(null);
   const onVisibleRef = useRef(onVisible);
   onVisibleRef.current = onVisible;
@@ -46,7 +47,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
     setError(false);
     setRetryCount(0);
     setNaturalSize(null);
-    setUseDirectSource(false);
+    setUseFallbackSource(false);
   }, [src]);
 
   const fitClass =
@@ -66,20 +67,8 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
     setLoaded(true);
   }, []);
 
-  const getDirectSource = useCallback((value: string): string | null => {
-    try {
-      const parsed = new URL(value, window.location.origin);
-      const encoded = parsed.searchParams.get('url');
-      if (!encoded) return null;
-      const decoded = decodeURIComponent(encoded);
-      return decoded.startsWith('http://') || decoded.startsWith('https://') ? decoded : null;
-    } catch {
-      return null;
-    }
-  }, []);
-
-  const directSource = getDirectSource(src);
-  const activeSrc = useDirectSource && directSource ? directSource : src;
+  const fallbackSource = getMangaDexImageFallback(src);
+  const activeSrc = useFallbackSource && fallbackSource ? fallbackSource : src;
   const imgSrc = retryCount > 0 ? `${activeSrc}${activeSrc.includes('?') ? '&' : '?'}retry=${retryCount}` : activeSrc;
 
   const placeholderStyle: React.CSSProperties = naturalSize
@@ -125,8 +114,8 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
           draggable={false}
           onLoad={handleLoad}
           onError={() => {
-            if (!useDirectSource && directSource) {
-              setUseDirectSource(true);
+            if (!useFallbackSource && fallbackSource) {
+              setUseFallbackSource(true);
               setLoaded(false);
               setRetryCount(0);
               return;

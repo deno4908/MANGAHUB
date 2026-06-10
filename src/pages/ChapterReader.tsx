@@ -7,6 +7,7 @@ import { useUserStore } from '@/store/userStore';
 import { historyApi, mangaApi } from '@/lib/api';
 import { adaptChapterPages, adaptMangaDetail } from '@/lib/adapters';
 import { getMangaDetailPath, normalizeMangaDexId } from '@/lib/mangaLinks';
+import { getMangaDexImageFallback } from '@/lib/mangaDexImages';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import ReaderImage from '@/components/reader/ReaderImage';
@@ -117,6 +118,7 @@ const ChapterReader = () => {
   const [viewEligibilityTick, setViewEligibilityTick] = useState(0);
   const [touchStart, setTouchStart] = useState<{ x: number; y: number } | null>(null);
   const [horizontalRetryCount, setHorizontalRetryCount] = useState(0);
+  const [horizontalUseFallback, setHorizontalUseFallback] = useState(false);
 
   const readerRef = useRef<HTMLDivElement>(null);
   const autoScrollTimer = useRef<number>();
@@ -273,6 +275,7 @@ const ChapterReader = () => {
     setScrollProgress(0);
     setShowComments(false);
     setHorizontalRetryCount(0);
+    setHorizontalUseFallback(false);
     historySavedRef.current = false;
     viewTrackedRef.current = false;
     viewSessionStartedRef.current = false;
@@ -286,6 +289,7 @@ const ChapterReader = () => {
 
   useEffect(() => {
     setHorizontalRetryCount(0);
+    setHorizontalUseFallback(false);
   }, [store.currentPage, id]);
 
   // ─── Start a server-side read session before a view can be counted ───
@@ -353,13 +357,10 @@ const ChapterReader = () => {
     const normalizedId = normalizeMangaDexId(chapterId) || chapterId;
     const mangadexId = normalizeMangaDexId(normalizedId);
     if (mangadexId) {
-      const attempts: Array<{ mode: 'saver' | 'data'; refresh: boolean }> = [
+      const attempts: Array<{ mode: 'saver'; refresh: boolean }> = [
         { mode: 'saver', refresh: false },
-        { mode: 'data', refresh: false },
         { mode: 'saver', refresh: true },
-        { mode: 'data', refresh: true },
       ];
-      const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
       let lastError: unknown = null;
 
       for (const attempt of attempts) {
@@ -368,15 +369,14 @@ const ChapterReader = () => {
             mangadexId,
             attempt.mode,
             attempt.refresh,
+            8_000,
           );
           const imageUrls = Array.isArray(data?.image_urls)
             ? (data.image_urls as string[]).filter(Boolean)
             : [];
           if (imageUrls.length > 0) {
             return {
-              pages: imageUrls.map(
-                (url) => `${apiBase}/api/images/img?url=${encodeURIComponent(url)}`,
-              ),
+              pages: imageUrls,
               raw: { data: { item: {} } },
             };
           }
@@ -593,7 +593,7 @@ const ChapterReader = () => {
     const key = e.key.toLowerCase();
     if (key === 'c') {
       if (showComments) setShowComments(false);
-      else if (window.innerWidth < 1024) commentRef.current?.scrollIntoView({ behavior: 'smooth' });
+      else if (isMobile) commentRef.current?.scrollIntoView({ behavior: 'smooth' });
       else setShowComments(true);
       return;
     }
@@ -609,7 +609,7 @@ const ChapterReader = () => {
     if (e.key === '+' || e.key === '=') store.setZoom(store.zoom + 10);
     if (e.key === '-') store.setZoom(store.zoom - 10);
     if (e.key === '0') store.setZoom(100);
-  }, [store.mode, store.currentPage, totalPages, store.pageDirection, store.autoScroll, store.zoom, showComments]);
+  }, [store.mode, store.currentPage, totalPages, store.pageDirection, store.autoScroll, store.zoom, showComments, isMobile]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
@@ -683,9 +683,14 @@ const ChapterReader = () => {
   const progress = store.mode === 'horizontal' ? ((store.currentPage + 1) / totalPages) * 100 : scrollProgress;
   const displayPage = store.mode === 'horizontal' ? store.currentPage + 1 : visiblePage + 1;
   const currentHorizontalPage = pages[store.currentPage] || '';
+  const horizontalFallbackPage = getMangaDexImageFallback(currentHorizontalPage);
+  const activeHorizontalPage =
+    horizontalUseFallback && horizontalFallbackPage
+      ? horizontalFallbackPage
+      : currentHorizontalPage;
   const horizontalPageSrc = horizontalRetryCount > 0
-    ? `${currentHorizontalPage}${currentHorizontalPage.includes('?') ? '&' : '?'}retry=${horizontalRetryCount}`
-    : currentHorizontalPage;
+    ? `${activeHorizontalPage}${activeHorizontalPage.includes('?') ? '&' : '?'}retry=${horizontalRetryCount}`
+    : activeHorizontalPage;
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -741,7 +746,7 @@ const ChapterReader = () => {
               <div className="flex items-center gap-0.5 shrink-0">
                 <motion.button whileTap={{ scale: 0.8 }}
                   onClick={() => {
-                    if (window.innerWidth < 1024) commentRef.current?.scrollIntoView({ behavior: 'smooth' });
+                    if (isMobile) commentRef.current?.scrollIntoView({ behavior: 'smooth' });
                     else setShowComments(!showComments);
                   }}
                   className={`p-2 rounded-lg transition-colors ${showComments ? 'bg-primary/20 text-primary' : 'hover:bg-secondary/80'}`}
@@ -812,7 +817,14 @@ const ChapterReader = () => {
                 src={horizontalPageSrc} alt={`Trang ${store.currentPage + 1}`}
                 className={`select-none ${store.imageFit === 'height' ? 'h-screen w-auto' : store.imageFit === 'width' ? 'w-full max-w-4xl h-auto' : 'max-h-[90vh] max-w-full'} object-contain mx-auto`}
                 draggable={false}
-                onError={() => setHorizontalRetryCount((prev) => (prev >= 3 ? prev : prev + 1))} />
+                onError={() => {
+                  if (!horizontalUseFallback && horizontalFallbackPage) {
+                    setHorizontalUseFallback(true);
+                    setHorizontalRetryCount(0);
+                    return;
+                  }
+                  setHorizontalRetryCount((prev) => (prev >= 3 ? prev : prev + 1));
+                }} />
             </AnimatePresence>
             <button onClick={e => { e.stopPropagation(); const dir = store.pageDirection === 'rtl' ? -1 : 1; store.setCurrentPage(Math.min(totalPages - 1, store.currentPage + dir)); }}
               disabled={store.pageDirection === 'rtl' ? store.currentPage <= 0 : store.currentPage >= totalPages - 1}
@@ -861,12 +873,12 @@ const ChapterReader = () => {
         )}
       </div>
 
-      <ShortcutsHint />
+      <ShortcutsHint isMobile={isMobile} />
       </div>
 
       {/* Comment sidebar */}
       <AnimatePresence>
-        {showComments && !isMobile && typeof window !== 'undefined' && window.innerWidth >= 1024 && (
+        {showComments && !isMobile && (
           <motion.div
             initial={{ width: 0, opacity: 0 }}
             animate={{ width: '35%', opacity: 1 }}
@@ -925,16 +937,15 @@ const ChapterReader = () => {
   );
 };
 
-const ShortcutsHint = () => {
+const ShortcutsHint = ({ isMobile }: { isMobile: boolean }) => {
   const [show, setShow] = useState(true);
-  const isMobileOrTablet = typeof window !== 'undefined' && window.innerWidth < 1024;
   useEffect(() => { const t = setTimeout(() => setShow(false), 4000); return () => clearTimeout(t); }, []);
   return (
     <AnimatePresence>
       {show && (
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
           className="fixed bottom-16 right-4 z-30 bg-card/90 backdrop-blur-sm border border-border/50 rounded-lg px-3 py-2 text-[10px] text-muted-foreground space-y-0.5 pointer-events-none">
-          {isMobileOrTablet ? (
+          {isMobile ? (
             <>
               <p className="flex items-center gap-1.5"><span className="inline-flex items-center gap-1 bg-secondary px-1.5 py-0.5 rounded text-[9px]"><MoveHorizontal className="w-3 h-3" /> Vuốt</span> Chuyển trang</p>
               <p className="flex items-center gap-1.5"><span className="inline-flex items-center gap-1 bg-secondary px-1.5 py-0.5 rounded text-[9px]"><PointerIcon className="w-3 h-3" /> x2</span> Ẩn/hiện menu</p>

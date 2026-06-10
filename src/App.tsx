@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Link, Navigate, Routes, Route, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, lazy, Suspense, useState } from "react";
 import { AnimatePresence } from "framer-motion";
-import { Clock3, Loader2, Lock, LogIn, Settings } from "lucide-react";
+import { Clock3, Loader2, Lock, LogIn, RefreshCw, Settings } from "lucide-react";
 import Navbar from "./components/manga/Navbar";
 import Footer from "./components/manga/Footer";
 import ProtectedRoute from "./components/ProtectedRoute";
@@ -60,11 +60,33 @@ const queryClient = new QueryClient({
   },
 });
 
-const PageLoader = () => (
-  <div className="flex items-center justify-center min-h-[60vh]">
-    <Loader2 className="w-8 h-8 animate-spin text-primary" />
-  </div>
-);
+const PageLoader = () => {
+  const [showRecovery, setShowRecovery] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShowRecovery(true), 10_000);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  return (
+    <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
+      <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      {showRecovery ? (
+        <div className="space-y-3 text-center">
+          <p className="text-sm text-muted-foreground">Trang đang tải lâu hơn bình thường.</p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-bold text-primary-foreground"
+          >
+            <RefreshCw className="h-4 w-4" />
+            Tải lại trang
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+};
 
 const cleanMaintenanceText = (value: string | undefined, fallback: string) => {
   const text = String(value || "").trim();

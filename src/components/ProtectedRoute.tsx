@@ -29,10 +29,6 @@ const ProtectedRoute = ({ children, requireAuth = true, allowedRoles }: Protecte
   useEffect(() => {
     if (!hasCheckedSession && !isLoading) {
       loadUser();
-      return;
-    }
-    if (isLoggedIn && !user && !isLoading) {
-      loadUser();
     }
   }, [hasCheckedSession, isLoggedIn, user, isLoading, loadUser]);
 

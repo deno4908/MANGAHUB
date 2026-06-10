@@ -610,7 +610,7 @@ function auth<T>(path: string, options?: ApiRequestInit) {
 
 // ─── Manga API (proxy OTruyenAPI) ───
 export const systemApi = {
-  getMaintenance: () => api<any>("/api/maintenance", { skipAuth: true }),
+  getMaintenance: () => api<any>("/api/maintenance", { skipAuth: true, timeoutMs: 6_000 }),
 };
 
 export const mangaApi = {
@@ -699,9 +699,11 @@ export const mangaApi = {
     chapterId: string,
     mode: "data" | "saver" = "data",
     refresh = false,
+    timeoutMs = 12_000,
   ) =>
     api<any>(
       `/api/manga/mangadex/chapter-pages/${chapterId}?mode=${mode}&refresh=${refresh ? "1" : "0"}`,
+      { timeoutMs },
     ),
   getList: (type = "truyen-moi", page = 1) =>
     api<any>(`/api/manga/list/${type}?page=${page}`),
@@ -845,7 +847,7 @@ export const authApi = {
       method: "POST",
       body: JSON.stringify({ scope }),
     }),
-  getMe: () => auth<any>("/auth/me"),
+  getMe: () => auth<any>("/auth/me", { timeoutMs: 10_000 }),
   ping: () => auth<any>("/auth/ping"),
   forgotPassword: (email: string, recaptchaToken?: string) =>
     auth<any>("/auth/forgot-password", {
@@ -888,6 +890,7 @@ export const authApi = {
       const data = await auth<any>("/auth/refresh", {
         method: "POST",
         body: JSON.stringify({ access_token: accessToken || "" }),
+        timeoutMs: 8_000,
       });
       if (data.session) {
         setTokens(data.session.access_token);
