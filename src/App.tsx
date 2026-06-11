@@ -3,7 +3,7 @@ import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Link, Navigate, Routes, Route, useLocation, useNavigate } from "react-router-dom";
-import { useEffect, lazy, Suspense, useState } from "react";
+import { Component, useEffect, lazy, Suspense, useState, type ErrorInfo, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import { Clock3, Loader2, Lock, LogIn, RefreshCw, Settings } from "lucide-react";
 import Navbar from "./components/manga/Navbar";
@@ -87,6 +87,56 @@ const PageLoader = () => {
     </div>
   );
 };
+
+type RouteErrorBoundaryProps = {
+  children: ReactNode;
+  resetKey: string;
+};
+
+type RouteErrorBoundaryState = {
+  hasError: boolean;
+};
+
+class RouteErrorBoundary extends Component<RouteErrorBoundaryProps, RouteErrorBoundaryState> {
+  state: RouteErrorBoundaryState = { hasError: false };
+
+  static getDerivedStateFromError(): RouteErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidUpdate(prevProps: RouteErrorBoundaryProps) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Route render failed", error, info);
+  }
+
+  render() {
+    if (!this.state.hasError) return this.props.children;
+
+    return (
+      <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4 px-4 text-center">
+        <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
+          <p className="text-base font-bold text-foreground">Không thể tải trang này.</p>
+          <p className="mt-2 max-w-sm text-sm text-muted-foreground">
+            Có thể phiên bản frontend vừa được cập nhật hoặc trình duyệt đang giữ cache cũ.
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="mt-5 inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-bold text-primary-foreground"
+          >
+            <RefreshCw className="h-4 w-4" />
+            Tải lại trang
+          </button>
+        </div>
+      </div>
+    );
+  }
+}
 
 const cleanMaintenanceText = (value: string | undefined, fallback: string) => {
   const text = String(value || "").trim();
@@ -618,45 +668,47 @@ const AppContent = () => {
       <AuthLoader maintenanceLocked={Boolean(maintenance?.enabled && !isAdmin)} />
       {!hideChrome && <Navbar maintenanceMode={maintenanceChrome} />}
       <main className="flex-1">
-        <Suspense fallback={<PageLoader />}>
-          <AnimatePresence mode="wait">
-            <Routes location={location} key={location.pathname}>
-              <Route path="/" element={<Index />} />
-              <Route path="/manga" element={<BrowseManga />} />
-              <Route path="/manga/:source/:id" element={<MangaDetail />} />
-              <Route path="/manga/:id" element={<MangaDetail />} />
-              <Route path="/chapter/:id" element={<ChapterReader />} />
-              <Route path="/search" element={<SearchPage />} />
-              <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
-              <Route path="/profile/:userId" element={<PublicProfilePage />} />
-              <Route path="/u/:userId" element={<PublicProfilePage />} />
-              <Route path="/bookmarks" element={<ProtectedRoute><BookmarksPage /></ProtectedRoute>} />
-              <Route path="/history" element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
-              <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
-              <Route path="/notifications" element={<ProtectedRoute><NotificationsPage /></ProtectedRoute>} />
-              <Route path="/upload" element={<ProtectedRoute allowedRoles={['uploader','moderator','admin']}><UploadDashboard /></ProtectedRoute>} />
-              <Route path="/upload/new" element={<ProtectedRoute allowedRoles={['uploader','moderator','admin']}><UploadChapter /></ProtectedRoute>} />
-              <Route path="/upload/editor" element={<ProtectedRoute allowedRoles={['uploader','moderator','admin']}><UploadTranslationStudio /></ProtectedRoute>} />
-              <Route path="/admin" element={<ProtectedRoute allowedRoles={['moderator','admin']}><AdminPanel /></ProtectedRoute>} />
-              <Route path="/admin/review/:id" element={<ProtectedRoute allowedRoles={['moderator','admin']}><AdminChapterReview /></ProtectedRoute>} />
-              <Route path="/rankings" element={<RankingsPage />} />
-              <Route path="/login" element={<GuestRoute><LoginPage /></GuestRoute>} />
-              <Route path="/register" element={<GuestRoute><RegisterPage /></GuestRoute>} />
-              <Route path="/forgot-password" element={<GuestRoute><ForgotPasswordPage /></GuestRoute>} />
-              <Route path="/auth/callback" element={<AuthCallbackPage />} />
-              <Route path="/support" element={<SupportPage />} />
-              <Route path="/contact" element={<ContactPage />} />
-              <Route path="/following" element={<ProtectedRoute><FollowingPage /></ProtectedRoute>} />
-              <Route path="/report" element={<ProtectedRoute><ReportPage /></ProtectedRoute>} />
-              <Route path="/about" element={<AboutPage />} />
-              <Route path="/faq" element={<FaqPage />} />
-              <Route path="/disclaimer" element={<DisclaimerPage />} />
-              <Route path="/banned" element={<BannedPage />} />
-              <Route path="/forbidden" element={<ForbiddenPage />} />
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </AnimatePresence>
-        </Suspense>
+        <RouteErrorBoundary resetKey={location.pathname}>
+          <Suspense fallback={<PageLoader />}>
+            <AnimatePresence mode="wait">
+              <Routes location={location} key={location.pathname}>
+                <Route path="/" element={<Index />} />
+                <Route path="/manga" element={<BrowseManga />} />
+                <Route path="/manga/:source/:id" element={<MangaDetail />} />
+                <Route path="/manga/:id" element={<MangaDetail />} />
+                <Route path="/chapter/:id" element={<ChapterReader />} />
+                <Route path="/search" element={<SearchPage />} />
+                <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
+                <Route path="/profile/:userId" element={<PublicProfilePage />} />
+                <Route path="/u/:userId" element={<PublicProfilePage />} />
+                <Route path="/bookmarks" element={<ProtectedRoute><BookmarksPage /></ProtectedRoute>} />
+                <Route path="/history" element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
+                <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
+                <Route path="/notifications" element={<ProtectedRoute><NotificationsPage /></ProtectedRoute>} />
+                <Route path="/upload" element={<ProtectedRoute allowedRoles={['uploader','moderator','admin']}><UploadDashboard /></ProtectedRoute>} />
+                <Route path="/upload/new" element={<ProtectedRoute allowedRoles={['uploader','moderator','admin']}><UploadChapter /></ProtectedRoute>} />
+                <Route path="/upload/editor" element={<ProtectedRoute allowedRoles={['uploader','moderator','admin']}><UploadTranslationStudio /></ProtectedRoute>} />
+                <Route path="/admin" element={<ProtectedRoute allowedRoles={['moderator','admin']}><AdminPanel /></ProtectedRoute>} />
+                <Route path="/admin/review/:id" element={<ProtectedRoute allowedRoles={['moderator','admin']}><AdminChapterReview /></ProtectedRoute>} />
+                <Route path="/rankings" element={<RankingsPage />} />
+                <Route path="/login" element={<GuestRoute><LoginPage /></GuestRoute>} />
+                <Route path="/register" element={<GuestRoute><RegisterPage /></GuestRoute>} />
+                <Route path="/forgot-password" element={<GuestRoute><ForgotPasswordPage /></GuestRoute>} />
+                <Route path="/auth/callback" element={<AuthCallbackPage />} />
+                <Route path="/support" element={<SupportPage />} />
+                <Route path="/contact" element={<ContactPage />} />
+                <Route path="/following" element={<ProtectedRoute><FollowingPage /></ProtectedRoute>} />
+                <Route path="/report" element={<ProtectedRoute><ReportPage /></ProtectedRoute>} />
+                <Route path="/about" element={<AboutPage />} />
+                <Route path="/faq" element={<FaqPage />} />
+                <Route path="/disclaimer" element={<DisclaimerPage />} />
+                <Route path="/banned" element={<BannedPage />} />
+                <Route path="/forbidden" element={<ForbiddenPage />} />
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </AnimatePresence>
+          </Suspense>
+        </RouteErrorBoundary>
       </main>
       {!hideChrome && !maintenanceChrome && <Footer />}
     </div>

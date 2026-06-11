@@ -1,9 +1,11 @@
 """
 Reports and support tickets router.
 """
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
-from fastapi_app.dependencies import get_current_user, get_supabase
+from fastapi_app.dependencies import get_current_user, get_optional_user, get_supabase
 from fastapi_app.models.schemas import ReportCreate
 from fastapi_app.utils.anti_spam import (
     check_fixed_window,
@@ -26,6 +28,9 @@ REPORT_SAME_TARGET_WINDOW_SECONDS = 10 * 60
 SUPPORT_EMAIL_LIMIT_PER_USER_10_MINUTES = 3
 SUPPORT_EMAIL_LIMIT_PER_USER_HOUR = 8
 SUPPORT_EMAIL_LIMIT_PER_IP_HOUR = 20
+GUEST_REPORT_LIMIT_PER_MINUTE = 2
+GUEST_REPORT_LIMIT_PER_HOUR = 10
+PUBLIC_SUPPORT_TYPES = {"bug", "account", "content", "other"}
 RECAPTCHA_REPORT_TYPES = {
     "bug",
     "account",
@@ -38,7 +43,7 @@ RECAPTCHA_REPORT_TYPES = {
 }
 
 
-def _enforce_report_submit_limits(request: Request, user_id: str) -> None:
+def _enforce_report_submit_limits(request: Request, user_id: str | None) -> None:
     fingerprint = request_fingerprint(request)
     enforce_fixed_window(
         f"report:ip:min:{fingerprint}",
@@ -52,6 +57,21 @@ def _enforce_report_submit_limits(request: Request, user_id: str) -> None:
         60 * 60,
         detail="IP này đã gửi quá nhiều ticket",
     )
+    if not user_id:
+        enforce_fixed_window(
+            f"report:guest:min:{fingerprint}",
+            GUEST_REPORT_LIMIT_PER_MINUTE,
+            60,
+            detail="IP này đang gửi ticket quá nhanh",
+        )
+        enforce_fixed_window(
+            f"report:guest:hour:{fingerprint}",
+            GUEST_REPORT_LIMIT_PER_HOUR,
+            60 * 60,
+            detail="IP này đã gửi quá nhiều ticket",
+        )
+        return
+
     enforce_user_action_limit(
         "report:min",
         user_id,
@@ -68,13 +88,16 @@ def _enforce_report_submit_limits(request: Request, user_id: str) -> None:
     )
 
 
-def _allow_support_email_notification(request: Request, user_id: str) -> bool:
+def _allow_support_email_notification(request: Request, user_id: str | None) -> bool:
     fingerprint = request_fingerprint(request)
-    checks = (
-        (f"support-email:user:10m:{user_id}", SUPPORT_EMAIL_LIMIT_PER_USER_10_MINUTES, 10 * 60),
-        (f"support-email:user:hour:{user_id}", SUPPORT_EMAIL_LIMIT_PER_USER_HOUR, 60 * 60),
-        (f"support-email:ip:hour:{fingerprint}", SUPPORT_EMAIL_LIMIT_PER_IP_HOUR, 60 * 60),
-    )
+    checks = [(f"support-email:ip:hour:{fingerprint}", SUPPORT_EMAIL_LIMIT_PER_IP_HOUR, 60 * 60)]
+    if user_id:
+        checks.extend(
+            [
+                (f"support-email:user:10m:{user_id}", SUPPORT_EMAIL_LIMIT_PER_USER_10_MINUTES, 10 * 60),
+                (f"support-email:user:hour:{user_id}", SUPPORT_EMAIL_LIMIT_PER_USER_HOUR, 60 * 60),
+            ]
+        )
     for key, limit, window_seconds in checks:
         allowed, _, _ = check_fixed_window(key, limit, window_seconds)
         if not allowed:
@@ -87,26 +110,33 @@ async def create_report(
     request: Request,
     background_tasks: BackgroundTasks,
     data: ReportCreate,
-    user=Depends(get_current_user),
+    user=Depends(get_optional_user),
     db=Depends(get_supabase),
 ):
     """Create a report/support ticket."""
     if data.report_type.value in RECAPTCHA_REPORT_TYPES:
         await enforce_recaptcha(request, data.recaptcha_token)
 
-    _enforce_report_submit_limits(request, user["id"])
+    report_type = data.report_type.value
+    user_id = str(user["id"]) if user else None
+    is_public_support = report_type in PUBLIC_SUPPORT_TYPES
+
+    if not user and not is_public_support:
+        raise HTTPException(status_code=401, detail="Vui lòng đăng nhập để gửi báo cáo này")
+
+    _enforce_report_submit_limits(request, user_id)
 
     target_key = hash_value(
-        f"{data.report_type.value}:{data.target_id or ''}:{data.title[:120]}"
+        f"{report_type}:{data.target_id or ''}:{data.title[:120]}"
     )
     enforce_fixed_window(
-        f"report:same-target:{user['id']}:{target_key}",
+        f"report:same-target:{user_id or request_fingerprint(request)}:{target_key}",
         1,
         REPORT_SAME_TARGET_WINDOW_SECONDS,
         detail="Bạn vừa gửi báo cáo tương tự",
     )
 
-    if data.report_type.value == "comment":
+    if report_type == "comment":
         target_id = str(data.target_id or "").strip()
         if not target_id:
             raise HTTPException(
@@ -130,28 +160,38 @@ async def create_report(
                 detail="Không thể tự báo cáo bình luận của chính bạn",
             )
 
-    result = db.table("reports").insert({
-        "reporter_id": user["id"],
-        "report_type": data.report_type.value,
-        "target_id": data.target_id,
-        "title": data.title,
-        "description": data.description,
-    }).execute()
-
-    report = result.data[0] if result.data else None
+    report = None
+    if user:
+        result = db.table("reports").insert({
+            "reporter_id": user["id"],
+            "report_type": report_type,
+            "target_id": data.target_id,
+            "title": data.title,
+            "description": data.description,
+        }).execute()
+        report = result.data[0] if result.data else None
+    else:
+        report = {
+            "id": "",
+            "report_type": report_type,
+            "target_id": data.target_id,
+            "title": data.title,
+            "description": data.description,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
     email_status = "not_created"
     if not report:
         email_status = "not_created"
     elif not support_email_configured():
         email_status = "not_configured"
-    elif not _allow_support_email_notification(request, user["id"]):
+    elif not _allow_support_email_notification(request, user_id):
         email_status = "rate_limited"
     else:
         email_status = "queued"
         background_tasks.add_task(
             send_support_ticket_email,
             report=report,
-            reporter=user,
+            reporter=user or {"id": "", "email": "", "role": "guest"},
         )
 
     return {

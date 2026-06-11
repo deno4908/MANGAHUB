@@ -1,5 +1,4 @@
-import { useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Send, AlertTriangle, HelpCircle, Bug, MessageSquare, CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -25,7 +24,7 @@ const categories = [
 ];
 
 const SupportPage = () => {
-  const isLoggedIn = useUserStore(s => s.isLoggedIn);
+  const user = useUserStore(s => s.user);
   const [form, setForm] = useState<Partial<TicketForm>>({});
   const [errors, setErrors] = useState<Partial<Record<keyof TicketForm, string>>>({});
   const [submitted, setSubmitted] = useState(false);
@@ -33,6 +32,11 @@ const SupportPage = () => {
   const [captchaToken, setCaptchaToken] = useState('');
   const captchaRef = useRef<ReCaptchaV2Handle>(null);
   const captchaRequired = isRecaptchaConfigured();
+
+  useEffect(() => {
+    if (!user?.email) return;
+    setForm(prev => (prev.email ? prev : { ...prev, email: user.email }));
+  }, [user?.email]);
 
   const updateField = <K extends keyof TicketForm>(key: K, value: TicketForm[K]) => {
     setForm(prev => ({ ...prev, [key]: value }));
@@ -55,27 +59,32 @@ const SupportPage = () => {
       toast.error('Vui lòng xác minh reCAPTCHA trước khi gửi ticket.');
       return;
     }
+
     setSending(true);
     try {
       const response = await reportApi.create({
         report_type: result.data.category,
         title: result.data.subject,
-        description: `[Email: ${result.data.email}]\n${result.data.description}`,
+        description: [
+          `Email liên hệ: ${result.data.email}`,
+          `Người gửi: ${user?.id || 'guest'}`,
+          '',
+          result.data.description,
+        ].join('\n'),
         recaptcha_token: captchaToken,
       });
-      setSubmitted(true);
+
       const emailStatus = response?.support_email?.status;
+      setSubmitted(true);
       if (emailStatus === 'queued') {
-        toast.success('Ticket đã lưu và email CSKH đã được đưa vào hàng chờ.');
+        toast.success('Ticket đã được gửi về CSKH.');
       } else if (emailStatus === 'not_configured') {
-        toast.warning('Ticket đã lưu, nhưng SMTP chưa cấu hình nên chưa gửi email CSKH.');
+        toast.warning('Ticket đã nhận, nhưng SMTP chưa cấu hình nên chưa gửi email CSKH.');
       } else if (emailStatus === 'rate_limited') {
-        toast.warning('Ticket đã lưu, nhưng email CSKH đang bị giới hạn chống spam.');
+        toast.warning('Ticket đã nhận, nhưng email CSKH đang bị giới hạn chống spam.');
       } else {
         toast.success('Ticket đã được gửi thành công!');
       }
-      return;
-      toast.success('Ticket đã được gửi thành công!');
     } catch (err: any) {
       toast.error(err.message || 'Không thể gửi ticket. Vui lòng thử lại.');
     } finally {
@@ -83,32 +92,6 @@ const SupportPage = () => {
       setSending(false);
     }
   };
-
-  if (!isLoggedIn) {
-    return (
-      <div className="container mx-auto px-4 py-16">
-        <motion.div
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="max-w-md mx-auto text-center"
-        >
-          <div className="w-16 h-16 rounded-full bg-primary/10 border border-primary/20 flex items-center justify-center mx-auto mb-5">
-            <MessageSquare className="w-8 h-8 text-primary" />
-          </div>
-          <h2 className="text-xl font-bold mb-2">Cần đăng nhập để gửi ticket</h2>
-          <p className="text-sm text-muted-foreground mb-6">
-            Ticket hỗ trợ được gắn với tài khoản để admin có thể kiểm tra lịch sử và phản hồi đúng người.
-          </p>
-          <Link
-            to="/login"
-            className="inline-flex items-center justify-center px-5 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:opacity-90 transition-opacity"
-          >
-            Đăng nhập
-          </Link>
-        </motion.div>
-      </div>
-    );
-  }
 
   if (submitted) {
     return (
@@ -126,7 +109,12 @@ const SupportPage = () => {
             Chúng tôi sẽ phản hồi qua email trong vòng 24 giờ. Cảm ơn bạn đã báo cáo.
           </p>
           <button
-            onClick={() => { setSubmitted(false); setForm({}); setErrors({}); setCaptchaToken(''); }}
+            onClick={() => {
+              setSubmitted(false);
+              setForm(user?.email ? { email: user.email } : {});
+              setErrors({});
+              setCaptchaToken('');
+            }}
             className="px-5 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:opacity-90 transition-opacity"
           >
             Gửi ticket mới
@@ -143,12 +131,13 @@ const SupportPage = () => {
           <div className="accent-line" />
           <div>
             <h1 className="ed-heading text-2xl">Hỗ trợ</h1>
-            <p className="text-sm text-muted-foreground mt-0.5">Gửi ticket để báo lỗi hoặc yêu cầu hỗ trợ</p>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              Gửi ticket để báo lỗi hoặc yêu cầu hỗ trợ. Bạn không cần đăng nhập.
+            </p>
           </div>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
-          {/* Category */}
           <div>
             <label className="block text-sm font-semibold mb-2.5">Loại vấn đề</label>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -175,7 +164,6 @@ const SupportPage = () => {
             {errors.category && <p className="text-xs text-destructive mt-1.5">{errors.category}</p>}
           </div>
 
-          {/* Email */}
           <div>
             <label className="block text-sm font-semibold mb-1.5">Email liên hệ</label>
             <input
@@ -188,7 +176,6 @@ const SupportPage = () => {
             {errors.email && <p className="text-xs text-destructive mt-1.5">{errors.email}</p>}
           </div>
 
-          {/* Subject */}
           <div>
             <label className="block text-sm font-semibold mb-1.5">Tiêu đề</label>
             <input
@@ -205,7 +192,6 @@ const SupportPage = () => {
             </div>
           </div>
 
-          {/* Description */}
           <div>
             <label className="block text-sm font-semibold mb-1.5">Mô tả chi tiết</label>
             <textarea
@@ -224,7 +210,6 @@ const SupportPage = () => {
 
           <ReCaptchaV2 ref={captchaRef} onTokenChange={setCaptchaToken} />
 
-          {/* Submit */}
           <button
             type="submit"
             disabled={sending || (captchaRequired && !captchaToken)}
