@@ -491,6 +491,29 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
   }, [isLoggedIn, user?.id, loadSettings, maintenanceLocked]);
 
   useEffect(() => {
+    if (maintenanceLocked || !isLoggedIn) return;
+    let refreshing = false;
+    const keepSessionAlive = () => {
+      if (refreshing || document.hidden) return;
+      refreshing = true;
+      authApi.refresh().finally(() => {
+        refreshing = false;
+      });
+    };
+    keepSessionAlive();
+    const timer = window.setInterval(keepSessionAlive, 10 * 60 * 1000);
+    window.addEventListener('focus', keepSessionAlive);
+    window.addEventListener('online', keepSessionAlive);
+    document.addEventListener('visibilitychange', keepSessionAlive);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', keepSessionAlive);
+      window.removeEventListener('online', keepSessionAlive);
+      document.removeEventListener('visibilitychange', keepSessionAlive);
+    };
+  }, [isLoggedIn, maintenanceLocked]);
+
+  useEffect(() => {
     const handleForceLogout = (e: Event) => {
       const reason = (e as CustomEvent<{ reason?: string }>).detail?.reason;
       if (reason === 'banned') {

@@ -223,7 +223,7 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
     ? resolveMangaDexCardCover(manga.cover, manga.coverProxy)
     : manga.cover;
   const coverFallbackSrc = isMangaDexItem ? DEFAULT_CARD_COVER_FALLBACK : safeCoverFallback;
-  const coverFallbackDelayMs = isMangaDexItem ? 4500 : undefined;
+  const coverFallbackDelayMs = isMangaDexItem ? 12000 : undefined;
   const detailLinkState = { previewManga: manga };
   const detailPath = getMangaDetailPath(manga.id);
   const ratingLabel = Number(manga.rating).toFixed(1);

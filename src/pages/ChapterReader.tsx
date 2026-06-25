@@ -24,6 +24,7 @@ const AUTO_HIDE_DELAY = 3000;
 const VIEW_TRACK_MIN_SECONDS = 12;
 const VIEW_TRACK_MIN_PROGRESS = 15;
 const VIEW_TRACK_MIN_PAGES = 2;
+const READER_META_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const createReadSessionId = () => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -48,6 +49,74 @@ interface PersistedChapterMeta {
   mangaTitle?: string;
   mangaThumb?: string;
   chapters?: { id: string; number: number; title: string }[];
+  savedAt?: number;
+}
+
+function readerMetaKey(chapterId: string): string {
+  return `reader:chapter-meta:${chapterId}`;
+}
+
+function readReaderMetaFromStorage(chapterIds: Array<string | undefined | null>): PersistedChapterMeta {
+  if (typeof window === 'undefined') return {};
+  const keys = Array.from(
+    new Set(
+      chapterIds
+        .map((chapterId) => String(chapterId || '').trim())
+        .filter(Boolean)
+        .map(readerMetaKey),
+    ),
+  );
+  const stores: Storage[] = [window.localStorage, window.sessionStorage];
+
+  for (const key of keys) {
+    for (const store of stores) {
+      try {
+        const raw = store.getItem(key);
+        if (!raw) continue;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') continue;
+        const savedAt = Number(parsed.savedAt || 0);
+        if (savedAt && Date.now() - savedAt > READER_META_TTL_MS) {
+          store.removeItem(key);
+          continue;
+        }
+        return parsed as PersistedChapterMeta;
+      } catch {
+        // Ignore storage errors.
+      }
+    }
+  }
+
+  return {};
+}
+
+function writeReaderMetaToStorage(
+  chapterIds: Array<string | undefined | null>,
+  payload: PersistedChapterMeta,
+) {
+  if (typeof window === 'undefined') return;
+  const keys = Array.from(
+    new Set(
+      chapterIds
+        .map((chapterId) => String(chapterId || '').trim())
+        .filter(Boolean)
+        .map(readerMetaKey),
+    ),
+  );
+  if (!keys.length) return;
+  const value = JSON.stringify({ ...payload, savedAt: Date.now() });
+  for (const key of keys) {
+    try {
+      window.sessionStorage.setItem(key, value);
+    } catch {
+      // Ignore storage errors.
+    }
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {
+      // Ignore storage errors.
+    }
+  }
 }
 
 function isInvalidMangaSlug(slug?: string | null): boolean {
@@ -106,7 +175,7 @@ const ChapterReader = () => {
   const mobileReaderRef = useRef(detectedMobile);
   if (detectedMobile) mobileReaderRef.current = true;
   const isMobile = mobileReaderRef.current;
-  const historySavedRef = useRef(false);
+  const lastHistorySentAtRef = useRef(0);
   const viewTrackedRef = useRef(false);
   const viewSessionStartedRef = useRef(false);
   const readSessionIdRef = useRef('');
@@ -140,17 +209,7 @@ const ChapterReader = () => {
   const rawItem = chapterData?.raw?.data?.item || {};
   const rawSeo = chapterData?.raw?.data?.seoOnPage || {};
 
-  const persistedMeta: PersistedChapterMeta = (() => {
-    if (!id || typeof window === 'undefined') return {};
-    try {
-      const raw = window.sessionStorage.getItem(`reader:chapter-meta:${id}`);
-      if (!raw) return {};
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch {
-      return {};
-    }
-  })();
+  const persistedMeta = readReaderMetaFromStorage([id, currentChapterId, normalizedChapterId]);
 
   const fallbackMangaSlug = (() => {
     // Try each field individually — validate before accepting
@@ -169,7 +228,9 @@ const ChapterReader = () => {
   const fallbackChapterTitle = rawItem.chapter_title || '';
   const mangaSlug = cleanSlug(chapterState.mangaSlug || persistedMeta.mangaSlug || fallbackMangaSlug);
   const safeMangaSlug = isInvalidMangaSlug(mangaSlug) ? '' : mangaSlug;
-  const mangaDetailId = String(chapterState.mangaId || persistedMeta.mangaId || '').trim();
+  const rawMangaDetailId = String(chapterState.mangaId || persistedMeta.mangaId || '').trim();
+  const mangaDetailId = rawMangaDetailId || safeMangaSlug;
+  const mangaDetailPath = mangaDetailId ? getMangaDetailPath(mangaDetailId) : '/manga';
   const mangaTitle = chapterState.mangaTitle || persistedMeta.mangaTitle || fallbackMangaTitle;
   const mangaThumb = String(chapterState.mangaThumb || persistedMeta.mangaThumb || fallbackMangaThumb || '').trim();
   const chapterNumber = chapterState.chapterNumber ?? fallbackChapterNumber;
@@ -242,21 +303,17 @@ const ChapterReader = () => {
   })();
 
   useEffect(() => {
-    if (!id || typeof window === 'undefined') return;
+    if (!id) return;
     if (!safeMangaSlug || chapters.length === 0) return;
-    try {
-      const payload: PersistedChapterMeta = {
-        mangaId: mangaDetailId,
-        mangaSlug: safeMangaSlug,
-        mangaTitle,
-        mangaThumb,
-        chapters,
-      };
-      window.sessionStorage.setItem(`reader:chapter-meta:${id}`, JSON.stringify(payload));
-    } catch {
-      // Ignore storage errors.
-    }
-  }, [id, mangaDetailId, safeMangaSlug, mangaTitle, mangaThumb, chapters]);
+    const payload: PersistedChapterMeta = {
+      mangaId: mangaDetailId,
+      mangaSlug: safeMangaSlug,
+      mangaTitle,
+      mangaThumb,
+      chapters,
+    };
+    writeReaderMetaToStorage([id, currentChapterId, normalizedChapterId], payload);
+  }, [id, currentChapterId, normalizedChapterId, mangaDetailId, safeMangaSlug, mangaTitle, mangaThumb, chapters]);
 
   // Normalize chapter order to avoid edge cases like chapter 0 losing next button.
   const orderedChapters = [...chapters].sort((a, b) => a.number - b.number);
@@ -281,7 +338,7 @@ const ChapterReader = () => {
     setHorizontalRetryCount(0);
     setHorizontalUseFallback(false);
     setHorizontalLoaded(false);
-    historySavedRef.current = false;
+    lastHistorySentAtRef.current = 0;
     viewTrackedRef.current = false;
     viewSessionStartedRef.current = false;
     readSessionIdRef.current = createReadSessionId();
@@ -434,31 +491,24 @@ const ChapterReader = () => {
     chapter_name: string;
     page: number;
     progress: number;
+    client_read_at: string;
   }) => {
     queryClient.setQueryData(['history'], (old: any) => {
       const current = Array.isArray(old) ? old : [];
       const filtered = current.filter((it: any) => it.manga_slug !== entry.manga_slug);
-      return [{ ...entry, read_at: new Date().toISOString() }, ...filtered];
+      return [{ ...entry, read_at: entry.client_read_at }, ...filtered];
     });
   }, [queryClient]);
 
-  // ─── Save reading history ───
-  useEffect(() => {
-    if (!isLoggedIn || !id || !safeMangaSlug || historySavedRef.current) return;
-    historySavedRef.current = true;
-    const entry = {
-      manga_slug: safeMangaSlug,
-      manga_title: mangaTitle,
-      manga_thumb: mangaThumb,
-      chapter_id: id,
-      chapter_name: chapterTitle || `Chương ${chapterNumber}`,
-      page: 0,
-      progress: 0,
-    };
-    historyApi.add(entry)
-      .then(() => upsertHistoryCache(entry))
-      .catch(() => {});
-  }, [isLoggedIn, id, safeMangaSlug, mangaTitle, mangaThumb, chapterNumber, chapterTitle, upsertHistoryCache]);
+  const hasMeaningfulHistoryProgress = useCallback((progress: number, page: number) => {
+    if (totalPages <= 0) return false;
+    const elapsedSeconds = readSessionStartedAtRef.current
+      ? Math.floor((Date.now() - readSessionStartedAtRef.current) / 1000)
+      : 0;
+    const pageSeen = Math.max(0, page) + 1;
+    const minProgress = totalPages <= 2 ? 1 : 5;
+    return elapsedSeconds >= 8 || progress >= minProgress || pageSeen >= 2;
+  }, [totalPages]);
 
   // ─── Update progress periodically ───
   useEffect(() => {
@@ -469,6 +519,11 @@ const ChapterReader = () => {
     const page = store.mode === 'horizontal' ? store.currentPage : visiblePage;
 
     const timer = setTimeout(() => {
+      if (!hasMeaningfulHistoryProgress(progress, page)) return;
+      const clientReadAt = new Date().toISOString();
+      const sentAt = Date.parse(clientReadAt);
+      if (sentAt - lastHistorySentAtRef.current < 2500) return;
+      lastHistorySentAtRef.current = sentAt;
       const entry = {
         manga_slug: safeMangaSlug,
         manga_title: mangaTitle,
@@ -477,14 +532,72 @@ const ChapterReader = () => {
         chapter_name: chapterTitle || `Chương ${chapterNumber}`,
         page,
         progress: Math.min(progress, 100),
+        client_read_at: clientReadAt,
       };
       historyApi.add(entry)
-        .then(() => upsertHistoryCache(entry))
+        .then((result) => {
+          if (result?.stale) return;
+          upsertHistoryCache(entry);
+        })
         .catch(() => {});
     }, 3000); // debounce 3s
 
     return () => clearTimeout(timer);
-  }, [isLoggedIn, id, safeMangaSlug, visiblePage, store.currentPage, scrollProgress, totalPages, store.mode, mangaTitle, mangaThumb, chapterTitle, chapterNumber, upsertHistoryCache]);
+  }, [isLoggedIn, id, safeMangaSlug, visiblePage, store.currentPage, scrollProgress, totalPages, store.mode, mangaTitle, mangaThumb, chapterTitle, chapterNumber, upsertHistoryCache, hasMeaningfulHistoryProgress]);
+
+  useEffect(() => {
+    if (!isLoggedIn || !id || !safeMangaSlug || totalPages === 0) return;
+
+    const flushHistory = () => {
+      const progress = store.mode === 'horizontal'
+        ? Math.round(((store.currentPage + 1) / totalPages) * 100)
+        : Math.round(scrollProgress);
+      const page = store.mode === 'horizontal' ? store.currentPage : visiblePage;
+      if (!hasMeaningfulHistoryProgress(progress, page)) return;
+      const entry = {
+        manga_slug: safeMangaSlug,
+        manga_title: mangaTitle,
+        manga_thumb: mangaThumb,
+        chapter_id: id,
+        chapter_name: chapterTitle || `Chương ${chapterNumber}`,
+        page,
+        progress: Math.min(Math.max(progress, 0), 100),
+        client_read_at: new Date().toISOString(),
+      };
+      historyApi.add(entry, { keepalive: true, timeoutMs: 5_000 })
+        .then((result) => {
+          if (result?.stale) return;
+          upsertHistoryCache(entry);
+        })
+        .catch(() => {});
+    };
+
+    const onVisibilityChange = () => {
+      if (document.hidden) flushHistory();
+    };
+
+    window.addEventListener('pagehide', flushHistory);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', flushHistory);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [
+    isLoggedIn,
+    id,
+    safeMangaSlug,
+    totalPages,
+    store.mode,
+    store.currentPage,
+    visiblePage,
+    scrollProgress,
+    mangaTitle,
+    mangaThumb,
+    chapterTitle,
+    chapterNumber,
+    upsertHistoryCache,
+    hasMeaningfulHistoryProgress,
+  ]);
 
   useEffect(() => {
     if (store.autoScroll && store.mode !== 'horizontal') {
@@ -670,7 +783,7 @@ const ChapterReader = () => {
 
   const navigateChapter = (ch: { id: string; number: number; title: string }) => {
     navigate(`/chapter/${ch.id}`, {
-      state: { mangaId: mangaDetailId, mangaSlug, mangaTitle, mangaThumb, chapterNumber: ch.number, chapterTitle: ch.title, chapters },
+      state: { mangaId: mangaDetailId, mangaSlug: safeMangaSlug, mangaTitle, mangaThumb, chapterNumber: ch.number, chapterTitle: ch.title, chapters },
     });
   };
 
@@ -748,7 +861,7 @@ const ChapterReader = () => {
           >
             <div className="container mx-auto px-3 py-2 flex items-center justify-between">
               <div className="flex items-center gap-2 min-w-0">
-                <Link to={getMangaDetailPath(mangaDetailId || safeMangaSlug)} className="p-1.5 rounded-lg hover:bg-secondary/80 transition-colors shrink-0">
+                <Link to={mangaDetailPath} className="p-1.5 rounded-lg hover:bg-secondary/80 transition-colors shrink-0">
                   <ArrowLeft className="w-5 h-5" />
                 </Link>
                 <div className="min-w-0">
@@ -866,7 +979,7 @@ const ChapterReader = () => {
                     <ChevronLeft className="w-4 h-4" /> Chương trước
                   </button>
                 )}
-                <Link to={getMangaDetailPath(mangaDetailId || safeMangaSlug)} className="px-5 py-2.5 rounded-xl bg-secondary border border-border text-sm font-bold hover:bg-secondary/80 transition-colors flex items-center gap-1.5">
+                <Link to={mangaDetailPath} className="px-5 py-2.5 rounded-xl bg-secondary border border-border text-sm font-bold hover:bg-secondary/80 transition-colors flex items-center gap-1.5">
                   <Home className="w-4 h-4" /> Chi tiết truyện
                 </Link>
                 {nextChapter && (

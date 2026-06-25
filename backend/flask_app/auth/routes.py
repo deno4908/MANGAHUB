@@ -28,7 +28,10 @@ _LEGACY_PASSWORD_HASH_RE = re.compile(r"^[a-f0-9]{64}$")
 _MIN_PBKDF2_ITERATIONS = 200_000
 _SIGN_OUT_SCOPES = {"local", "global", "others"}
 _REFRESH_COOKIE_NAME = "mh_refresh_token"
-_REFRESH_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
+_REFRESH_COOKIE_MAX_AGE_SECONDS = max(
+    60 * 60 * 24,
+    int(getattr(config, "REFRESH_COOKIE_MAX_AGE_SECONDS", 60 * 60 * 24 * 365 * 5)),
+)
 _EMAIL_VERIFY_TIMEOUT_MINUTES = max(1, int(getattr(config, "EMAIL_VERIFY_TIMEOUT_MINUTES", 15)))
 _DEFAULT_USER_SETTINGS = {
     "reading_mode": "vertical",

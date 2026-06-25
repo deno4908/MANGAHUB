@@ -50,6 +50,9 @@ class Config:
 
     # Auth
     EMAIL_VERIFY_TIMEOUT_MINUTES: int = int(os.getenv("EMAIL_VERIFY_TIMEOUT_MINUTES", "15"))
+    REFRESH_COOKIE_MAX_AGE_SECONDS: int = int(
+        os.getenv("REFRESH_COOKIE_MAX_AGE_SECONDS", str(60 * 60 * 24 * 365 * 5))
+    )
 
     # Google reCAPTCHA v2
     RECAPTCHA_SECRET_KEY: str = os.getenv("RECAPTCHA_SECRET_KEY", "")

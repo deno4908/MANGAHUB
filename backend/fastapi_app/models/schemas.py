@@ -132,6 +132,7 @@ class HistoryEntry(BaseModel):
     chapter_name: str = ""
     page: int = 0
     progress: float = 0
+    client_read_at: Optional[str] = None
 
 
 # ============================================================

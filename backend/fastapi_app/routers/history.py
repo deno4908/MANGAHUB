@@ -3,7 +3,7 @@ Reading history router.
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -15,6 +15,22 @@ router = APIRouter()
 
 HISTORY_UPDATE_LIMIT_PER_MINUTE = 90
 HISTORY_UPDATE_LIMIT_PER_10_MINUTES = 600
+
+
+def _parse_client_read_at(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if parsed > now + timedelta(minutes=5):
+            return now
+        return parsed
+    except Exception:
+        return None
 
 
 @router.get("/")
@@ -66,10 +82,13 @@ async def add_or_update_history(
     )
 
     try:
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_dt = datetime.now(timezone.utc)
+        client_read_at = _parse_client_read_at(data.client_read_at)
+        read_at_dt = client_read_at or now_dt
+        now_iso = read_at_dt.isoformat()
         existing = (
             db.table("reading_history")
-            .select("id,manga_title,manga_thumb")
+            .select("id,manga_title,manga_thumb,read_at")
             .eq("user_id", user["id"])
             .eq("manga_slug", data.manga_slug)
             .order("read_at", desc=True)
@@ -82,6 +101,9 @@ async def add_or_update_history(
         existing_thumb = str(existing_row.get("manga_thumb") or "").strip()
         incoming_title = str(data.manga_title or "").strip()
         incoming_thumb = str(data.manga_thumb or "").strip()
+        existing_read_at = _parse_client_read_at(str(existing_row.get("read_at") or ""))
+        if existing_read_at and read_at_dt < existing_read_at:
+            return {"message": "Bỏ qua cập nhật lịch sử cũ", "stale": True}
 
         payload = {
             "user_id": user["id"],

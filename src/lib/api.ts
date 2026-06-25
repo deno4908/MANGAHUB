@@ -105,6 +105,7 @@ try {
 let accessToken: string | null = null;
 let refreshInFlight: Promise<boolean> | null = null;
 let refreshBlockedUntil = 0;
+let lastRefreshFailureHard = false;
 
 const REFRESH_BACKOFF_MS = 15_000;
 const REFRESH_RATE_LIMIT_BACKOFF_MS = 60_000;
@@ -123,12 +124,14 @@ export type MaintenanceState = {
 export function setTokens(access: string, _refresh?: string) {
   accessToken = access;
   refreshBlockedUntil = 0;
+  lastRefreshFailureHard = false;
   localStorage.removeItem(BAN_LOCK_KEY);
 }
 
 export function clearTokens() {
   accessToken = null;
   refreshBlockedUntil = 0;
+  lastRefreshFailureHard = false;
   localStorage.removeItem("access_token");
   localStorage.removeItem("refresh_token");
 }
@@ -362,7 +365,24 @@ function shouldRefreshBeforeRequest(token: string): boolean {
   const exp = parseJwtExp(token);
   if (!exp) return false;
   const now = Math.floor(Date.now() / 1000);
-  return exp - now <= 30;
+  return exp - now <= 5 * 60;
+}
+
+function isHardRefreshFailure(message: string): boolean {
+  const msg = normalizeText(message);
+  if (!msg) return false;
+  return (
+    msg.includes("refresh token la bat buoc") ||
+    msg.includes("refresh token khong hop le") ||
+    msg.includes("refresh token khong khop") ||
+    msg.includes("invalid refresh") ||
+    msg.includes("session not found") ||
+    msg.includes("requires_relogin") ||
+    msg.includes("can xac thuc lai") ||
+    msg.includes("phien dang nhap da het han") ||
+    msg.includes("phien dang nhap can xac thuc lai") ||
+    msg.includes("tai khoan da bi cam")
+  );
 }
 
 async function refreshAccessToken(): Promise<boolean> {
@@ -525,9 +545,13 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
     }
 
     // Stop retry storms when the session can no longer be refreshed.
-    clearTokens();
-    emitForceLogout("session-expired");
-    throw new Error("Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại");
+    if (lastRefreshFailureHard) {
+      clearTokens();
+      emitForceLogout("session-expired");
+      throw new Error("Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại");
+    }
+
+    throw new Error("Không thể làm mới phiên đăng nhập do mạng hoặc máy chủ chậm. Vui lòng thử lại.");
   }
 
   if (res.status === 403) {
@@ -887,19 +911,23 @@ export const authApi = {
   },
   refresh: async () => {
     try {
+      lastRefreshFailureHard = false;
       const data = await auth<any>("/auth/refresh", {
         method: "POST",
         body: JSON.stringify({ access_token: accessToken || "" }),
-        timeoutMs: 8_000,
+        timeoutMs: 15_000,
       });
       if (data.session) {
         setTokens(data.session.access_token);
         return true;
       }
+      lastRefreshFailureHard = true;
       setRefreshBackoff("refresh failed");
       return false;
     } catch (e: any) {
-      setRefreshBackoff(String(e?.message || "refresh error"));
+      const message = String(e?.message || "refresh error");
+      lastRefreshFailureHard = isHardRefreshFailure(message);
+      setRefreshBackoff(message);
       return false;
     }
   },
@@ -1018,8 +1046,14 @@ export const historyApi = {
     chapter_name?: string;
     page?: number;
     progress?: number;
-  }) =>
-    api<any>("/api/history/", { method: "POST", body: JSON.stringify(entry) }),
+    client_read_at?: string;
+  }, options?: Pick<ApiRequestInit, "keepalive" | "timeoutMs">) =>
+    api<any>("/api/history/", {
+      method: "POST",
+      body: JSON.stringify(entry),
+      keepalive: options?.keepalive,
+      timeoutMs: options?.timeoutMs,
+    }),
   remove: (slug: string) =>
     api<any>(`/api/history/${slug}`, { method: "DELETE" }),
   clear: () => api<any>("/api/history/", { method: "DELETE" }),
