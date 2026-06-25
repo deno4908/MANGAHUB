@@ -3044,37 +3044,47 @@ async def chapter_detail(chapter_id: str):
             )
 
             parts = [p for p in chapter_path.split("/") if p.strip()]
+            reserved = {
+                "uploads",
+                "comics",
+                "chapters",
+                "chapter",
+                "api",
+                "img",
+                "images",
+                "v1",
+                "data",
+            }
+
+            def clean_slug(value: str) -> str:
+                return re.sub(r"[^a-z0-9-]", "", (value or "").strip().lower())
+
+            def is_invalid_slug(value: str) -> bool:
+                s = clean_slug(value)
+                if not s or len(s) < 3:
+                    return True
+                if s in reserved:
+                    return True
+                if re.match(r"^\d+$", s) or re.match(r"^[0-9a-f]{20,}$", s):
+                    return True
+                compact = re.sub(r"[-_\s.]+", "", s)
+                return bool(re.match(r"^(c|ch|chap|chapter|chuong|tap|episode|ep)\d", compact))
 
             # Strategy 1: Find "comics" segment → next is the manga slug
             extracted_slug = None
             for i, p in enumerate(parts):
                 if p.lower() == "comics" and i + 1 < len(parts):
-                    extracted_slug = parts[i + 1]
+                    candidate = clean_slug(parts[i + 1])
+                    if not is_invalid_slug(candidate):
+                        extracted_slug = candidate
                     break
 
             # Strategy 2: If no "comics" found, find best slug-like segment
             # Valid manga slugs: contain hyphens, aren't pure numbers/hex, aren't reserved words
             if not extracted_slug:
-                reserved = {
-                    "uploads",
-                    "comics",
-                    "chapters",
-                    "chapter",
-                    "api",
-                    "img",
-                    "images",
-                    "v1",
-                    "data",
-                }
                 for p in parts:
-                    s = p.strip().lower()
-                    if not s or len(s) < 3:
-                        continue
-                    if s in reserved:
-                        continue
-                    if re.match(r"^\d+$", s) or re.match(r"^[0-9a-f]{20,}$", s):
-                        continue
-                    if re.match(r"^chapter\d*$", s):
+                    s = clean_slug(p)
+                    if is_invalid_slug(s):
                         continue
                     # Good candidate — has hyphens or looks like a slug
                     if "-" in s:

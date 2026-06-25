@@ -10,6 +10,8 @@ interface ChapterListProps {
   mangaDetailId?: string;
   mangaTitle?: string;
   defaultSortAsc?: boolean;
+  readerChapters?: Chapter[];
+  readerChapterSourceFilter?: string;
 }
 
 const CHAPTERS_PER_PAGE = 100;
@@ -23,7 +25,29 @@ function chapterCredit(chapter: Chapter): string {
   return group || source;
 }
 
-const ChapterList = ({ chapters, mangaId, mangaDetailId, mangaTitle, defaultSortAsc = true }: ChapterListProps) => {
+function toReaderChapterState(chapter: Chapter) {
+  return {
+    id: chapter.id,
+    number: chapter.number,
+    title: chapter.title,
+    scanlationGroup: chapter.scanlationGroup,
+    translationSource: chapter.translationSource,
+    translationSourceLabel: chapter.translationSourceLabel,
+    scanlationGroups: chapter.scanlationGroups,
+    translatedLanguage: chapter.translatedLanguage,
+    isUserUpload: chapter.isUserUpload,
+  };
+}
+
+const ChapterList = ({
+  chapters,
+  mangaId,
+  mangaDetailId,
+  mangaTitle,
+  defaultSortAsc = true,
+  readerChapters,
+  readerChapterSourceFilter,
+}: ChapterListProps) => {
   const [sortAsc, setSortAsc] = useState(defaultSortAsc);
   const [page, setPage] = useState(1);
   const navigate = useNavigate();
@@ -48,7 +72,8 @@ const ChapterList = ({ chapters, mangaId, mangaDetailId, mangaTitle, defaultSort
         mangaTitle: mangaTitle || '',
         chapterNumber: ch.number,
         chapterTitle: ch.title,
-        chapters: chapters.map(c => ({ id: c.id, number: c.number, title: c.title })),
+        chapters: (readerChapters?.length ? readerChapters : chapters).map(toReaderChapterState),
+        chapterSourceFilter: readerChapterSourceFilter,
       },
     });
   };

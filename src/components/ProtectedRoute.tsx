@@ -9,12 +9,6 @@ interface ProtectedRouteProps {
   allowedRoles?: string[];
 }
 
-/**
- * Route guard component.
- * - Banned user → shows BannedPage
- * - requireAuth: redirects to /login if not logged in
- * - allowedRoles: redirects to /forbidden if user role not sufficient
- */
 const ROLE_HIERARCHY: Record<string, number> = {
   reader: 0,
   uploader: 1,
@@ -22,38 +16,40 @@ const ROLE_HIERARCHY: Record<string, number> = {
   admin: 3,
 };
 
+const LoadingGate = () => (
+  <div className="flex items-center justify-center min-h-[60vh]">
+    <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+  </div>
+);
+
 const ProtectedRoute = ({ children, requireAuth = true, allowedRoles }: ProtectedRouteProps) => {
   const { user, isLoggedIn, isLoading, hasCheckedSession, loadUser } = useUserStore();
 
-  // Restore an HttpOnly-cookie session once before route decisions.
   useEffect(() => {
     if (!hasCheckedSession && !isLoading) {
       loadUser();
     }
-  }, [hasCheckedSession, isLoggedIn, user, isLoading, loadUser]);
+  }, [hasCheckedSession, isLoading, loadUser]);
 
   if (!hasCheckedSession || isLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-[60vh]">
-        <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-      </div>
-    );
+    return <LoadingGate />;
   }
 
-  // Not logged in
   if (requireAuth && !isLoggedIn) {
     return <Navigate to="/login" replace />;
   }
 
-  // ─── Banned user → show ban screen ───
+  if (requireAuth && isLoggedIn && !user) {
+    return <LoadingGate />;
+  }
+
   if (isLoggedIn && user?.isBanned) {
     return <BannedPage />;
   }
 
-  // Role check → 403 Forbidden
   if (allowedRoles && user) {
     const userLevel = ROLE_HIERARCHY[user.role] ?? 0;
-    const minRequired = Math.min(...allowedRoles.map(r => ROLE_HIERARCHY[r] ?? 0));
+    const minRequired = Math.min(...allowedRoles.map((role) => ROLE_HIERARCHY[role] ?? 0));
     if (userLevel < minRequired) {
       return <Navigate to="/forbidden" replace />;
     }

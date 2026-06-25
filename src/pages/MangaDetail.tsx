@@ -181,6 +181,37 @@ function getChapterGroupOptions(chapter: Manga['chapters'][number]): ChapterGrou
   }];
 }
 
+function toReaderChapterState(chapter: Manga['chapters'][number]) {
+  return {
+    id: chapter.id,
+    number: chapter.number,
+    title: chapter.title,
+    scanlationGroup: chapter.scanlationGroup,
+    translationSource: chapter.translationSource,
+    translationSourceLabel: chapter.translationSourceLabel,
+    scanlationGroups: chapter.scanlationGroups,
+    translatedLanguage: chapter.translatedLanguage,
+    isUserUpload: chapter.isUserUpload,
+  };
+}
+
+function toReaderChapterSourceFilter(translationSource: TranslationSourceFilter, groupId: string): string {
+  const normalizedGroupId = String(groupId || '').trim();
+  if (normalizedGroupId) {
+    const [maybeSource, ...rest] = normalizedGroupId.split(':');
+    const source = maybeSource === TRANSLATION_SOURCE_LOCAL_VALUE || maybeSource === TRANSLATION_SOURCE_MANGADEX_VALUE
+      ? maybeSource
+      : translationSource === TRANSLATION_SOURCE_LOCAL_VALUE
+        ? TRANSLATION_SOURCE_LOCAL_VALUE
+        : TRANSLATION_SOURCE_MANGADEX_VALUE;
+    const key = rest.length > 0 ? rest.join(':') : normalizedGroupId;
+    return `group:${source}:${normalizeSourceGroupKey(key)}`;
+  }
+  if (translationSource === TRANSLATION_SOURCE_MANGADEX_VALUE) return `source:${TRANSLATION_SOURCE_MANGADEX_VALUE}`;
+  if (translationSource === TRANSLATION_SOURCE_LOCAL_VALUE) return `source:${TRANSLATION_SOURCE_LOCAL_VALUE}`;
+  return '__all_sources__';
+}
+
 const MangaDetail = () => {
   // Keep first payload lean so detail page renders quickly, then load the full list in background.
   const MANGADEX_FAST_CHAPTER_LIMIT = 100;
@@ -499,6 +530,10 @@ const MangaDetail = () => {
       getChapterGroupOptions(chapter).some((group) => group.id === mangaDexGroupId)
     ));
   }, [isMangaDex, mangaDexGroupId, sourceFilteredChapters]);
+  const readerChapterSourceFilter = useMemo(
+    () => toReaderChapterSourceFilter(translationSource, mangaDexGroupId),
+    [mangaDexGroupId, translationSource]
+  );
 
   useEffect(() => {
     if (!isMangaDex) return;
@@ -755,7 +790,8 @@ const MangaDetail = () => {
                     mangaThumb: manga.cover,
                     chapterNumber: startChapter.number,
                     chapterTitle: startChapter.title,
-                    chapters: visibleChapters.map(c => ({ id: c.id, number: c.number, title: c.title })),
+                    chapters: mergedChapters.map(toReaderChapterState),
+                    chapterSourceFilter: readerChapterSourceFilter,
                   }}
                   className="px-5 py-2.5 rounded-xl bg-manga-red text-white font-bold text-sm hover:bg-manga-red/90 transition-colors shadow-lg flex items-center gap-2"
                 >
@@ -904,6 +940,8 @@ const MangaDetail = () => {
           <ChapterList
             key={`${activeMangaDexLanguage}:${translationSource}:${mangaDexGroupId || 'all'}:${visibleChapters.length}`}
             chapters={visibleChapters}
+            readerChapters={mergedChapters}
+            readerChapterSourceFilter={readerChapterSourceFilter}
             mangaId={detailReadySlug}
             mangaDetailId={manga.id}
             mangaTitle={manga.title}

@@ -10,6 +10,7 @@ export const FORCE_FORBIDDEN_EVENT = "mb:force-forbidden";
 export const FORCE_MAINTENANCE_EVENT = "mb:force-maintenance";
 export const HOMEPAGE_REFRESH_EVENT = "mb:homepage-refresh";
 const BAN_LOCK_KEY = "banned_lock";
+const SESSION_HINT_KEY = "mb:session-present";
 const BAN_LOCK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const HOMEPAGE_REFRESH_STORAGE_KEY = "mb:homepage-refresh:signal";
 let homepageRefreshChannel: BroadcastChannel | null = null;
@@ -125,15 +126,37 @@ export function setTokens(access: string, _refresh?: string) {
   accessToken = access;
   refreshBlockedUntil = 0;
   lastRefreshFailureHard = false;
-  localStorage.removeItem(BAN_LOCK_KEY);
+  try {
+    localStorage.setItem(SESSION_HINT_KEY, String(Date.now()));
+    localStorage.removeItem(BAN_LOCK_KEY);
+  } catch {
+    // Ignore unavailable storage.
+  }
 }
 
 export function clearTokens() {
   accessToken = null;
   refreshBlockedUntil = 0;
   lastRefreshFailureHard = false;
-  localStorage.removeItem("access_token");
-  localStorage.removeItem("refresh_token");
+  try {
+    localStorage.removeItem("access_token");
+    localStorage.removeItem("refresh_token");
+    localStorage.removeItem(SESSION_HINT_KEY);
+  } catch {
+    // Ignore unavailable storage.
+  }
+}
+
+export function hasSessionHint() {
+  try {
+    return Boolean(localStorage.getItem(SESSION_HINT_KEY));
+  } catch {
+    return false;
+  }
+}
+
+export function wasLastRefreshFailureHard() {
+  return lastRefreshFailureHard;
 }
 
 function setRefreshBackoff(message: string) {

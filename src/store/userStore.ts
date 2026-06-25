@@ -1,6 +1,14 @@
 import { create } from 'zustand';
 import { User, Notification } from '@/types/manga';
-import { authApi, clearBanLock, clearTokens, getAccessToken, notificationApi } from '@/lib/api';
+import {
+  authApi,
+  clearBanLock,
+  clearTokens,
+  getAccessToken,
+  hasSessionHint,
+  notificationApi,
+  wasLastRefreshFailureHard,
+} from '@/lib/api';
 
 type AvatarCropArea = {
   x: number;
@@ -65,10 +73,25 @@ function mapProfile(profile: any): User {
 }
 
 let loadUserInFlight: Promise<void> | null = null;
+let restoreRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearRestoreRetry() {
+  if (!restoreRetryTimer) return;
+  clearTimeout(restoreRetryTimer);
+  restoreRetryTimer = null;
+}
+
+function scheduleRestoreRetry(loadUser: () => Promise<void>, delayMs = 15_000) {
+  if (restoreRetryTimer) return;
+  restoreRetryTimer = setTimeout(() => {
+    restoreRetryTimer = null;
+    loadUser().catch(() => {});
+  }, delayMs);
+}
 
 export const useUserStore = create<UserStore>((set, get) => ({
   user: null,
-  isLoggedIn: !!getAccessToken(),
+  isLoggedIn: !!getAccessToken() || hasSessionHint(),
   notifications: [],
   unreadCount: 0,
   isLoading: false,
@@ -78,6 +101,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
     try {
       const data = await authApi.login(email, password, recaptchaToken);
       if (data.profile) {
+        clearRestoreRetry();
         set({ user: mapProfile(data.profile), isLoggedIn: true, hasCheckedSession: true });
         get().fetchNotifications();
         return { success: true };
@@ -98,6 +122,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
   },
 
   logout: (scope = 'local') => {
+    clearRestoreRetry();
     authApi.logout(scope).catch(() => {});
     clearTokens();
     clearBanLock();
@@ -121,11 +146,25 @@ export const useUserStore = create<UserStore>((set, get) => ({
     try {
       if (!getAccessToken()) {
         const refreshed = await authApi.refresh();
-        if (!refreshed) return;
+        if (!refreshed) {
+          if (wasLastRefreshFailureHard()) {
+            clearRestoreRetry();
+            clearTokens();
+            set({ user: null, isLoggedIn: false });
+            return;
+          }
+
+          if (hasSessionHint()) {
+            set({ user: null, isLoggedIn: true });
+            scheduleRestoreRetry(() => get().loadUser({ force: true }));
+          }
+          return;
+        }
       }
 
       const data = await authApi.getMe();
       if (data.profile) {
+        clearRestoreRetry();
         const user = mapProfile(data.profile);
         set({ user, isLoggedIn: true, hasCheckedSession: true, isLoading: false });
         void get().fetchNotifications();
@@ -170,8 +209,17 @@ export const useUserStore = create<UserStore>((set, get) => ({
           msg.toLowerCase().includes('token expired');
 
         if (isAuthFailure) {
-          clearTokens();
-          set({ user: null, isLoggedIn: false });
+          if (wasLastRefreshFailureHard()) {
+            clearRestoreRetry();
+            clearTokens();
+            set({ user: null, isLoggedIn: false });
+          } else if (hasSessionHint()) {
+            set({ user: null, isLoggedIn: true });
+            scheduleRestoreRetry(() => get().loadUser({ force: true }));
+          }
+        } else if (hasSessionHint() || getAccessToken()) {
+          set({ isLoggedIn: true });
+          scheduleRestoreRetry(() => get().loadUser({ force: true }));
         }
         // else: network/5xx error — keep the user logged in, just skip setting user
       }
