@@ -206,6 +206,66 @@ const parseBrowsePageParam = (value: string | null): number => {
   return normalized >= 1 ? normalized : 1;
 };
 
+const BROWSE_PAGE_MEMORY_STORAGE_KEY = 'mb:browse-page-memory:v1';
+
+type BrowsePageMemoryFilters = {
+  genres: string[];
+  status: string | null;
+  year: number | null;
+  minRating: number;
+  sort: SortOption;
+  search: string;
+};
+
+const buildBrowsePageMemoryKey = (source: BrowseSourceTab, filters: BrowsePageMemoryFilters): string => {
+  const genres = [...(filters.genres || [])].map((genre) => String(genre).trim().toLowerCase()).sort().join(',');
+  const search = String(filters.search || '').trim().toLowerCase();
+  return [
+    source,
+    filters.sort || 'popular',
+    search,
+    genres,
+    filters.status || '',
+    filters.year || '',
+    filters.minRating || 0,
+  ].join('|');
+};
+
+const readBrowsePageMemory = (): Record<string, number> => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = sessionStorage.getItem(BROWSE_PAGE_MEMORY_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+const getRememberedBrowsePage = (key: string): number => {
+  const page = Number(readBrowsePageMemory()[key]);
+  return Number.isFinite(page) && page > 1 ? Math.floor(page) : 1;
+};
+
+const rememberBrowsePage = (key: string, page: number) => {
+  if (typeof window === 'undefined' || !key) return;
+  const safePage = Math.max(1, Math.floor(Number(page) || 1));
+  try {
+    const memory = readBrowsePageMemory();
+    if (safePage <= 1) {
+      delete memory[key];
+    } else {
+      memory[key] = safePage;
+    }
+
+    const entries = Object.entries(memory);
+    const trimmed = entries.length > 80 ? Object.fromEntries(entries.slice(-80)) : memory;
+    sessionStorage.setItem(BROWSE_PAGE_MEMORY_STORAGE_KEY, JSON.stringify(trimmed));
+  } catch {
+    // Ignore unavailable sessionStorage.
+  }
+};
+
 const isMangaDexCoverUrl = (value: string): boolean => {
   try {
     const host = new URL(value).hostname.toLowerCase();
@@ -1473,6 +1533,11 @@ const BrowseManga = () => {
   const activeSource: BrowseSourceTab = sourceParam === 'mangadex' ? 'mangadex' : 'otruyen';
   const isOTruyenSourceTab = activeSource === 'otruyen';
   const isMangaDexSourceTab = activeSource === 'mangadex';
+  const browsePageMemoryKey = useMemo(
+    () => buildBrowsePageMemoryKey(activeSource, filters),
+    [activeSource, filters.genres, filters.minRating, filters.search, filters.sort, filters.status, filters.year],
+  );
+  const lastBrowsePageStateRef = useRef<{ key: string; page: number }>({ key: browsePageMemoryKey, page });
   const mangaDexCatalogMode = isMangaDexSourceTab && filters.sort === 'latest' ? 'latest' : 'default';
   const getMangaDexCatalogQueryKey = (limit: number | 'all', mode = mangaDexCatalogMode) =>
     ['manga', 'mangadex-catalog', MANGADEX_CATALOG_QUERY_VERSION, mode, limit] as const;
@@ -1495,7 +1560,12 @@ const BrowseManga = () => {
     } else {
       nextParams.delete('sort');
     }
-    nextParams.delete('page');
+    const rememberedPage = getRememberedBrowsePage(buildBrowsePageMemoryKey(nextSource, filters));
+    if (rememberedPage > 1) {
+      nextParams.set('page', String(rememberedPage));
+    } else {
+      nextParams.delete('page');
+    }
     setSearchParams(nextParams, { replace: false });
   };
 
@@ -2290,8 +2360,22 @@ const BrowseManga = () => {
     return map;
   }, [mangaDexItems, selectedGenreAliasGroups]);
 
-  // Reset page when filters change
-  useEffect(() => { setPage(1); }, [filters.genres, filters.status, filters.sort, filters.year, filters.minRating, hasSearch]);
+  // Keep browse page per source/filter/search tab. New contexts still start at page 1.
+  useEffect(() => {
+    const previous = lastBrowsePageStateRef.current;
+    if (previous.key && previous.key !== browsePageMemoryKey) {
+      rememberBrowsePage(previous.key, previous.page);
+      const rememberedPage = getRememberedBrowsePage(browsePageMemoryKey);
+      lastBrowsePageStateRef.current = { key: browsePageMemoryKey, page: rememberedPage };
+      if (rememberedPage !== page) {
+        setPage(rememberedPage);
+      }
+      return;
+    }
+
+    lastBrowsePageStateRef.current = { key: browsePageMemoryKey, page };
+    rememberBrowsePage(browsePageMemoryKey, page);
+  }, [browsePageMemoryKey, page]);
 
   useEffect(() => {
     if (defaultSortInitializedRef.current) return;

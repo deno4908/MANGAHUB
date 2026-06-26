@@ -12,9 +12,11 @@ export const HOMEPAGE_REFRESH_EVENT = "mb:homepage-refresh";
 const BAN_LOCK_KEY = "banned_lock";
 const SESSION_HINT_KEY = "mb:session-present";
 const REFRESH_LOCK_KEY = "mb:auth-refresh-lock";
+const AUTH_TOKEN_CHANNEL = "mb:auth-token";
 const BAN_LOCK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const HOMEPAGE_REFRESH_STORAGE_KEY = "mb:homepage-refresh:signal";
 let homepageRefreshChannel: BroadcastChannel | null = null;
+let authTokenChannel: BroadcastChannel | null = null;
 
 // Client-side password derivation. The backend accepts v4 and falls back to
 // older v3/v2 hashes during login/change-password migration.
@@ -119,6 +121,7 @@ const REFRESH_RATE_LIMIT_BACKOFF_MS = 60_000;
 const REFRESH_LOCK_TTL_MS = 12_000;
 const REFRESH_LOCK_WAIT_MS = 10_000;
 const REFRESH_LOCK_POLL_MS = 180;
+const PEER_TOKEN_WAIT_MS = 350;
 
 export type MaintenanceState = {
   enabled: boolean;
@@ -131,7 +134,64 @@ export type MaintenanceState = {
   updated_by?: string | null;
 };
 
-export function setTokens(access: string, _refresh?: string) {
+type AuthTokenMessage = {
+  type: "token" | "request-token" | "logout";
+  source?: string;
+  accessToken?: string;
+};
+
+function getAuthTokenChannel() {
+  if (typeof window === "undefined" || typeof BroadcastChannel === "undefined") return null;
+  if (!authTokenChannel) {
+    authTokenChannel = new BroadcastChannel(AUTH_TOKEN_CHANNEL);
+    authTokenChannel.onmessage = (event: MessageEvent<AuthTokenMessage>) => {
+      const message = event.data || {};
+      if (message.source === refreshTabId) return;
+
+      if (message.type === "request-token") {
+        if (accessToken && !shouldRefreshBeforeRequest(accessToken)) {
+          postAuthTokenMessage({ type: "token", accessToken });
+        }
+        return;
+      }
+
+      if (message.type === "token" && message.accessToken) {
+        setTokens(message.accessToken, undefined, { broadcast: false });
+        return;
+      }
+
+      if (message.type === "logout") {
+        clearTokens({ broadcast: false });
+      }
+    };
+  }
+  return authTokenChannel;
+}
+
+function postAuthTokenMessage(message: AuthTokenMessage) {
+  const channel = getAuthTokenChannel();
+  if (!channel) return;
+  try {
+    channel.postMessage({ ...message, source: refreshTabId });
+  } catch {
+    // Ignore unavailable BroadcastChannel.
+  }
+}
+
+async function waitForPeerAccessToken(timeoutMs = PEER_TOKEN_WAIT_MS): Promise<boolean> {
+  const channel = getAuthTokenChannel();
+  if (!channel || accessToken || !hasSessionHint()) return Boolean(accessToken);
+  postAuthTokenMessage({ type: "request-token" });
+  const startedAt = Date.now();
+  while (!accessToken && Date.now() - startedAt < timeoutMs) {
+    await sleep(50);
+  }
+  return Boolean(accessToken);
+}
+
+getAuthTokenChannel();
+
+export function setTokens(access: string, _refresh?: string, options: { broadcast?: boolean } = {}) {
   accessToken = access;
   refreshBlockedUntil = 0;
   lastRefreshFailureHard = false;
@@ -142,9 +202,12 @@ export function setTokens(access: string, _refresh?: string) {
   } catch {
     // Ignore unavailable storage.
   }
+  if (options.broadcast !== false) {
+    postAuthTokenMessage({ type: "token", accessToken: access });
+  }
 }
 
-export function clearTokens() {
+export function clearTokens(options: { broadcast?: boolean } = {}) {
   accessToken = null;
   refreshBlockedUntil = 0;
   lastRefreshFailureHard = false;
@@ -155,6 +218,9 @@ export function clearTokens() {
     localStorage.removeItem(SESSION_HINT_KEY);
   } catch {
     // Ignore unavailable storage.
+  }
+  if (options.broadcast !== false) {
+    postAuthTokenMessage({ type: "logout" });
   }
 }
 
@@ -1009,8 +1075,17 @@ export const authApi = {
     });
   },
   refresh: async () => {
+    if (!accessToken && await waitForPeerAccessToken()) {
+      return true;
+    }
     return withRefreshLock(async () => {
       try {
+        if (accessToken && !shouldRefreshBeforeRequest(accessToken)) {
+          return true;
+        }
+        if (!accessToken && await waitForPeerAccessToken(800)) {
+          return true;
+        }
         lastRefreshFailureHard = false;
         lastRefreshFailureMessage = "";
         const data = await auth<any>("/auth/refresh", {
@@ -1029,7 +1104,14 @@ export const authApi = {
       } catch (e: any) {
         const message = String(e?.message || "refresh error");
         lastRefreshFailureMessage = message;
-        lastRefreshFailureHard = isHardRefreshFailure(message);
+        const hardFailure = isHardRefreshFailure(message);
+        lastRefreshFailureHard = hardFailure;
+        if (hardFailure && await waitForPeerAccessToken(1_000)) {
+          lastRefreshFailureHard = false;
+          lastRefreshFailureMessage = "";
+          refreshBlockedUntil = 0;
+          return true;
+        }
         setRefreshBackoff(message);
         return false;
       }

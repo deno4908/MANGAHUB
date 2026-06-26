@@ -29,7 +29,7 @@ interface UserStore {
   // Auth
   login: (email: string, password: string, recaptchaToken?: string) => Promise<{ success: boolean; error?: string }>;
   register: (email: string, password: string, username: string, recaptchaToken?: string) => Promise<{ success: boolean; error?: string }>;
-  logout: (scope?: 'local' | 'global' | 'others') => void;
+  logout: (scope?: 'local' | 'global' | 'others', options?: { server?: boolean }) => void;
   loadUser: (options?: { force?: boolean }) => Promise<void>;
 
   // Notifications
@@ -126,9 +126,11 @@ export const useUserStore = create<UserStore>((set, get) => ({
     }
   },
 
-  logout: (scope = 'local') => {
+  logout: (scope = 'local', options = {}) => {
     clearRestoreRetry();
-    authApi.logout(scope).catch(() => {});
+    if (options.server !== false) {
+      authApi.logout(scope).catch(() => {});
+    }
     clearTokens();
     clearBanLock();
     set({

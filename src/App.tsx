@@ -521,7 +521,7 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
         navigate('/banned', { replace: true });
         return;
       }
-      logout();
+      logout('local', { server: false });
       navigate('/login', { replace: true });
     };
     window.addEventListener(FORCE_LOGOUT_EVENT, handleForceLogout);
