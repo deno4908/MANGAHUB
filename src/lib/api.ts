@@ -107,6 +107,7 @@ let accessToken: string | null = null;
 let refreshInFlight: Promise<boolean> | null = null;
 let refreshBlockedUntil = 0;
 let lastRefreshFailureHard = false;
+let lastRefreshFailureMessage = "";
 
 const REFRESH_BACKOFF_MS = 15_000;
 const REFRESH_RATE_LIMIT_BACKOFF_MS = 60_000;
@@ -126,6 +127,7 @@ export function setTokens(access: string, _refresh?: string) {
   accessToken = access;
   refreshBlockedUntil = 0;
   lastRefreshFailureHard = false;
+  lastRefreshFailureMessage = "";
   try {
     localStorage.setItem(SESSION_HINT_KEY, String(Date.now()));
     localStorage.removeItem(BAN_LOCK_KEY);
@@ -138,6 +140,7 @@ export function clearTokens() {
   accessToken = null;
   refreshBlockedUntil = 0;
   lastRefreshFailureHard = false;
+  lastRefreshFailureMessage = "";
   try {
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
@@ -157,6 +160,10 @@ export function hasSessionHint() {
 
 export function wasLastRefreshFailureHard() {
   return lastRefreshFailureHard;
+}
+
+export function wasLastRefreshFailureMissingToken() {
+  return normalizeText(lastRefreshFailureMessage).includes("refresh token la bat buoc");
 }
 
 function setRefreshBackoff(message: string) {
@@ -935,6 +942,7 @@ export const authApi = {
   refresh: async () => {
     try {
       lastRefreshFailureHard = false;
+      lastRefreshFailureMessage = "";
       const data = await auth<any>("/auth/refresh", {
         method: "POST",
         body: JSON.stringify({ access_token: accessToken || "" }),
@@ -945,10 +953,12 @@ export const authApi = {
         return true;
       }
       lastRefreshFailureHard = true;
+      lastRefreshFailureMessage = "refresh failed";
       setRefreshBackoff("refresh failed");
       return false;
     } catch (e: any) {
       const message = String(e?.message || "refresh error");
+      lastRefreshFailureMessage = message;
       lastRefreshFailureHard = isHardRefreshFailure(message);
       setRefreshBackoff(message);
       return false;

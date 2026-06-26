@@ -967,7 +967,7 @@ def refresh_token():
         return _json({
             "error": "Refresh token là bắt buộc",
             "requires_relogin": True,
-        }, 401, clear_refresh=True)
+        }, 401)
 
     try:
         presented_user_id = ""

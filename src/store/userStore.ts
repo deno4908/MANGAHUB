@@ -8,6 +8,7 @@ import {
   hasSessionHint,
   notificationApi,
   wasLastRefreshFailureHard,
+  wasLastRefreshFailureMissingToken,
 } from '@/lib/api';
 
 type AvatarCropArea = {
@@ -89,6 +90,10 @@ function scheduleRestoreRetry(loadUser: () => Promise<void>, delayMs = 15_000) {
   }, delayMs);
 }
 
+function shouldKeepRestoringSession() {
+  return hasSessionHint() && (!wasLastRefreshFailureHard() || wasLastRefreshFailureMissingToken());
+}
+
 export const useUserStore = create<UserStore>((set, get) => ({
   user: null,
   isLoggedIn: !!getAccessToken() || hasSessionHint(),
@@ -147,17 +152,15 @@ export const useUserStore = create<UserStore>((set, get) => ({
       if (!getAccessToken()) {
         const refreshed = await authApi.refresh();
         if (!refreshed) {
-          if (wasLastRefreshFailureHard()) {
+          if (!shouldKeepRestoringSession()) {
             clearRestoreRetry();
             clearTokens();
             set({ user: null, isLoggedIn: false });
             return;
           }
 
-          if (hasSessionHint()) {
-            set({ user: null, isLoggedIn: true });
-            scheduleRestoreRetry(() => get().loadUser({ force: true }));
-          }
+          set({ user: null, isLoggedIn: true });
+          scheduleRestoreRetry(() => get().loadUser({ force: true }));
           return;
         }
       }
@@ -209,11 +212,11 @@ export const useUserStore = create<UserStore>((set, get) => ({
           msg.toLowerCase().includes('token expired');
 
         if (isAuthFailure) {
-          if (wasLastRefreshFailureHard()) {
+          if (!shouldKeepRestoringSession()) {
             clearRestoreRetry();
             clearTokens();
             set({ user: null, isLoggedIn: false });
-          } else if (hasSessionHint()) {
+          } else {
             set({ user: null, isLoggedIn: true });
             scheduleRestoreRetry(() => get().loadUser({ force: true }));
           }

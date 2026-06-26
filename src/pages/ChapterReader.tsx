@@ -67,6 +67,7 @@ interface PersistedChapterMeta {
   mangaTitle?: string;
   mangaThumb?: string;
   chapters?: ReaderChapter[];
+  chapterSourceFilter?: string;
   savedAt?: number;
 }
 
@@ -554,10 +555,10 @@ const ChapterReader = () => {
   }, [chapterSourceFilter, chapterSourceOptions, chapters.length]);
 
   useEffect(() => {
-    const nextFilter = chapterState.chapterSourceFilter || CHAPTER_SOURCE_ALL;
+    const nextFilter = chapterState.chapterSourceFilter || persistedMeta.chapterSourceFilter || CHAPTER_SOURCE_ALL;
     if (nextFilter === chapterSourceFilter) return;
     setChapterSourceFilter(nextFilter);
-  }, [chapterState.chapterSourceFilter, chapterSourceFilter, currentChapterId]);
+  }, [chapterState.chapterSourceFilter, chapterSourceFilter, currentChapterId, persistedMeta.chapterSourceFilter]);
 
   useEffect(() => {
     if (!id) return;
@@ -568,9 +569,10 @@ const ChapterReader = () => {
       mangaTitle,
       mangaThumb,
       chapters,
+      chapterSourceFilter,
     };
     writeReaderMetaToStorage([id, currentChapterId, normalizedChapterId], payload);
-  }, [id, currentChapterId, normalizedChapterId, mangaDetailId, safeMangaSlug, mangaTitle, mangaThumb, chapters]);
+  }, [id, currentChapterId, normalizedChapterId, mangaDetailId, safeMangaSlug, mangaTitle, mangaThumb, chapters, chapterSourceFilter]);
 
   const navigationChapters = useMemo(() => {
     const hasCurrentInFilter = filteredChapters.some((chapter) => (
