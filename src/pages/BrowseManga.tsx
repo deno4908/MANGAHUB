@@ -1168,6 +1168,11 @@ const dedupeMangaById = (items: Manga[]): Manga[] => {
   });
 };
 
+const getStableBrowseItemKey = (item: Partial<Manga>): string => {
+  const alias = getBrowseAliasKeys(item)[0];
+  return alias || String(item.id || '').trim().toLowerCase();
+};
+
 const assertOTruyenPayload = (payload: any) => {
   if (String(payload?.status || '').trim().toLowerCase() !== 'error') return;
   throw new Error(String(payload?.message || 'OTruyen unavailable'));
@@ -1523,6 +1528,7 @@ const BrowseManga = () => {
   const mangaDexEdgeRefetchStateRef = useRef({ key: '', at: 0 });
   const mangadexMissingCoverRetryRef = useRef(0);
   const mangadexPopularityRefetchRetryRef = useRef(0);
+  const mangaDexSearchSnapshotRef = useRef<{ key: string; items: Manga[] }>({ key: '', items: [] });
   const defaultSortInitializedRef = useRef(false);
   const globalSortBackgroundKeyRef = useRef('');
   const globalSortBackgroundTokenRef = useRef(0);
@@ -3498,6 +3504,57 @@ const BrowseManga = () => {
     guestTopRatedFilteredBySource,
   ]);
 
+  const mangaDexSearchSnapshotKey = `${browsePageMemoryKey}|mature:${showMatureContent ? 1 : 0}`;
+  const stableMergedFiltered = useMemo(() => {
+    if (!isMangaDexSourceTab || !hasSearch || !isClientPaginationMode) {
+      return mergedFiltered;
+    }
+
+    const currentByKey = new Map<string, Manga>();
+    const currentKeys: string[] = [];
+    for (const item of mergedFiltered) {
+      const key = getStableBrowseItemKey(item);
+      if (!key || currentByKey.has(key)) continue;
+      currentByKey.set(key, item);
+      currentKeys.push(key);
+    }
+
+    const previous =
+      mangaDexSearchSnapshotRef.current.key === mangaDexSearchSnapshotKey
+        ? mangaDexSearchSnapshotRef.current.items
+        : [];
+    const seen = new Set<string>();
+    const stableItems: Manga[] = [];
+
+    for (const previousItem of previous) {
+      const key = getStableBrowseItemKey(previousItem);
+      if (!key || seen.has(key)) continue;
+      const freshItem = currentByKey.get(key);
+      stableItems.push(freshItem || previousItem);
+      seen.add(key);
+    }
+
+    for (const key of currentKeys) {
+      if (seen.has(key)) continue;
+      const item = currentByKey.get(key);
+      if (!item) continue;
+      stableItems.push(item);
+      seen.add(key);
+    }
+
+    mangaDexSearchSnapshotRef.current = {
+      key: mangaDexSearchSnapshotKey,
+      items: stableItems,
+    };
+    return stableItems;
+  }, [
+    isMangaDexSourceTab,
+    hasSearch,
+    isClientPaginationMode,
+    mergedFiltered,
+    mangaDexSearchSnapshotKey,
+  ]);
+
   // Smaller page size keeps initial render and image loading lighter.
   const pageSize = BROWSE_PAGE_SIZE;
 
@@ -3505,7 +3562,7 @@ const BrowseManga = () => {
   const estimatedClientTotalPages = useMemo(() => {
     if (!isClientPaginationMode) return 1;
 
-    let estimatedItems = mergedFiltered.length;
+    let estimatedItems = stableMergedFiltered.length;
 
     if (useGlobalClientSortMode) {
       const probeTotalItems = Math.max(0, Number((globalSortProbeQuery.data as any)?.totalItems || 0));
@@ -3517,7 +3574,7 @@ const BrowseManga = () => {
     return Math.max(1, Math.ceil(estimatedItems / pageSize));
   }, [
     isClientPaginationMode,
-    mergedFiltered.length,
+    stableMergedFiltered.length,
     useGlobalClientSortMode,
     filters.sort,
     globalSortProbeQuery.data,
@@ -3552,7 +3609,7 @@ const BrowseManga = () => {
       isAtMangaDexLoadedLimit ||
       page >= Math.max(1, totalPages - MANGADEX_DEMAND_PREFETCH_PAGES)
     );
-  const mangaDexLoadedItemCount = isMangaDexSourceTab ? mergedFiltered.length : 0;
+  const mangaDexLoadedItemCount = isMangaDexSourceTab ? stableMergedFiltered.length : 0;
   const mangaDexRemainingLoadedItems = Math.max(0, mangaDexLoadedItemCount - (page * pageSize));
   const isMangaDexLoadedItemBufferLow =
     canExpandMangaDexDemand &&
@@ -3715,7 +3772,7 @@ const BrowseManga = () => {
     }
 
     if (isClientPaginationMode) {
-      return mergedFiltered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+      return stableMergedFiltered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
     }
 
     // Server mode: OTruyen items only (active source tab = OTruyen)
@@ -3761,7 +3818,7 @@ const BrowseManga = () => {
       : sortable;
   }, [
     isClientPaginationMode,
-    mergedFiltered,
+    stableMergedFiltered,
     currentPage,
     pageSize,
     filters.sort,
@@ -4595,8 +4652,8 @@ const BrowseManga = () => {
               )}
               <p className="text-sm text-muted-foreground mb-4 font-medium">
                 {displayItems.length} kết quả trang này
-                {isClientPaginationMode && mergedFiltered.length > pageSize && (
-                  <span className="ml-1 opacity-60">/ {mergedFiltered.length} tổng</span>
+                {isClientPaginationMode && stableMergedFiltered.length > pageSize && (
+                  <span className="ml-1 opacity-60">/ {stableMergedFiltered.length} tổng</span>
                 )}
               </p>
               {displayItems.length > 0 ? (
