@@ -290,6 +290,67 @@ function getReaderChapterGroups(chapter: ReaderChapter): Array<{ id: string; nam
   return [];
 }
 
+function parseChapterNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  const raw = String(value || '').trim().replace(',', '.');
+  if (!raw) return undefined;
+  const direct = Number(raw);
+  if (Number.isFinite(direct)) return direct;
+  const match = raw.match(/\d+(?:\.\d+)?/);
+  if (!match) return undefined;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function formatChapterNumber(value: number | undefined): string {
+  if (!Number.isFinite(value || Number.NaN) || Number(value) <= 0) return '?';
+  return Number(value).toLocaleString('vi-VN', { maximumFractionDigits: 2 });
+}
+
+function chapterSortNumber(value: number | undefined): number {
+  return Number.isFinite(value) ? Number(value) : Number.MAX_SAFE_INTEGER;
+}
+
+function normalizeChapterCompareKey(value?: string | null): string {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const mangadexId = normalizeMangaDexId(raw);
+  if (mangadexId) return mangadexId;
+  return raw.replace(/^mdx-/i, '').split('/').pop()!.trim().toLowerCase();
+}
+
+function chapterIdMatches(chapterId: string, candidates: Array<string | undefined | null>): boolean {
+  const key = normalizeChapterCompareKey(chapterId);
+  if (!key) return false;
+  return candidates.some((candidate) => normalizeChapterCompareKey(candidate) === key);
+}
+
+function filterReaderChaptersBySource(chapters: ReaderChapter[], filter: string): ReaderChapter[] {
+  if (filter === CHAPTER_SOURCE_ALL) return chapters;
+  if (filter.startsWith('source:')) {
+    const source = filter.slice('source:'.length);
+    return chapters.filter((chapter) => getReaderChapterSource(chapter) === source);
+  }
+  if (filter.startsWith('group:')) {
+    const [, source, groupKey] = filter.split(':');
+    return chapters.filter((chapter) => (
+      getReaderChapterSource(chapter) === source &&
+      getReaderChapterGroups(chapter).some((group) => normalizeFilterToken(group.id || group.name) === groupKey)
+    ));
+  }
+  return chapters;
+}
+
+function inferReaderChapterFilter(chapter?: ReaderChapter): string {
+  if (!chapter) return CHAPTER_SOURCE_ALL;
+  const source = getReaderChapterSource(chapter);
+  const group = getReaderChapterGroups(chapter)[0];
+  if (group) return `group:${source}:${normalizeFilterToken(group.id || group.name)}`;
+  return `source:${source}`;
+}
+
 function isInvalidMangaSlug(slug?: string | null): boolean {
   if (!slug) return true;
   const s = slug.trim().toLowerCase();
@@ -404,7 +465,7 @@ const ChapterReader = () => {
   })();
   const fallbackMangaTitle = rawItem.comic_name || rawSeo.titleHead || 'Đang tải...';
   const fallbackMangaThumb = String(rawItem.thumb_url || rawItem.thumb || rawItem.cover_url || '').trim();
-  const fallbackChapterNumber = Number(rawItem.chapter_name || 0) || 0;
+  const fallbackChapterNumber = parseChapterNumber(rawItem.chapter_name);
   const fallbackChapterTitle = rawItem.chapter_title || '';
   const mangaSlug = cleanSlug(chapterState.mangaSlug || persistedMeta.mangaSlug || fallbackMangaSlug);
   const safeMangaSlug = isInvalidMangaSlug(mangaSlug) ? '' : mangaSlug;
@@ -413,8 +474,7 @@ const ChapterReader = () => {
   const mangaDetailPath = mangaDetailId ? getMangaDetailPath(mangaDetailId) : '/manga';
   const mangaTitle = chapterState.mangaTitle || persistedMeta.mangaTitle || fallbackMangaTitle;
   const mangaThumb = String(chapterState.mangaThumb || persistedMeta.mangaThumb || fallbackMangaThumb || '').trim();
-  const chapterNumber = chapterState.chapterNumber ?? fallbackChapterNumber;
-  const chapterTitle = chapterState.chapterTitle ?? fallbackChapterTitle;
+  const provisionalChapterNumber = parseChapterNumber(chapterState.chapterNumber) ?? fallbackChapterNumber;
   const stateChapters = useMemo(
     () => normalizeReaderChapters(chapterState.chapters || []),
     [chapterState.chapters]
@@ -451,10 +511,10 @@ const ChapterReader = () => {
         const chapters = chapterRows
           .map((ch: any) => {
             const chapterId = String(ch?.id || '').trim();
-            const chapterNumber = Number(String(ch?.chapter || '').replace(',', '.'));
+            const chapterNumber = parseChapterNumber(ch?.chapter);
             return {
               id: chapterId,
-              number: Number.isFinite(chapterNumber) ? chapterNumber : Number.NaN,
+              number: chapterNumber ?? Number.NaN,
               title: ch?.chapter_with_groups || ch?.title || `Chương ${ch?.chapter || '?'}`,
               scanlationGroup: ch?.scanlationGroup || ch?.scanlation_group || ch?.group || '',
               translationSource: ch?.translationSource || ch?.translation_source || 'mangadex',
@@ -495,6 +555,18 @@ const ChapterReader = () => {
     return nonNegative.length > 0 ? nonNegative : nonEmptyId;
   }, [baseChapters]);
 
+  const currentChapterFromList = useMemo(
+    () => chapters.find((chapter) => chapterIdMatches(chapter.id, [currentChapterId, id, normalizedChapterId])),
+    [chapters, currentChapterId, id, normalizedChapterId]
+  );
+  const chapterNumber = currentChapterFromList?.number ?? provisionalChapterNumber;
+  const chapterNumberLabel = formatChapterNumber(chapterNumber);
+  const chapterTitle = currentChapterFromList?.title ?? chapterState.chapterTitle ?? fallbackChapterTitle;
+  const chapterFallbackLabel = chapterNumberLabel !== '?' ? `Chương ${chapterNumberLabel}` : 'Chương hiện tại';
+  const cleanChapterTitle = String(chapterTitle || '').trim();
+  const chapterDisplayTitle = cleanChapterTitle && cleanChapterTitle !== chapterFallbackLabel ? cleanChapterTitle : '';
+  const chapterHistoryName = cleanChapterTitle || chapterFallbackLabel;
+
   const chapterSourceOptions = useMemo(() => {
     const options = new Map<string, { id: string; label: string; count: number; rank: number }>();
     const bump = (id: string, label: string, rank: number) => {
@@ -533,19 +605,7 @@ const ChapterReader = () => {
   }, [chapters]);
 
   const filteredChapters = useMemo(() => {
-    if (chapterSourceFilter === CHAPTER_SOURCE_ALL) return chapters;
-    if (chapterSourceFilter.startsWith('source:')) {
-      const source = chapterSourceFilter.slice('source:'.length);
-      return chapters.filter((chapter) => getReaderChapterSource(chapter) === source);
-    }
-    if (chapterSourceFilter.startsWith('group:')) {
-      const [, source, groupKey] = chapterSourceFilter.split(':');
-      return chapters.filter((chapter) => (
-        getReaderChapterSource(chapter) === source &&
-        getReaderChapterGroups(chapter).some((group) => normalizeFilterToken(group.id || group.name) === groupKey)
-      ));
-    }
-    return chapters;
+    return filterReaderChaptersBySource(chapters, chapterSourceFilter);
   }, [chapterSourceFilter, chapters]);
 
   useEffect(() => {
@@ -575,21 +635,30 @@ const ChapterReader = () => {
   }, [id, currentChapterId, normalizedChapterId, mangaDetailId, safeMangaSlug, mangaTitle, mangaThumb, chapters, chapterSourceFilter]);
 
   const navigationChapters = useMemo(() => {
-    const hasCurrentInFilter = filteredChapters.some((chapter) => (
-      chapter.id === currentChapterId || chapter.number === chapterNumber
+    const inferredFilter = chapterSourceFilter === CHAPTER_SOURCE_ALL
+      ? inferReaderChapterFilter(currentChapterFromList)
+      : chapterSourceFilter;
+    const sourceScoped = filterReaderChaptersBySource(chapters, inferredFilter);
+    const candidateList = sourceScoped.length > 0 ? sourceScoped : filteredChapters;
+    const hasCurrentInFilter = candidateList.some((chapter) => (
+      chapterIdMatches(chapter.id, [currentChapterId, id, normalizedChapterId])
     ));
-    return hasCurrentInFilter ? filteredChapters : chapters;
-  }, [chapters, currentChapterId, chapterNumber, filteredChapters]);
+    return hasCurrentInFilter ? candidateList : chapters;
+  }, [chapterSourceFilter, chapters, currentChapterFromList, currentChapterId, filteredChapters, id, normalizedChapterId]);
 
   // Normalize chapter order to avoid edge cases like chapter 0 losing next button.
   const orderedChapters = useMemo(
-    () => [...navigationChapters].sort((a, b) => a.number - b.number),
+    () => [...navigationChapters].sort((a, b) => chapterSortNumber(a.number) - chapterSortNumber(b.number)),
     [navigationChapters]
   );
-  const chapterIndex = orderedChapters.findIndex(c => c.id === currentChapterId);
+  const chapterIndex = orderedChapters.findIndex((chapter) => (
+    chapterIdMatches(chapter.id, [currentChapterId, id, normalizedChapterId])
+  ));
   const currentChapterIndex = chapterIndex >= 0
     ? chapterIndex
-    : orderedChapters.findIndex(c => c.number === chapterNumber);
+    : Number(chapterNumber) > 0
+      ? orderedChapters.findIndex(c => c.number === chapterNumber)
+      : -1;
   const prevChapter = currentChapterIndex > 0 ? orderedChapters[currentChapterIndex - 1] : undefined;
   const nextChapter = currentChapterIndex >= 0 && currentChapterIndex < orderedChapters.length - 1
     ? orderedChapters[currentChapterIndex + 1]
@@ -798,7 +867,7 @@ const ChapterReader = () => {
         manga_title: mangaTitle,
         manga_thumb: mangaThumb,
         chapter_id: id,
-        chapter_name: chapterTitle || `Chương ${chapterNumber}`,
+        chapter_name: chapterHistoryName,
         page,
         progress: Math.min(progress, 100),
         client_read_at: clientReadAt,
@@ -812,7 +881,7 @@ const ChapterReader = () => {
     }, 3000); // debounce 3s
 
     return () => clearTimeout(timer);
-  }, [isLoggedIn, id, safeMangaSlug, visiblePage, store.currentPage, scrollProgress, totalPages, store.mode, mangaTitle, mangaThumb, chapterTitle, chapterNumber, upsertHistoryCache, hasMeaningfulHistoryProgress]);
+  }, [isLoggedIn, id, safeMangaSlug, visiblePage, store.currentPage, scrollProgress, totalPages, store.mode, mangaTitle, mangaThumb, chapterHistoryName, upsertHistoryCache, hasMeaningfulHistoryProgress]);
 
   useEffect(() => {
     if (!isLoggedIn || !id || !safeMangaSlug || totalPages === 0) return;
@@ -828,7 +897,7 @@ const ChapterReader = () => {
         manga_title: mangaTitle,
         manga_thumb: mangaThumb,
         chapter_id: id,
-        chapter_name: chapterTitle || `Chương ${chapterNumber}`,
+        chapter_name: chapterHistoryName,
         page,
         progress: Math.min(Math.max(progress, 0), 100),
         client_read_at: new Date().toISOString(),
@@ -862,8 +931,7 @@ const ChapterReader = () => {
     scrollProgress,
     mangaTitle,
     mangaThumb,
-    chapterTitle,
-    chapterNumber,
+    chapterHistoryName,
     upsertHistoryCache,
     hasMeaningfulHistoryProgress,
   ]);
@@ -1144,7 +1212,7 @@ const ChapterReader = () => {
                 </Link>
                 <div className="min-w-0">
                   <p className="text-sm font-bold line-clamp-1">{mangaTitle}</p>
-                  <p className="text-[11px] text-muted-foreground">Ch. {chapterNumber} {chapterTitle && chapterTitle !== `Chương ${chapterNumber}` ? `• ${chapterTitle}` : ''}</p>
+                  <p className="text-[11px] text-muted-foreground">Ch. {chapterNumberLabel} {chapterDisplayTitle ? `• ${chapterDisplayTitle}` : ''}</p>
                 </div>
               </div>
               <div className="flex items-center gap-0.5 shrink-0">
@@ -1215,9 +1283,9 @@ const ChapterReader = () => {
                                 key={ch.id}
                                 onClick={() => navigateChapter(ch)}
                                 title={getReaderChapterSourceLabel(ch)}
-                                className={`px-2 py-1.5 rounded text-xs font-bold transition-all ${ch.id === currentChapterId ? 'bg-primary text-primary-foreground' : 'bg-secondary/40 text-muted-foreground hover:text-foreground hover:bg-secondary'}`}
+                                className={`px-2 py-1.5 rounded text-xs font-bold transition-all ${chapterIdMatches(ch.id, [currentChapterId, id, normalizedChapterId]) ? 'bg-primary text-primary-foreground' : 'bg-secondary/40 text-muted-foreground hover:text-foreground hover:bg-secondary'}`}
                               >
-                                {ch.number}
+                                {formatChapterNumber(ch.number)}
                               </button>
                             ))}
                           </div>
@@ -1283,7 +1351,7 @@ const ChapterReader = () => {
             {/* End of chapter + comments */}
             <div className="text-center py-16 space-y-6" onClick={e => e.stopPropagation()}>
               <div className="w-16 h-0.5 mx-auto bg-border" />
-              <p className="text-muted-foreground font-medium text-sm">Hết chương {chapterNumber}</p>
+              <p className="text-muted-foreground font-medium text-sm">Hết {chapterFallbackLabel.toLowerCase()}</p>
               <div className="flex justify-center gap-3 flex-wrap">
                 {prevChapter && (
                   <button onClick={() => navigateChapter(prevChapter)} className="px-5 py-2.5 rounded-xl bg-secondary border border-border text-sm font-bold hover:bg-secondary/80 transition-colors flex items-center gap-1.5">
@@ -1304,7 +1372,7 @@ const ChapterReader = () => {
                 <CommentSection
                   mangaSlug={safeMangaSlug}
                   postChapterId={id}
-                  chapterLabel={`Chương ${chapterNumber}`}
+                  chapterLabel={chapterFallbackLabel}
                 />
               </div>
             </div>
@@ -1335,7 +1403,7 @@ const ChapterReader = () => {
               <CommentSection
                 mangaSlug={safeMangaSlug}
                 postChapterId={id}
-                chapterLabel={`Chương ${chapterNumber}`}
+                chapterLabel={chapterFallbackLabel}
               />
             </div>
           </motion.div>
@@ -1361,7 +1429,7 @@ const ChapterReader = () => {
                   <span className="text-[10px] text-muted-foreground font-bold w-4">{store.pageDirection === 'rtl' ? 1 : totalPages}</span>
                 </div>
               ) : (
-                <span className="text-xs font-bold text-muted-foreground">Ch. {chapterNumber} / {chapters.length || '?'}</span>
+                <span className="text-xs font-bold text-muted-foreground">Ch. {chapterNumberLabel} / {chapters.length || '?'}</span>
               )}
               {nextChapter ? (
                 <button onClick={() => navigateChapter(nextChapter)} className="flex items-center gap-1 text-sm font-bold text-muted-foreground hover:text-primary transition-colors shrink-0">

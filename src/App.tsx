@@ -12,7 +12,7 @@ import ProtectedRoute from "./components/ProtectedRoute";
 import GuestRoute from "./components/GuestRoute";
 import { useUserStore } from "./store/userStore";
 import { useSettingsStore } from "./store/settingsStore";
-import { authApi, clearBanLock, FORCE_FORBIDDEN_EVENT, FORCE_LOGOUT_EVENT, FORCE_MAINTENANCE_EVENT, getAccessToken, hasBanLock, systemApi } from "./lib/api";
+import { authApi, clearBanLock, FORCE_FORBIDDEN_EVENT, FORCE_LOGOUT_EVENT, FORCE_MAINTENANCE_EVENT, getAccessToken, hasBanLock, shouldRefreshSessionNow, systemApi } from "./lib/api";
 import type { MaintenanceState } from "./lib/api";
 
 // ─── Lazy-loaded pages (code-split per route) ───
@@ -495,6 +495,7 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
     let refreshing = false;
     const keepSessionAlive = () => {
       if (refreshing || document.hidden) return;
+      if (!shouldRefreshSessionNow()) return;
       refreshing = true;
       authApi.refresh().finally(() => {
         refreshing = false;

@@ -1014,7 +1014,19 @@ def refresh_token():
             return jsonify({"error": "Refresh thất bại"}), 401
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        message = str(e)
+        normalized = message.lower()
+        if (
+            "invalid refresh" in normalized
+            or "refresh token not found" in normalized
+            or "session not found" in normalized
+            or "already used" in normalized
+        ):
+            return _json({
+                "error": "Refresh token không hợp lệ",
+                "requires_relogin": True,
+            }, 401, clear_refresh=True)
+        return jsonify({"error": message}), 500
 
 
 @auth_bp.route("/google", methods=["POST"])

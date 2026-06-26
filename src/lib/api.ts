@@ -11,6 +11,7 @@ export const FORCE_MAINTENANCE_EVENT = "mb:force-maintenance";
 export const HOMEPAGE_REFRESH_EVENT = "mb:homepage-refresh";
 const BAN_LOCK_KEY = "banned_lock";
 const SESSION_HINT_KEY = "mb:session-present";
+const REFRESH_LOCK_KEY = "mb:auth-refresh-lock";
 const BAN_LOCK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const HOMEPAGE_REFRESH_STORAGE_KEY = "mb:homepage-refresh:signal";
 let homepageRefreshChannel: BroadcastChannel | null = null;
@@ -108,9 +109,16 @@ let refreshInFlight: Promise<boolean> | null = null;
 let refreshBlockedUntil = 0;
 let lastRefreshFailureHard = false;
 let lastRefreshFailureMessage = "";
+const refreshTabId =
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 const REFRESH_BACKOFF_MS = 15_000;
 const REFRESH_RATE_LIMIT_BACKOFF_MS = 60_000;
+const REFRESH_LOCK_TTL_MS = 12_000;
+const REFRESH_LOCK_WAIT_MS = 10_000;
+const REFRESH_LOCK_POLL_MS = 180;
 
 export type MaintenanceState = {
   enabled: boolean;
@@ -164,6 +172,69 @@ export function wasLastRefreshFailureHard() {
 
 export function wasLastRefreshFailureMissingToken() {
   return normalizeText(lastRefreshFailureMessage).includes("refresh token la bat buoc");
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function tryAcquireRefreshLock() {
+  if (typeof window === "undefined") return true;
+  try {
+    const now = Date.now();
+    const raw = localStorage.getItem(REFRESH_LOCK_KEY);
+    if (raw) {
+      const lock = JSON.parse(raw);
+      const owner = String(lock?.owner || "");
+      const expiresAt = Number(lock?.expiresAt || 0);
+      if (owner && owner !== refreshTabId && expiresAt > now) {
+        return false;
+      }
+    }
+    localStorage.setItem(
+      REFRESH_LOCK_KEY,
+      JSON.stringify({ owner: refreshTabId, expiresAt: now + REFRESH_LOCK_TTL_MS }),
+    );
+    const check = JSON.parse(localStorage.getItem(REFRESH_LOCK_KEY) || "{}");
+    return String(check?.owner || "") === refreshTabId;
+  } catch {
+    return true;
+  }
+}
+
+function releaseRefreshLock() {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = localStorage.getItem(REFRESH_LOCK_KEY);
+    if (!raw) return;
+    const lock = JSON.parse(raw);
+    if (String(lock?.owner || "") === refreshTabId) {
+      localStorage.removeItem(REFRESH_LOCK_KEY);
+    }
+  } catch {
+    // Ignore unavailable storage.
+  }
+}
+
+async function withRefreshLock<T>(task: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  while (!tryAcquireRefreshLock()) {
+    if (Date.now() - startedAt > REFRESH_LOCK_WAIT_MS) break;
+    await sleep(REFRESH_LOCK_POLL_MS);
+  }
+  try {
+    return await task();
+  } finally {
+    releaseRefreshLock();
+  }
+}
+
+export function shouldRefreshSessionNow(bufferSeconds = 15 * 60) {
+  if (!accessToken) return hasSessionHint();
+  const exp = parseJwtExp(accessToken);
+  if (!exp) return false;
+  const now = Math.floor(Date.now() / 1000);
+  return exp - now <= bufferSeconds;
 }
 
 function setRefreshBackoff(message: string) {
@@ -402,12 +473,10 @@ function isHardRefreshFailure(message: string): boolean {
   const msg = normalizeText(message);
   if (!msg) return false;
   return (
-    msg.includes("refresh token la bat buoc") ||
     msg.includes("refresh token khong hop le") ||
     msg.includes("refresh token khong khop") ||
     msg.includes("invalid refresh") ||
     msg.includes("session not found") ||
-    msg.includes("requires_relogin") ||
     msg.includes("can xac thuc lai") ||
     msg.includes("phien dang nhap da het han") ||
     msg.includes("phien dang nhap can xac thuc lai") ||
@@ -940,29 +1009,31 @@ export const authApi = {
     });
   },
   refresh: async () => {
-    try {
-      lastRefreshFailureHard = false;
-      lastRefreshFailureMessage = "";
-      const data = await auth<any>("/auth/refresh", {
-        method: "POST",
-        body: JSON.stringify({ access_token: accessToken || "" }),
-        timeoutMs: 15_000,
-      });
-      if (data.session) {
-        setTokens(data.session.access_token);
-        return true;
+    return withRefreshLock(async () => {
+      try {
+        lastRefreshFailureHard = false;
+        lastRefreshFailureMessage = "";
+        const data = await auth<any>("/auth/refresh", {
+          method: "POST",
+          body: JSON.stringify({ access_token: accessToken || "" }),
+          timeoutMs: 15_000,
+        });
+        if (data.session) {
+          setTokens(data.session.access_token);
+          return true;
+        }
+        lastRefreshFailureHard = true;
+        lastRefreshFailureMessage = "refresh failed";
+        setRefreshBackoff("refresh failed");
+        return false;
+      } catch (e: any) {
+        const message = String(e?.message || "refresh error");
+        lastRefreshFailureMessage = message;
+        lastRefreshFailureHard = isHardRefreshFailure(message);
+        setRefreshBackoff(message);
+        return false;
       }
-      lastRefreshFailureHard = true;
-      lastRefreshFailureMessage = "refresh failed";
-      setRefreshBackoff("refresh failed");
-      return false;
-    } catch (e: any) {
-      const message = String(e?.message || "refresh error");
-      lastRefreshFailureMessage = message;
-      lastRefreshFailureHard = isHardRefreshFailure(message);
-      setRefreshBackoff(message);
-      return false;
-    }
+    });
   },
   googleLogin: async () => {
     const data = await auth<any>("/auth/google", { method: "POST" });

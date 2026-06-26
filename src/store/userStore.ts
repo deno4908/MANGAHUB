@@ -203,7 +203,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
         set({ isLoggedIn: true, hasCheckedSession: true });
       } else {
         // Only clear session on definitive auth failures (401), NOT on network
-        // errors, timeouts or server errors (5xx) — prevents false logout.
+        // errors, timeouts or server errors (5xx) - prevents false logout.
         const msg: string = e?.message || '';
         const isAuthFailure =
           msg.includes('401') ||
@@ -224,7 +224,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
           set({ isLoggedIn: true });
           scheduleRestoreRetry(() => get().loadUser({ force: true }));
         }
-        // else: network/5xx error — keep the user logged in, just skip setting user
+        // else: network/5xx error - keep the user logged in, just skip setting user
       }
     } finally {
       set({ isLoading: false, hasCheckedSession: true });
