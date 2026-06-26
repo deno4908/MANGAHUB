@@ -398,10 +398,14 @@ def _validate_password_strength(password: str) -> str | None:
 
 
 def _get_sb():
-    global _supabase
-    if _supabase is None:
-        _supabase = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
-    return _supabase
+    # Supabase/Gotrue auth clients keep the last session in memory after
+    # sign-in/refresh. Reusing one anon client across users can make refresh
+    # tokens bleed between requests, so auth flows must get an isolated client.
+    client = getattr(g, "_supabase_auth_client", None)
+    if client is None:
+        client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
+        g._supabase_auth_client = client
+    return client
 
 
 def _get_sb_admin():
