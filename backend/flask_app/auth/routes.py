@@ -28,10 +28,12 @@ _LEGACY_PASSWORD_HASH_RE = re.compile(r"^[a-f0-9]{64}$")
 _MIN_PBKDF2_ITERATIONS = 200_000
 _SIGN_OUT_SCOPES = {"local", "global", "others"}
 _REFRESH_COOKIE_NAME = "mh_refresh_token"
+_OAUTH_VERIFIER_COOKIE_NAME = "mh_oauth_code_verifier"
 _REFRESH_COOKIE_MAX_AGE_SECONDS = max(
     60 * 60 * 24,
     int(getattr(config, "REFRESH_COOKIE_MAX_AGE_SECONDS", 60 * 60 * 24 * 365 * 5)),
 )
+_OAUTH_VERIFIER_COOKIE_MAX_AGE_SECONDS = 10 * 60
 _EMAIL_VERIFY_TIMEOUT_MINUTES = max(1, int(getattr(config, "EMAIL_VERIFY_TIMEOUT_MINUTES", 15)))
 _DEFAULT_USER_SETTINGS = {
     "reading_mode": "vertical",
@@ -119,13 +121,63 @@ def _clear_refresh_cookie(response):
     return response
 
 
-def _json(payload: dict, status: int = 200, *, refresh_token: str = "", clear_refresh: bool = False):
+def _set_oauth_verifier_cookie(response, code_verifier: str):
+    verifier = str(code_verifier or "").strip()
+    if not verifier:
+        return response
+    response.set_cookie(
+        _OAUTH_VERIFIER_COOKIE_NAME,
+        verifier,
+        max_age=_OAUTH_VERIFIER_COOKIE_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=_refresh_cookie_secure(),
+        samesite=_refresh_cookie_samesite(),
+        path="/auth",
+    )
+    return response
+
+
+def _clear_oauth_verifier_cookie(response):
+    response.delete_cookie(
+        _OAUTH_VERIFIER_COOKIE_NAME,
+        path="/auth",
+        secure=_refresh_cookie_secure(),
+        samesite=_refresh_cookie_samesite(),
+    )
+    return response
+
+
+def _json(
+    payload: dict,
+    status: int = 200,
+    *,
+    refresh_token: str = "",
+    clear_refresh: bool = False,
+    oauth_code_verifier: str = "",
+    clear_oauth_verifier: bool = False,
+):
     response = make_response(jsonify(payload), status)
     if refresh_token:
         _set_refresh_cookie(response, refresh_token)
     if clear_refresh:
         _clear_refresh_cookie(response)
+    if oauth_code_verifier:
+        _set_oauth_verifier_cookie(response, oauth_code_verifier)
+    if clear_oauth_verifier:
+        _clear_oauth_verifier_cookie(response)
     return response
+
+
+def _get_oauth_code_verifier(sb_client) -> str:
+    try:
+        auth = getattr(sb_client, "auth", None)
+        storage = getattr(auth, "_storage", None)
+        storage_key = str(getattr(auth, "_storage_key", "") or "")
+        if storage and storage_key:
+            return str(storage.get_item(f"{storage_key}-code-verifier") or "").strip()
+    except Exception:
+        return ""
+    return ""
 
 
 def _is_sha256_hex(value: str) -> bool:
@@ -1039,14 +1091,18 @@ def google_login():
     """Initiate Google OAuth â€” returns the redirect URL."""
     try:
         redirect_to = f"{config.FRONTEND_URL}/auth/callback"
-        result = _get_sb().auth.sign_in_with_oauth({
+        sb = _get_sb()
+        result = sb.auth.sign_in_with_oauth({
             "provider": "google",
             "options": {
                 "redirect_to": redirect_to,
             }
         })
         if result and result.url:
-            return jsonify({"url": result.url}), 200
+            code_verifier = _get_oauth_code_verifier(sb)
+            if not code_verifier:
+                return jsonify({"error": "Không thể tạo phiên OAuth"}), 500
+            return _json({"url": result.url}, 200, oauth_code_verifier=code_verifier)
         return jsonify({"error": "Không thể tạo link Google"}), 500
     except Exception as e:
         return jsonify({"error": f"Google login thất bại: {str(e)}"}), 500
@@ -1059,14 +1115,18 @@ def discord_login():
     """Initiate Discord OAuth â€” returns the redirect URL."""
     try:
         redirect_to = f"{config.FRONTEND_URL}/auth/callback"
-        result = _get_sb().auth.sign_in_with_oauth({
+        sb = _get_sb()
+        result = sb.auth.sign_in_with_oauth({
             "provider": "discord",
             "options": {
                 "redirect_to": redirect_to,
             }
         })
         if result and result.url:
-            return jsonify({"url": result.url}), 200
+            code_verifier = _get_oauth_code_verifier(sb)
+            if not code_verifier:
+                return jsonify({"error": "Không thể tạo phiên OAuth"}), 500
+            return _json({"url": result.url}, 200, oauth_code_verifier=code_verifier)
         return jsonify({"error": "Không thể tạo link Discord"}), 500
     except Exception as e:
         return jsonify({"error": f"Discord login thất bại: {str(e)}"}), 500
@@ -1164,17 +1224,30 @@ def oauth_callback():
 def oauth_exchange_code():
     """Exchange PKCE authorization code for session (Supabase PKCE flow)."""
     data = request.get_json(silent=True) or {}
-    code = data.get("code", "")
+    code = str(data.get("code", "") or "").strip()
+    code_verifier = str(
+        data.get("code_verifier")
+        or request.cookies.get(_OAUTH_VERIFIER_COOKIE_NAME)
+        or ""
+    ).strip()
 
     if not code:
-        return jsonify({"error": "code là bắt buộc"}), 400
+        return _json({"error": "code là bắt buộc"}, 400, clear_oauth_verifier=True)
+    if not code_verifier:
+        return _json({
+            "error": "Phiên OAuth đã hết hạn, vui lòng đăng nhập lại",
+            "requires_relogin": True,
+        }, 400, clear_oauth_verifier=True)
 
     try:
         # Exchange code for session
-        result = _get_sb().auth.exchange_code_for_session({"auth_code": code})
+        result = _get_sb().auth.exchange_code_for_session({
+            "auth_code": code,
+            "code_verifier": code_verifier,
+        })
 
         if not result.session or not result.user:
-            return jsonify({"error": "Không thể exchange code"}), 401
+            return _json({"error": "Không thể exchange code"}, 401, clear_oauth_verifier=True)
 
         user = result.user
         session = result.session
@@ -1226,7 +1299,10 @@ def oauth_exchange_code():
         profile = profile_result.data[0] if profile_result.data else None
 
         if profile and profile.get("is_banned"):
-            return jsonify({"error": "BANNED", "reason": profile.get("ban_reason", "")}), 403
+            return _json({
+                "error": "BANNED",
+                "reason": profile.get("ban_reason", ""),
+            }, 403, clear_oauth_verifier=True)
 
         return _json({
             "message": "Đăng nhập thành công",
@@ -1239,9 +1315,11 @@ def oauth_exchange_code():
                 "email": user.email,
             },
             "profile": profile,
-        }, 200, refresh_token=session.refresh_token)
+        }, 200, refresh_token=session.refresh_token, clear_oauth_verifier=True)
 
     except Exception as e:
-        return jsonify({"error": f"Code exchange thất bại: {str(e)}"}), 500
+        return _json({
+            "error": f"Code exchange thất bại: {str(e)}",
+        }, 500, clear_oauth_verifier=True)
 
 
