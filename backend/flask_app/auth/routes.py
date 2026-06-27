@@ -4,20 +4,33 @@ Uses Supabase Auth under the hood.
 """
 import re
 import base64
+import hashlib
 import json
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 from flask import Blueprint, request, jsonify, g, make_response
 from supabase import create_client
 from config import config
 from flask_app.middleware import clear_auth_cache, require_auth, get_current_user_id
 from flask_app import limiter
 
+try:
+    import redis  # type: ignore
+except Exception:  # pragma: no cover - Redis is optional for local dev.
+    redis = None
+
 auth_bp = Blueprint("auth", __name__)
 
 _supabase = None
 _supabase_admin = None
+_refresh_redis_client = None
+_refresh_redis_disabled_until = 0.0
+_refresh_singleflight_guard = Lock()
+_refresh_singleflight_locks: dict[str, Lock] = {}
+_refresh_result_cache: dict[str, tuple[float, dict]] = {}
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _PASSWORD_HASH_RE = re.compile(r"^mb2\$sha256\$([a-f0-9]{64})$")
@@ -34,6 +47,9 @@ _REFRESH_COOKIE_MAX_AGE_SECONDS = max(
     int(getattr(config, "REFRESH_COOKIE_MAX_AGE_SECONDS", 60 * 60 * 24 * 365 * 5)),
 )
 _OAUTH_VERIFIER_COOKIE_MAX_AGE_SECONDS = 10 * 60
+_REFRESH_SINGLEFLIGHT_TTL_SECONDS = 20
+_REFRESH_SINGLEFLIGHT_LOCK_SECONDS = 12
+_REFRESH_SINGLEFLIGHT_WAIT_SECONDS = 6
 _EMAIL_VERIFY_TIMEOUT_MINUTES = max(1, int(getattr(config, "EMAIL_VERIFY_TIMEOUT_MINUTES", 15)))
 _DEFAULT_USER_SETTINGS = {
     "reading_mode": "vertical",
@@ -178,6 +194,187 @@ def _get_oauth_code_verifier(sb_client) -> str:
     except Exception:
         return ""
     return ""
+
+
+def _refresh_token_cache_key(refresh_token: str) -> str:
+    return hashlib.sha256(str(refresh_token or "").encode("utf-8")).hexdigest()
+
+
+def _get_refresh_redis_client():
+    global _refresh_redis_client, _refresh_redis_disabled_until
+    if redis is None:
+        return None
+    if time.monotonic() < _refresh_redis_disabled_until:
+        return None
+    redis_url = str(getattr(config, "REDIS_URL", "") or "").strip()
+    if not redis_url or redis_url.startswith("memory://"):
+        return None
+    if _refresh_redis_client is not None:
+        return _refresh_redis_client
+    try:
+        _refresh_redis_client = redis.Redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_connect_timeout=0.25,
+            socket_timeout=0.75,
+            health_check_interval=30,
+        )
+        _refresh_redis_client.ping()
+        return _refresh_redis_client
+    except Exception:
+        _refresh_redis_client = None
+        _refresh_redis_disabled_until = time.monotonic() + 30
+        return None
+
+
+def _prune_refresh_result_cache(now: float | None = None):
+    now = time.monotonic() if now is None else now
+    if len(_refresh_result_cache) <= 512:
+        expired = [key for key, (expires_at, _) in _refresh_result_cache.items() if expires_at <= now]
+    else:
+        expired = list(_refresh_result_cache.keys())[: max(1, len(_refresh_result_cache) - 256)]
+    for key in expired:
+        _refresh_result_cache.pop(key, None)
+        _refresh_singleflight_locks.pop(key, None)
+
+
+def _remember_refresh_result(cache_key: str, payload: dict):
+    if not payload.get("access_token"):
+        return
+    now = time.monotonic()
+    with _refresh_singleflight_guard:
+        _refresh_result_cache[cache_key] = (
+            now + _REFRESH_SINGLEFLIGHT_TTL_SECONDS,
+            dict(payload),
+        )
+        _prune_refresh_result_cache(now)
+
+    client = _get_refresh_redis_client()
+    if not client:
+        return
+    try:
+        client.setex(
+            f"mh:auth:refresh-result:{cache_key}",
+            _REFRESH_SINGLEFLIGHT_TTL_SECONDS,
+            json.dumps(payload, separators=(",", ":")),
+        )
+    except Exception:
+        pass
+
+
+def _load_cached_refresh_result(cache_key: str) -> dict | None:
+    now = time.monotonic()
+    with _refresh_singleflight_guard:
+        cached = _refresh_result_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return dict(cached[1])
+        if cached:
+            _refresh_result_cache.pop(cache_key, None)
+
+    client = _get_refresh_redis_client()
+    if not client:
+        return None
+    try:
+        raw = client.get(f"mh:auth:refresh-result:{cache_key}")
+        if not raw:
+            return None
+        payload = json.loads(raw)
+        if isinstance(payload, dict) and payload.get("access_token"):
+            with _refresh_singleflight_guard:
+                _refresh_result_cache[cache_key] = (
+                    now + _REFRESH_SINGLEFLIGHT_TTL_SECONDS,
+                    dict(payload),
+                )
+            return payload
+    except Exception:
+        return None
+    return None
+
+
+def _get_refresh_singleflight_lock(cache_key: str) -> Lock:
+    with _refresh_singleflight_guard:
+        lock = _refresh_singleflight_locks.get(cache_key)
+        if lock is None:
+            lock = Lock()
+            _refresh_singleflight_locks[cache_key] = lock
+        return lock
+
+
+def _acquire_redis_refresh_lock(cache_key: str) -> tuple[object | None, str, str]:
+    client = _get_refresh_redis_client()
+    if not client:
+        return None, "", ""
+    lock_key = f"mh:auth:refresh-lock:{cache_key}"
+    owner = f"{time.time()}:{id(request)}"
+    try:
+        acquired = client.set(
+            lock_key,
+            owner,
+            nx=True,
+            ex=_REFRESH_SINGLEFLIGHT_LOCK_SECONDS,
+        )
+        if acquired:
+            return client, lock_key, owner
+    except Exception:
+        return None, "", ""
+    return client, lock_key, ""
+
+
+def _release_redis_refresh_lock(client, lock_key: str, owner: str):
+    if not client or not lock_key or not owner:
+        return
+    try:
+        if client.get(lock_key) == owner:
+            client.delete(lock_key)
+    except Exception:
+        pass
+
+
+def _wait_for_cached_refresh_result(cache_key: str) -> dict | None:
+    deadline = time.monotonic() + _REFRESH_SINGLEFLIGHT_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        cached = _load_cached_refresh_result(cache_key)
+        if cached:
+            return cached
+        time.sleep(0.12)
+    return None
+
+
+def _refresh_session_singleflight(refresh_token: str) -> dict:
+    cache_key = _refresh_token_cache_key(refresh_token)
+    cached = _load_cached_refresh_result(cache_key)
+    if cached:
+        return cached
+
+    lock = _get_refresh_singleflight_lock(cache_key)
+    with lock:
+        cached = _load_cached_refresh_result(cache_key)
+        if cached:
+            return cached
+
+        redis_client, redis_lock_key, redis_lock_owner = _acquire_redis_refresh_lock(cache_key)
+        if redis_client and not redis_lock_owner:
+            cached = _wait_for_cached_refresh_result(cache_key)
+            if cached:
+                return cached
+            raise RuntimeError("Refresh đang được xử lý, vui lòng thử lại")
+
+        try:
+            result = _get_sb().auth.refresh_session(refresh_token)
+            session = getattr(result, "session", None)
+            if not session:
+                raise RuntimeError("Refresh thất bại")
+            payload = {
+                "access_token": str(getattr(session, "access_token", "") or ""),
+                "refresh_token": str(getattr(session, "refresh_token", "") or ""),
+                "expires_at": getattr(session, "expires_at", None),
+            }
+            if not payload["access_token"]:
+                raise RuntimeError("Refresh thất bại")
+            _remember_refresh_result(cache_key, payload)
+            return payload
+        finally:
+            _release_redis_refresh_lock(redis_client, redis_lock_key, redis_lock_owner)
 
 
 def _is_sha256_hex(value: str) -> bool:
@@ -1038,15 +1235,13 @@ def refresh_token():
                 if _is_access_token_revoked(presented_access_token, presented_profile):
                     return jsonify({"error": "Phiên đăng nhập đã hết hạn"}), 401
 
-        result = _get_sb().auth.refresh_session(refresh_token)
+        refreshed_session = _refresh_session_singleflight(refresh_token)
 
-        if result.session:
-            refreshed_access_token = str(result.session.access_token or "")
+        if refreshed_session:
+            refreshed_access_token = str(refreshed_session.get("access_token") or "")
             refreshed_payload = _decode_access_token_payload(refreshed_access_token)
             refreshed_user_id = str(
-                getattr(getattr(result, "user", None), "id", "")
-                or refreshed_payload.get("sub")
-                or ""
+                refreshed_payload.get("sub") or ""
             ).strip()
 
             if presented_user_id and refreshed_user_id and presented_user_id != refreshed_user_id:
@@ -1062,10 +1257,10 @@ def refresh_token():
 
             return _json({
                 "session": {
-                    "access_token": result.session.access_token,
-                    "expires_at": result.session.expires_at,
+                    "access_token": refreshed_access_token,
+                    "expires_at": refreshed_session.get("expires_at"),
                 }
-            }, 200, refresh_token=result.session.refresh_token)
+            }, 200, refresh_token=refreshed_session.get("refresh_token") or "")
         else:
             return jsonify({"error": "Refresh thất bại"}), 401
 
