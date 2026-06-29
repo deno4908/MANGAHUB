@@ -7,8 +7,7 @@ import {
   getAccessToken,
   hasSessionHint,
   notificationApi,
-  wasLastRefreshFailureHard,
-  wasLastRefreshFailureMissingToken,
+  shouldStopRestoringSession,
 } from '@/lib/api';
 
 type AvatarCropArea = {
@@ -91,7 +90,7 @@ function scheduleRestoreRetry(loadUser: () => Promise<void>, delayMs = 15_000) {
 }
 
 function shouldKeepRestoringSession() {
-  return hasSessionHint() && (!wasLastRefreshFailureHard() || wasLastRefreshFailureMissingToken());
+  return hasSessionHint() && !shouldStopRestoringSession();
 }
 
 export const useUserStore = create<UserStore>((set, get) => ({

@@ -111,6 +111,8 @@ let refreshInFlight: Promise<boolean> | null = null;
 let refreshBlockedUntil = 0;
 let lastRefreshFailureHard = false;
 let lastRefreshFailureMessage = "";
+let hardRefreshFailureCount = 0;
+let firstHardRefreshFailureAt = 0;
 const refreshTabId =
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
     ? crypto.randomUUID()
@@ -122,6 +124,8 @@ const REFRESH_LOCK_TTL_MS = 12_000;
 const REFRESH_LOCK_WAIT_MS = 10_000;
 const REFRESH_LOCK_POLL_MS = 180;
 const PEER_TOKEN_WAIT_MS = 350;
+const HARD_REFRESH_FAILURE_MIN_COUNT = 3;
+const HARD_REFRESH_FAILURE_GRACE_MS = 60_000;
 
 export type MaintenanceState = {
   enabled: boolean;
@@ -196,6 +200,8 @@ export function setTokens(access: string, _refresh?: string, options: { broadcas
   refreshBlockedUntil = 0;
   lastRefreshFailureHard = false;
   lastRefreshFailureMessage = "";
+  hardRefreshFailureCount = 0;
+  firstHardRefreshFailureAt = 0;
   try {
     localStorage.setItem(SESSION_HINT_KEY, String(Date.now()));
     localStorage.removeItem(BAN_LOCK_KEY);
@@ -212,6 +218,8 @@ export function clearTokens(options: { broadcast?: boolean } = {}) {
   refreshBlockedUntil = 0;
   lastRefreshFailureHard = false;
   lastRefreshFailureMessage = "";
+  hardRefreshFailureCount = 0;
+  firstHardRefreshFailureAt = 0;
   try {
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
@@ -238,6 +246,26 @@ export function wasLastRefreshFailureHard() {
 
 export function wasLastRefreshFailureMissingToken() {
   return normalizeText(lastRefreshFailureMessage).includes("refresh token la bat buoc");
+}
+
+export function shouldStopRestoringSession() {
+  if (!lastRefreshFailureHard) return false;
+  if (wasLastRefreshFailureMissingToken()) return false;
+  if (hardRefreshFailureCount < HARD_REFRESH_FAILURE_MIN_COUNT) return false;
+  if (!firstHardRefreshFailureAt) return false;
+  return Date.now() - firstHardRefreshFailureAt >= HARD_REFRESH_FAILURE_GRACE_MS;
+}
+
+function markRefreshFailure(message: string, hard: boolean) {
+  lastRefreshFailureMessage = message;
+  lastRefreshFailureHard = hard;
+  if (hard) {
+    if (!firstHardRefreshFailureAt) firstHardRefreshFailureAt = Date.now();
+    hardRefreshFailureCount += 1;
+  } else {
+    hardRefreshFailureCount = 0;
+    firstHardRefreshFailureAt = 0;
+  }
 }
 
 function sleep(ms: number) {
@@ -709,8 +737,9 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
       return retry;
     }
 
-    // Stop retry storms when the session can no longer be refreshed.
-    if (lastRefreshFailureHard) {
+    // Stop retry storms only after repeated hard failures. A single refresh race
+    // should not sign the user out.
+    if (shouldStopRestoringSession()) {
       clearTokens();
       emitForceLogout("session-expired");
       throw new Error("Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại");
@@ -795,6 +824,10 @@ function adminResponse(path: string, options?: ApiRequestInit) {
 
 function auth<T>(path: string, options?: ApiRequestInit) {
   return apiFetch<T>(`${AUTH_BASE}${path}`, options);
+}
+
+function authResponse(path: string, options?: ApiRequestInit) {
+  return apiFetchResponse(`${AUTH_BASE}${path}`, options);
 }
 
 // ─── Manga API (proxy OTruyenAPI) ───
@@ -1086,29 +1119,41 @@ export const authApi = {
         if (!accessToken && await waitForPeerAccessToken(800)) {
           return true;
         }
-        lastRefreshFailureHard = false;
-        lastRefreshFailureMessage = "";
-        const data = await auth<any>("/auth/refresh", {
+        const response = await authResponse("/auth/refresh", {
           method: "POST",
           body: JSON.stringify({ access_token: accessToken || "" }),
           timeoutMs: 15_000,
         });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const message = String(
+            data?.error ||
+            data?.detail ||
+            `refresh failed: ${response.status}`,
+          );
+          if (response.status === 409 || data?.requires_retry) {
+            markRefreshFailure(message, false);
+            setRefreshBackoff(message);
+            return false;
+          }
+          const hardFailure = Boolean(data?.requires_relogin) || isHardRefreshFailure(message);
+          markRefreshFailure(message, hardFailure);
+          setRefreshBackoff(message);
+          return false;
+        }
         if (data.session) {
           setTokens(data.session.access_token);
           return true;
         }
-        lastRefreshFailureHard = true;
-        lastRefreshFailureMessage = "refresh failed";
+        markRefreshFailure("refresh failed", false);
         setRefreshBackoff("refresh failed");
         return false;
       } catch (e: any) {
         const message = String(e?.message || "refresh error");
-        lastRefreshFailureMessage = message;
         const hardFailure = isHardRefreshFailure(message);
-        lastRefreshFailureHard = hardFailure;
+        markRefreshFailure(message, hardFailure);
         if (hardFailure && await waitForPeerAccessToken(1_000)) {
-          lastRefreshFailureHard = false;
-          lastRefreshFailureMessage = "";
+          markRefreshFailure("", false);
           refreshBlockedUntil = 0;
           return true;
         }
