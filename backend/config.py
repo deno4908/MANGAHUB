@@ -53,6 +53,9 @@ class Config:
     REFRESH_COOKIE_MAX_AGE_SECONDS: int = int(
         os.getenv("REFRESH_COOKIE_MAX_AGE_SECONDS", str(60 * 60 * 24 * 365 * 5))
     )
+    REFRESH_ROTATION_GRACE_SECONDS: int = int(
+        os.getenv("REFRESH_ROTATION_GRACE_SECONDS", str(2 * 60 * 60))
+    )
 
     # Google reCAPTCHA v2
     RECAPTCHA_SECRET_KEY: str = os.getenv("RECAPTCHA_SECRET_KEY", "")

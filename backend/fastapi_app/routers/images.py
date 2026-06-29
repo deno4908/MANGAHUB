@@ -227,6 +227,18 @@ def _is_usable_cache_file(path: Path) -> bool:
         return False
 
 
+def _cached_file_is_mangadex_placeholder(path: Path) -> bool:
+    try:
+        if path.suffix.lower() not in EXT_CONTENT_TYPE:
+            return False
+        size = path.stat().st_size
+        if size <= 0 or size > 768 * 1024:
+            return False
+        return _looks_like_mangadex_hotlink_placeholder(path.read_bytes())
+    except OSError:
+        return False
+
+
 def _remove_broken_cache_file(path: Path) -> None:
     try:
         if path.exists() and not _is_usable_cache_file(path):
@@ -508,6 +520,12 @@ def _cached_image_response(
         return None
     if not _is_usable_cache_file(cached_path):
         _remove_broken_cache_file(cached_path)
+        return None
+    if _cached_file_is_mangadex_placeholder(cached_path):
+        try:
+            cached_path.unlink()
+        except OSError:
+            pass
         return None
 
     try:

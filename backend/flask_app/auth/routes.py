@@ -50,6 +50,10 @@ _OAUTH_VERIFIER_COOKIE_MAX_AGE_SECONDS = 10 * 60
 _REFRESH_SINGLEFLIGHT_TTL_SECONDS = 20
 _REFRESH_SINGLEFLIGHT_LOCK_SECONDS = 12
 _REFRESH_SINGLEFLIGHT_WAIT_SECONDS = 6
+_REFRESH_ROTATION_GRACE_SECONDS = max(
+    _REFRESH_SINGLEFLIGHT_TTL_SECONDS,
+    int(getattr(config, "REFRESH_ROTATION_GRACE_SECONDS", 2 * 60 * 60)),
+)
 _EMAIL_VERIFY_TIMEOUT_MINUTES = max(1, int(getattr(config, "EMAIL_VERIFY_TIMEOUT_MINUTES", 15)))
 _DEFAULT_USER_SETTINGS = {
     "reading_mode": "vertical",
@@ -238,13 +242,17 @@ def _prune_refresh_result_cache(now: float | None = None):
         _refresh_singleflight_locks.pop(key, None)
 
 
-def _remember_refresh_result(cache_key: str, payload: dict):
+def _remember_refresh_result(cache_key: str, payload: dict, ttl_seconds: int | None = None):
     if not payload.get("access_token"):
         return
+    ttl = max(
+        _REFRESH_SINGLEFLIGHT_TTL_SECONDS,
+        int(ttl_seconds or _REFRESH_ROTATION_GRACE_SECONDS),
+    )
     now = time.monotonic()
     with _refresh_singleflight_guard:
         _refresh_result_cache[cache_key] = (
-            now + _REFRESH_SINGLEFLIGHT_TTL_SECONDS,
+            now + ttl,
             dict(payload),
         )
         _prune_refresh_result_cache(now)
@@ -255,7 +263,7 @@ def _remember_refresh_result(cache_key: str, payload: dict):
     try:
         client.setex(
             f"mh:auth:refresh-result:{cache_key}",
-            _REFRESH_SINGLEFLIGHT_TTL_SECONDS,
+            ttl,
             json.dumps(payload, separators=(",", ":")),
         )
     except Exception:
@@ -289,6 +297,37 @@ def _load_cached_refresh_result(cache_key: str) -> dict | None:
     except Exception:
         return None
     return None
+
+
+def _refresh_payload_is_fresh(payload: dict, buffer_seconds: int = 60) -> bool:
+    try:
+        expires_at = int(float(payload.get("expires_at") or 0))
+    except Exception:
+        expires_at = 0
+    if not expires_at:
+        token_payload = _decode_access_token_payload(str(payload.get("access_token") or ""))
+        try:
+            expires_at = int(float(token_payload.get("exp") or 0))
+        except Exception:
+            expires_at = 0
+    if not expires_at:
+        return True
+    return expires_at - int(time.time()) > buffer_seconds
+
+
+def _refresh_supabase_session(refresh_token: str) -> dict:
+    result = _get_sb().auth.refresh_session(refresh_token)
+    session = getattr(result, "session", None)
+    if not session:
+        raise RuntimeError("Refresh thất bại")
+    payload = {
+        "access_token": str(getattr(session, "access_token", "") or ""),
+        "refresh_token": str(getattr(session, "refresh_token", "") or ""),
+        "expires_at": getattr(session, "expires_at", None),
+    }
+    if not payload["access_token"]:
+        raise RuntimeError("Refresh thất bại")
+    return payload
 
 
 def _get_refresh_singleflight_lock(cache_key: str) -> Lock:
@@ -343,35 +382,28 @@ def _wait_for_cached_refresh_result(cache_key: str) -> dict | None:
 def _refresh_session_singleflight(refresh_token: str) -> dict:
     cache_key = _refresh_token_cache_key(refresh_token)
     cached = _load_cached_refresh_result(cache_key)
-    if cached:
+    if cached and _refresh_payload_is_fresh(cached):
         return cached
 
     lock = _get_refresh_singleflight_lock(cache_key)
     with lock:
         cached = _load_cached_refresh_result(cache_key)
-        if cached:
+        if cached and _refresh_payload_is_fresh(cached):
             return cached
+        effective_refresh_token = str((cached or {}).get("refresh_token") or refresh_token).strip()
 
         redis_client, redis_lock_key, redis_lock_owner = _acquire_redis_refresh_lock(cache_key)
         if redis_client and not redis_lock_owner:
             cached = _wait_for_cached_refresh_result(cache_key)
-            if cached:
+            if cached and _refresh_payload_is_fresh(cached):
                 return cached
             raise RuntimeError("Refresh đang được xử lý, vui lòng thử lại")
 
         try:
-            result = _get_sb().auth.refresh_session(refresh_token)
-            session = getattr(result, "session", None)
-            if not session:
-                raise RuntimeError("Refresh thất bại")
-            payload = {
-                "access_token": str(getattr(session, "access_token", "") or ""),
-                "refresh_token": str(getattr(session, "refresh_token", "") or ""),
-                "expires_at": getattr(session, "expires_at", None),
-            }
-            if not payload["access_token"]:
-                raise RuntimeError("Refresh thất bại")
+            payload = _refresh_supabase_session(effective_refresh_token)
             _remember_refresh_result(cache_key, payload)
+            if effective_refresh_token and effective_refresh_token != refresh_token:
+                _remember_refresh_result(_refresh_token_cache_key(effective_refresh_token), payload)
             return payload
         finally:
             _release_redis_refresh_lock(redis_client, redis_lock_key, redis_lock_owner)

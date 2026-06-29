@@ -4050,7 +4050,7 @@ async def mangadex_cover(manga_id: str):
         raise HTTPException(status_code=400, detail="Invalid manga ID")
 
     # Check cache first
-    cache_key = f"mangadex:cover-url:{manga_id}"
+    cache_key = f"mangadex:cover-url:v2:{manga_id}"
     cached = cache.get(cache_key)
     if cached:
         return RedirectResponse(
