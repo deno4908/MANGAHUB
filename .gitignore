@@ -15,6 +15,21 @@ dist-ssr
 .env.local
 .env.production
 
+# Python generated/runtime files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local Python virtual environments
+venv/
+.venv/
+backend/venv/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

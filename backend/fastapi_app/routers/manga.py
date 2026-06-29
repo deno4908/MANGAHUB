@@ -12,13 +12,15 @@ import re
 import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
+from html import escape as html_escape, unescape as html_unescape
 from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
+from config import config
 from fastapi_app.dependencies import get_optional_user, get_supabase, get_supabase_public
 from fastapi_app.services.cache_service import cache
 from fastapi_app.services import mangadex_service, otruyen_service
@@ -2169,6 +2171,272 @@ def _insert_missing_first_seen_rows(db: Any, rows: list[dict[str, Any]]) -> None
         db.table("chapter_first_seen").insert(rows).execute()
     except Exception:
         return
+
+
+def _public_site_base(request: Request) -> str:
+    configured = str(getattr(config, "FRONTEND_URL", "") or "").strip().rstrip("/")
+    if configured:
+        return configured
+    return f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
+
+
+def _collapse_share_text(value: Any, max_length: int = 220) -> str:
+    text = html_unescape(str(value or ""))
+    text = re.sub(r"<[^>]*>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= max_length:
+        return text
+    return text[: max(0, max_length - 1)].rstrip() + "..."
+
+
+def _normalize_share_cover_url(value: Any, slug: str = "") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("//"):
+        return f"https:{raw}"
+    if raw.startswith(("http://", "https://")):
+        return raw
+
+    normalized_raw = raw.lstrip("/")
+    if normalized_raw.startswith("uploads/"):
+        return f"https://img.otruyenapi.com/{normalized_raw}"
+    if normalized_raw.startswith("comics/"):
+        return f"https://img.otruyenapi.com/uploads/{normalized_raw}"
+    return f"{OTRUYEN_IMG_CDN}{normalized_raw}"
+
+
+def _absolute_share_url(request: Request, value: str) -> str:
+    base = _public_site_base(request)
+    url = str(value or "").strip()
+    if not url:
+        return f"{base}/no-cover.svg"
+    if url.startswith("//"):
+        return f"https:{url}"
+    if url.startswith(("http://", "https://")):
+        return url
+    if not url.startswith("/"):
+        url = f"/{url}"
+    return f"{base}{url}"
+
+
+def _share_image_url(request: Request, cover_url: str) -> str:
+    base = _public_site_base(request)
+    normalized = str(cover_url or "").strip()
+    if not normalized:
+        return f"{base}/no-cover.svg"
+    if normalized.startswith("//"):
+        normalized = f"https:{normalized}"
+    if normalized.startswith(("http://", "https://")):
+        return f"{base}/api/images/img?url={quote(normalized, safe='')}"
+    return _absolute_share_url(request, normalized)
+
+
+def _share_title(value: Any, fallback: str = "MangaHub") -> str:
+    title = _collapse_share_text(value, max_length=90)
+    return title or fallback
+
+
+async def _resolve_share_identifier(identifier: str) -> tuple[str, str]:
+    raw_identifier = str(identifier or "").strip()
+    if not raw_identifier:
+        raise HTTPException(status_code=404, detail="Manga not found")
+
+    otruyen_object_id = _decode_otruyen_route_id(raw_identifier)
+    if otruyen_object_id:
+        resolved_slug = await otruyen_service.resolve_slug_from_id(otruyen_object_id)
+        if not resolved_slug:
+            raise HTTPException(status_code=404, detail="Manga not found")
+        return _clean_slug(resolved_slug), raw_identifier
+
+    return raw_identifier, raw_identifier
+
+
+async def _build_manga_share_meta(
+    request: Request,
+    *,
+    identifier: str,
+    source: str | None,
+    db: Any,
+) -> dict[str, str]:
+    raw_source = str(source or "").strip().lower()
+    if raw_source and raw_source not in {"mangadex", "otruyen"}:
+        raise HTTPException(status_code=404, detail="Manga not found")
+
+    normalized_identifier, canonical_token = await _resolve_share_identifier(identifier)
+    mangadex_id = _extract_mangadex_id(normalized_identifier)
+    if raw_source == "mangadex" and not mangadex_id:
+        raise HTTPException(status_code=404, detail="Manga not found")
+    if raw_source == "otruyen":
+        mangadex_id = None
+
+    if not mangadex_id and _is_invalid_manga_slug(normalized_identifier):
+        raise HTTPException(status_code=404, detail="Manga not found")
+
+    hidden = await _get_hidden_slugs(db)
+    hidden_reason = (
+        _hidden_reason_for_slug(hidden, normalized_identifier)
+        or _hidden_reason_for_slug(hidden, canonical_token)
+        or (_hidden_reason_for_slug(hidden, mangadex_id) if mangadex_id else None)
+    )
+    if hidden_reason:
+        raise HTTPException(status_code=451, detail={"hidden": True, "reason": hidden_reason})
+
+    title = ""
+    description = ""
+    cover_url = ""
+    share_source = "mangadex" if mangadex_id else "otruyen"
+
+    if not mangadex_id:
+        uploaded_manga = await asyncio.to_thread(
+            lambda: _safe_query(
+                lambda: db.table("manga_uploads")
+                .select("manga_slug,title,description,cover_url,publish_status,genres,updated_at")
+                .eq("manga_slug", normalized_identifier)
+                .eq("status", "published")
+                .maybe_single()
+                .execute()
+            )
+        )
+        uploaded = getattr(uploaded_manga, "data", None) if uploaded_manga is not None else None
+        if isinstance(uploaded, dict) and uploaded:
+            item = {
+                "slug": uploaded.get("manga_slug") or normalized_identifier,
+                "name": uploaded.get("title") or "",
+                "content": uploaded.get("description") or "",
+                "thumb_url": uploaded.get("cover_url") or "",
+            }
+            override_rows = await _fetch_override_rows_by_slugs(db, [item["slug"], normalized_identifier])
+            _apply_override_fields(item, _resolve_override_row(override_rows, item["slug"]))
+            title = _share_title(item.get("name"), fallback=normalized_identifier)
+            description = _collapse_share_text(item.get("content"))
+            cover_url = _normalize_share_cover_url(item.get("thumb_url"), str(item.get("slug") or normalized_identifier))
+            share_source = "mangahub"
+
+    if mangadex_id:
+        lookup = await mangadex_service.get_manga_lookup(mangadex_id)
+        manga = (lookup or {}).get("manga") or {}
+        if not isinstance(manga, dict) or not manga:
+            raise HTTPException(status_code=404, detail="Manga not found")
+        manga = dict(manga)
+        override_rows = await _fetch_override_rows_by_slugs(db, [mangadex_id, f"mdx-{mangadex_id}"])
+        _apply_override_fields(manga, _resolve_override_row(override_rows, mangadex_id))
+        title = _share_title(manga.get("title") or manga.get("name"), fallback=f"MangaDex {mangadex_id[:8]}")
+        description = _collapse_share_text(
+            manga.get("description") or manga.get("content") or f"Doc {title} tren MangaHub."
+        )
+        cover_url = _normalize_share_cover_url(manga.get("cover_url") or manga.get("thumb_url"), mangadex_id)
+        canonical_token = mangadex_id
+        share_source = "mangadex"
+    elif not title:
+        detail = await otruyen_service.get_manga_detail(normalized_identifier)
+        item = (detail.get("data") or {}).get("item") if isinstance(detail, dict) else None
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=404, detail="Manga not found")
+
+        item = dict(item)
+        detail_slug = str(item.get("slug") or normalized_identifier).strip()
+        override_rows = await _fetch_override_rows_by_slugs(db, [detail_slug, normalized_identifier])
+        _apply_override_fields(item, _resolve_override_row(override_rows, detail_slug))
+        seo = (detail.get("data") or {}).get("seoOnPage") if isinstance(detail, dict) else {}
+        if not isinstance(seo, dict):
+            seo = {}
+
+        title = _share_title(item.get("name") or seo.get("titleHead"), fallback=detail_slug or normalized_identifier)
+        description = _collapse_share_text(
+            seo.get("descriptionHead") or item.get("content") or f"Doc {title} tren MangaHub."
+        )
+        cover_url = _normalize_share_cover_url(item.get("thumb_url") or item.get("cover_url"), detail_slug)
+        canonical_token = canonical_token or detail_slug or normalized_identifier
+
+    canonical_url = f"{_public_site_base(request)}/manga/{quote(str(canonical_token or identifier).strip(), safe='')}"
+    image_url = _share_image_url(request, cover_url)
+    if not description:
+        description = f"Doc {title} tren MangaHub."
+
+    return {
+        "title": title,
+        "description": description,
+        "image_url": image_url,
+        "canonical_url": canonical_url,
+        "source": share_source,
+    }
+
+
+def _render_manga_share_html(meta: dict[str, str]) -> str:
+    title = html_escape(meta.get("title") or "MangaHub", quote=True)
+    description = html_escape(meta.get("description") or "Doc truyen tranh online tren MangaHub.", quote=True)
+    image_url = html_escape(meta.get("image_url") or "", quote=True)
+    canonical_url = html_escape(meta.get("canonical_url") or "", quote=True)
+    source = html_escape(meta.get("source") or "mangahub", quote=True)
+
+    return f"""<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{title} | MangaHub</title>
+    <meta name="description" content="{description}">
+    <link rel="canonical" href="{canonical_url}">
+    <meta property="og:site_name" content="MangaHub">
+    <meta property="og:type" content="article">
+    <meta property="og:locale" content="vi_VN">
+    <meta property="og:title" content="{title}">
+    <meta property="og:description" content="{description}">
+    <meta property="og:url" content="{canonical_url}">
+    <meta property="og:image" content="{image_url}">
+    <meta property="og:image:secure_url" content="{image_url}">
+    <meta property="og:image:alt" content="{title}">
+    <meta property="og:image:width" content="512">
+    <meta property="og:image:height" content="768">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="{title}">
+    <meta name="twitter:description" content="{description}">
+    <meta name="twitter:image" content="{image_url}">
+    <meta name="mangahub:source" content="{source}">
+    <meta http-equiv="refresh" content="1;url={canonical_url}">
+  </head>
+  <body>
+    <main>
+      <h1>{title}</h1>
+      <p>{description}</p>
+      <p><a href="{canonical_url}">Mo tren MangaHub</a></p>
+    </main>
+    <script>setTimeout(function(){{location.replace({json.dumps(meta.get("canonical_url") or "/")});}}, 150);</script>
+  </body>
+</html>"""
+
+
+@router.get("/share/{share_path:path}", response_class=HTMLResponse)
+async def manga_share_preview(
+    request: Request,
+    share_path: str,
+    db=Depends(get_supabase_public),
+):
+    parts = [part for part in str(share_path or "").strip("/").split("/") if part]
+    if len(parts) == 1:
+        source = None
+        identifier = parts[0]
+    elif len(parts) == 2 and parts[0].lower() in {"mangadex", "otruyen"}:
+        source = parts[0].lower()
+        identifier = parts[1]
+    else:
+        raise HTTPException(status_code=404, detail="Manga not found")
+
+    meta = await _build_manga_share_meta(
+        request,
+        identifier=identifier,
+        source=source,
+        db=db,
+    )
+    return HTMLResponse(
+        content=_render_manga_share_html(meta),
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Cache-Control": "public, max-age=300, stale-while-revalidate=86400",
+            "X-Robots-Tag": "index, follow",
+        },
+    )
 
 
 @router.get("/detail/{slug}")
