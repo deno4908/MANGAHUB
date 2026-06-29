@@ -13,12 +13,19 @@ import asyncio
 import logging
 import threading
 import re
+from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from typing import Any
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse
+
+try:
+    from PIL import Image, ImageStat
+except Exception:  # pragma: no cover - Pillow is optional for proxy safety.
+    Image = None
+    ImageStat = None
 
 try:
     from curl_cffi.requests import Session as CurlSession
@@ -102,7 +109,7 @@ IMAGE_CACHE_PRUNE_COOLDOWN_SECONDS = _env_float(
 MAX_IMAGE_BYTES = _env_int("IMAGE_PROXY_MAX_MB", 16, minimum=1) * 1024 * 1024
 IMAGE_PROXY_CURL_WORKERS = _env_int("IMAGE_PROXY_CURL_WORKERS", 8, minimum=1, maximum=32)
 MANGADEX_IMAGE_CACHE_VERSION = (
-    str(os.getenv("MANGADEX_IMAGE_CACHE_VERSION", "2") or "2").strip() or "2"
+    str(os.getenv("MANGADEX_IMAGE_CACHE_VERSION", "3") or "3").strip() or "3"
 )
 _mangadex_image_semaphore = asyncio.Semaphore(MANGADEX_IMAGE_UPSTREAM_CONCURRENCY)
 _curl_executor = ThreadPoolExecutor(max_workers=IMAGE_PROXY_CURL_WORKERS)
@@ -298,6 +305,53 @@ def _validate_image_payload(data: bytes, declared_type: str | None) -> tuple[str
         return None, "Response Content-Type does not match image bytes"
 
     return detected_type, ""
+
+
+def _looks_like_mangadex_hotlink_placeholder(data: bytes) -> bool:
+    if Image is None or ImageStat is None or not data:
+        return False
+    try:
+        with Image.open(BytesIO(data)) as image:
+            width, height = image.size
+            if width < 120 or height < 120:
+                return False
+
+            sample = image.convert("RGB").resize((64, 64))
+            stat = ImageStat.Stat(sample)
+            mean = stat.mean
+            extrema = stat.extrema
+
+            pixels = list(sample.getdata())
+            total = max(1, len(pixels))
+            whiteish = sum(1 for r, g, b in pixels if r >= 235 and g >= 235 and b >= 235) / total
+            very_dark = sum(1 for r, g, b in pixels if r <= 45 and g <= 45 and b <= 45) / total
+            orange = sum(1 for r, g, b in pixels if r >= 180 and 70 <= g <= 170 and b <= 90) / total
+            blue_gray = sum(1 for r, g, b in pixels if 35 <= r <= 120 and 45 <= g <= 130 and 65 <= b <= 160) / total
+            channel_spread = max(mean) - min(mean)
+            dynamic_range = max(high - low for low, high in extrema)
+
+            # MangaDex's anti-hotlink placeholder is a mostly-white page with
+            # small dark text plus the orange/blue MangaDex logo. Real covers
+            # can be bright too, so require several signals together.
+            return (
+                whiteish >= 0.62
+                and very_dark >= 0.015
+                and orange >= 0.002
+                and blue_gray >= 0.002
+                and channel_spread <= 28
+                and dynamic_range >= 120
+            )
+    except Exception:
+        return False
+
+
+def _validate_mangadex_image_payload(data: bytes, source_url: str) -> str:
+    host = _normalized_hostname(urlparse(source_url).hostname)
+    if not _is_mangadex_host(host):
+        return ""
+    if _looks_like_mangadex_hotlink_placeholder(data):
+        return "MangaDex returned hotlink placeholder"
+    return ""
 
 
 async def _read_httpx_response_limited(response: httpx.Response) -> tuple[bytes | None, str | None, str]:
@@ -571,13 +625,14 @@ def _request_headers_for_url(url: str) -> dict[str, str]:
     base_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
     }
     if _is_mangadex_host(host):
-        return {
-            **base_headers,
-            "Referer": "https://mangadex.org/",
-            "Origin": "https://mangadex.org",
-        }
+        headers = {**base_headers, "Referer": "https://mangadex.org/"}
+        match = re.search(r"/covers/([0-9a-f-]{36})/", parsed.path, flags=re.IGNORECASE)
+        if match:
+            headers["Referer"] = f"https://mangadex.org/title/{match.group(1)}"
+        return headers
     return {
         **base_headers,
         "Referer": "https://otruyenapi.com/",
@@ -662,6 +717,10 @@ async def _fetch_once_httpx(url: str) -> tuple[bytes | None, str | None, str, bo
                     data, content_type, read_error = await _read_httpx_response_limited(response)
                     if read_error:
                         return None, None, read_error, False
+                    mangadex_payload_error = _validate_mangadex_image_payload(data or b"", current_url)
+                    if mangadex_payload_error:
+                        await _reset_client(mangadex=is_mangadex)
+                        return None, None, mangadex_payload_error, True
                     return data, content_type, "", False
 
                 retryable = response.status_code in {403, 404, 408, 425, 429, 500, 502, 503, 504}
@@ -708,6 +767,10 @@ def _fetch_once_curl_sync(url: str) -> tuple[bytes | None, str | None, str, bool
                 _close_response(response)
                 if read_error:
                     return None, None, read_error, False
+                mangadex_payload_error = _validate_mangadex_image_payload(data or b"", current_url)
+                if mangadex_payload_error:
+                    _reset_curl_session()
+                    return None, None, mangadex_payload_error, True
                 return data, content_type, "", False
 
             retryable = response.status_code in {403, 404, 408, 425, 429, 500, 502, 503, 504}

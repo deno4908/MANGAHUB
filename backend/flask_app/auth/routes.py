@@ -1267,11 +1267,15 @@ def refresh_token():
     except Exception as e:
         message = str(e)
         normalized = message.lower()
+        if "already used" in normalized or "reuse" in normalized:
+            return _json({
+                "error": "Refresh đang được xử lý, vui lòng thử lại",
+                "requires_retry": True,
+            }, 409)
         if (
             "invalid refresh" in normalized
             or "refresh token not found" in normalized
             or "session not found" in normalized
-            or "already used" in normalized
         ):
             return _json({
                 "error": "Refresh token không hợp lệ",
