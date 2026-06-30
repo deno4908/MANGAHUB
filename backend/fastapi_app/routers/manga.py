@@ -37,6 +37,26 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = str(os.getenv(name, "")).strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except Exception:
+        return default
+
+
+def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
+    raw = str(os.getenv(name, "")).strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, float(raw))
+    except Exception:
+        return default
+
+
 RATING_CACHE_TTL_SECONDS = 120
 _rating_cache: dict[str, tuple[float, int, float]] = {}
 _MAX_RATING_CACHE = 2000  # Maximum slugs to keep in memory
@@ -50,6 +70,12 @@ _trending_memory_cache: dict[str, tuple[list[dict], float]] = {}
 _combined_refresh_tasks: dict[str, asyncio.Task] = {}
 _startup_warmup_task: asyncio.Task | None = None
 OTRUYEN_IMG_CDN = "https://img.otruyenapi.com/uploads/comics/"
+SITEMAP_CACHE_VERSION = "v3"
+SITEMAP_CACHE_TTL_SECONDS = _env_int("SITEMAP_CACHE_TTL_SECONDS", 1800, minimum=300)
+SITEMAP_OTRUYEN_PAGE_LIMIT = _env_int("SITEMAP_OTRUYEN_PAGE_LIMIT", 30, minimum=3)
+SITEMAP_OTRUYEN_BATCH_SIZE = _env_int("SITEMAP_OTRUYEN_BATCH_SIZE", 10, minimum=2)
+SITEMAP_OTRUYEN_TIMEOUT_SECONDS = _env_float("SITEMAP_OTRUYEN_TIMEOUT_SECONDS", 24.0, minimum=6.0)
+SITEMAP_MANGADEX_TIMEOUT_SECONDS = _env_float("SITEMAP_MANGADEX_TIMEOUT_SECONDS", 10.0, minimum=3.0)
 
 # ─── Hidden manga cache ────────────────────────────────────────────────────────
 _hidden_cache: dict[str, str] = {}   # {normalized_slug_or_alias: hidden_reason}
@@ -2618,7 +2644,28 @@ async def _collect_uploaded_sitemap_entries(
         )
 
 
-def _collect_mangadex_sitemap_entries(
+async def _load_sitemap_mangadex_payload() -> dict[str, Any] | None:
+    cached_payload = _load_best_mangadex_catalog_cache(None, min_count=700)
+    if _payload_manga_count(cached_payload) >= 700:
+        return cached_payload
+
+    live_payload: dict[str, Any] | None = None
+    try:
+        live_result = await asyncio.wait_for(
+            mangadex_service.get_popular_first_catalog(max_chapters=None),
+            timeout=SITEMAP_MANGADEX_TIMEOUT_SECONDS,
+        )
+        if isinstance(live_result, dict):
+            live_payload = live_result
+    except Exception:
+        live_payload = None
+
+    if _payload_manga_count(live_payload) > _payload_manga_count(cached_payload):
+        return live_payload
+    return cached_payload
+
+
+async def _collect_mangadex_sitemap_entries(
     request: Request,
     hidden: dict[str, str],
     entries: list[dict[str, str]],
@@ -2628,7 +2675,7 @@ def _collect_mangadex_sitemap_entries(
     if limit <= 0:
         return
     base = _public_site_base(request)
-    payload = _load_best_mangadex_catalog_cache(None, min_count=60)
+    payload = await _load_sitemap_mangadex_payload()
     mangas = (payload or {}).get("mangas") if isinstance(payload, dict) else []
     if not isinstance(mangas, list):
         return
@@ -2640,6 +2687,7 @@ def _collect_mangadex_sitemap_entries(
         manga_id = _extract_mangadex_id(manga.get("id"))
         if not manga_id or _hidden_reason_for_slug(hidden, manga_id):
             continue
+        before = len(seen)
         _add_sitemap_entry(
             entries,
             seen,
@@ -2648,7 +2696,8 @@ def _collect_mangadex_sitemap_entries(
             changefreq="weekly",
             priority="0.75",
         )
-        added += 1
+        if len(seen) > before:
+            added += 1
 
 
 def _otruyen_items_from_payload(payload: Any) -> list[dict[str, Any]]:
@@ -2677,18 +2726,32 @@ async def _collect_otruyen_sitemap_entries(
     if limit <= 0:
         return
     base = _public_site_base(request)
-    jobs = [otruyen_service.get_home()]
-    for list_type in ("truyen-moi", "dang-phat-hanh", "hoan-thanh"):
-        for page in (1, 2, 3):
-            jobs.append(otruyen_service.get_list(list_type, page))
+    started_at = time.monotonic()
+    jobs: list[tuple[str, str, int]] = [("home", "", 1)]
+    for list_type in ("truyen-moi", "dang-phat-hanh", "hoan-thanh", "sap-ra-mat"):
+        for page in range(1, SITEMAP_OTRUYEN_PAGE_LIMIT + 1):
+            jobs.append(("list", list_type, page))
 
-    try:
-        results = await asyncio.wait_for(
-            asyncio.gather(*jobs, return_exceptions=True),
-            timeout=12.0,
-        )
-    except Exception:
-        results = []
+    results: list[Any] = []
+    for start in range(0, len(jobs), SITEMAP_OTRUYEN_BATCH_SIZE):
+        remaining = SITEMAP_OTRUYEN_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+        if remaining <= 0:
+            break
+        batch_specs = jobs[start : start + SITEMAP_OTRUYEN_BATCH_SIZE]
+        batch = [
+            otruyen_service.get_home()
+            if kind == "home"
+            else otruyen_service.get_list(list_type, page)
+            for kind, list_type, page in batch_specs
+        ]
+        try:
+            batch_results = await asyncio.wait_for(
+                asyncio.gather(*batch, return_exceptions=True),
+                timeout=remaining,
+            )
+            results.extend(batch_results)
+        except Exception:
+            break
 
     added = 0
     for payload in results:
@@ -2763,13 +2826,18 @@ async def manga_seo_preview(
 @router.get("/sitemap-manga.xml")
 async def manga_sitemap_xml(
     request: Request,
-    limit: int = Query(3000, ge=1, le=10000),
+    limit: int = Query(8000, ge=1, le=20000),
     db=Depends(get_supabase_public),
 ):
+    cache_key = f"manga:sitemap:{SITEMAP_CACHE_VERSION}:{limit}"
+    cached_xml = cache.get(cache_key)
+    if cached_xml:
+        return _sitemap_xml_response(cached_xml, max_age=SITEMAP_CACHE_TTL_SECONDS)
+
     hidden = await _get_hidden_slugs(db)
     entries: list[dict[str, str]] = []
     seen: set[str] = set()
-    upload_limit = min(1000, limit)
+    upload_limit = min(2000, limit)
 
     await _collect_uploaded_sitemap_entries(
         request,
@@ -2781,7 +2849,7 @@ async def manga_sitemap_xml(
     )
 
     mangadex_limit = max(0, min(5000, limit - len(entries)))
-    _collect_mangadex_sitemap_entries(
+    await _collect_mangadex_sitemap_entries(
         request,
         hidden,
         entries,
@@ -2789,7 +2857,7 @@ async def manga_sitemap_xml(
         mangadex_limit,
     )
 
-    otruyen_limit = max(0, min(1000, limit - len(entries)))
+    otruyen_limit = max(0, limit - len(entries))
     await _collect_otruyen_sitemap_entries(
         request,
         hidden,
@@ -2798,7 +2866,9 @@ async def manga_sitemap_xml(
         otruyen_limit,
     )
 
-    return _sitemap_xml_response(_render_sitemap_urlset(entries), max_age=1800)
+    xml = _render_sitemap_urlset(entries)
+    cache.set(cache_key, xml, SITEMAP_CACHE_TTL_SECONDS)
+    return _sitemap_xml_response(xml, max_age=SITEMAP_CACHE_TTL_SECONDS)
 
 
 @router.get("/detail/{slug}")
