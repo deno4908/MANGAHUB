@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 from config import config
@@ -2407,21 +2407,319 @@ def _render_manga_share_html(meta: dict[str, str]) -> str:
 </html>"""
 
 
+def _render_manga_seo_html(meta: dict[str, str]) -> str:
+    raw_title = meta.get("title") or "MangaHub"
+    raw_description = meta.get("description") or "Doc truyen tranh online tren MangaHub."
+    raw_image_url = meta.get("image_url") or ""
+    raw_canonical_url = meta.get("canonical_url") or ""
+    raw_site_url = raw_canonical_url.split("/manga/", 1)[0] if "/manga/" in raw_canonical_url else raw_canonical_url
+
+    title = html_escape(raw_title, quote=True)
+    description = html_escape(raw_description, quote=True)
+    image_url = html_escape(raw_image_url, quote=True)
+    canonical_url = html_escape(raw_canonical_url, quote=True)
+    source = html_escape(meta.get("source") or "mangahub", quote=True)
+    image_html = f'<img src="{image_url}" alt="{title}" width="512" height="768">' if image_url else ""
+    json_ld = json.dumps(
+        {
+            "@context": "https://schema.org",
+            "@type": "Book",
+            "name": raw_title,
+            "description": raw_description,
+            "image": raw_image_url,
+            "url": raw_canonical_url,
+            "inLanguage": "vi",
+            "isAccessibleForFree": True,
+            "publisher": {
+                "@type": "Organization",
+                "name": "MangaHub",
+                "url": raw_site_url,
+            },
+        },
+        ensure_ascii=False,
+    )
+    safe_json_ld = (
+        json_ld
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
+
+    return f"""<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{title} - MangaHub</title>
+    <meta name="description" content="{description}">
+    <link rel="canonical" href="{canonical_url}">
+    <meta name="robots" content="index, follow, max-image-preview:large">
+    <meta property="og:site_name" content="MangaHub">
+    <meta property="og:type" content="article">
+    <meta property="og:locale" content="vi_VN">
+    <meta property="og:title" content="{title}">
+    <meta property="og:description" content="{description}">
+    <meta property="og:url" content="{canonical_url}">
+    <meta property="og:image" content="{image_url}">
+    <meta property="og:image:secure_url" content="{image_url}">
+    <meta property="og:image:alt" content="{title}">
+    <meta property="og:image:width" content="512">
+    <meta property="og:image:height" content="768">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="{title}">
+    <meta name="twitter:description" content="{description}">
+    <meta name="twitter:image" content="{image_url}">
+    <meta name="mangahub:source" content="{source}">
+    <script type="application/ld+json">{safe_json_ld}</script>
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>{title}</h1>
+        <p>{description}</p>
+        {image_html}
+        <p><a href="{canonical_url}">Đọc {title} trên MangaHub</a></p>
+      </article>
+    </main>
+  </body>
+</html>"""
+
+
+def _parse_share_path(share_path: str) -> tuple[str | None, str]:
+    parts = [part for part in str(share_path or "").strip("/").split("/") if part]
+    if len(parts) == 1:
+        return None, parts[0]
+    if len(parts) == 2 and parts[0].lower() in {"mangadex", "otruyen"}:
+        return parts[0].lower(), parts[1]
+    raise HTTPException(status_code=404, detail="Manga not found")
+
+
+def _sitemap_lastmod(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    match = re.match(r"^(\d{4}-\d{2}-\d{2})", raw)
+    if match:
+        return match.group(1)
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return dt.date().isoformat()
+    except Exception:
+        return ""
+
+
+def _sitemap_pick_lastmod(item: dict[str, Any]) -> str:
+    for key in (
+        "updated_at",
+        "updatedAt",
+        "local_last_published_at",
+        "last_published_at",
+        "published_at",
+        "created_at",
+        "createdAt",
+    ):
+        lastmod = _sitemap_lastmod((item or {}).get(key))
+        if lastmod:
+            return lastmod
+    return ""
+
+
+def _sitemap_xml_response(xml: str, max_age: int = 1800) -> Response:
+    return Response(
+        content=xml,
+        media_type="application/xml; charset=utf-8",
+        headers={
+            "Cache-Control": f"public, max-age={max_age}, stale-while-revalidate=86400",
+            "X-Robots-Tag": "index, follow",
+        },
+    )
+
+
+def _render_sitemap_urlset(entries: list[dict[str, str]]) -> str:
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for entry in entries:
+        loc = html_escape(str(entry.get("loc") or ""), quote=True)
+        if not loc:
+            continue
+        lastmod = html_escape(str(entry.get("lastmod") or ""), quote=True)
+        changefreq = html_escape(str(entry.get("changefreq") or "weekly"), quote=True)
+        priority = html_escape(str(entry.get("priority") or "0.7"), quote=True)
+        lines.append("  <url>")
+        lines.append(f"    <loc>{loc}</loc>")
+        if lastmod:
+            lines.append(f"    <lastmod>{lastmod}</lastmod>")
+        lines.append(f"    <changefreq>{changefreq}</changefreq>")
+        lines.append(f"    <priority>{priority}</priority>")
+        lines.append("  </url>")
+    lines.append("</urlset>")
+    return "\n".join(lines)
+
+
+def _add_sitemap_entry(
+    entries: list[dict[str, str]],
+    seen: set[str],
+    *,
+    loc: str,
+    lastmod: str = "",
+    changefreq: str = "weekly",
+    priority: str = "0.7",
+) -> None:
+    clean_loc = str(loc or "").strip()
+    if not clean_loc or clean_loc in seen:
+        return
+    seen.add(clean_loc)
+    entries.append(
+        {
+            "loc": clean_loc,
+            "lastmod": lastmod,
+            "changefreq": changefreq,
+            "priority": priority,
+        }
+    )
+
+
+async def _collect_uploaded_sitemap_entries(
+    request: Request,
+    db: Any,
+    hidden: dict[str, str],
+    entries: list[dict[str, str]],
+    seen: set[str],
+    limit: int,
+) -> None:
+    if limit <= 0:
+        return
+    base = _public_site_base(request)
+    try:
+        result = await asyncio.to_thread(
+            lambda: db.table("manga_uploads")
+            .select("manga_slug,updated_at,created_at")
+            .eq("status", "published")
+            .order("updated_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = getattr(result, "data", None) or []
+    except Exception:
+        rows = []
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        slug = _clean_slug(row.get("manga_slug"))
+        if not slug or _hidden_reason_for_slug(hidden, slug):
+            continue
+        _add_sitemap_entry(
+            entries,
+            seen,
+            loc=f"{base}/manga/{quote(slug, safe='')}",
+            lastmod=_sitemap_pick_lastmod(row),
+            changefreq="weekly",
+            priority="0.8",
+        )
+
+
+def _collect_mangadex_sitemap_entries(
+    request: Request,
+    hidden: dict[str, str],
+    entries: list[dict[str, str]],
+    seen: set[str],
+    limit: int,
+) -> None:
+    if limit <= 0:
+        return
+    base = _public_site_base(request)
+    payload = _load_best_mangadex_catalog_cache(None, min_count=60)
+    mangas = (payload or {}).get("mangas") if isinstance(payload, dict) else []
+    if not isinstance(mangas, list):
+        return
+
+    added = 0
+    for manga in mangas:
+        if not isinstance(manga, dict) or added >= limit:
+            break
+        manga_id = _extract_mangadex_id(manga.get("id"))
+        if not manga_id or _hidden_reason_for_slug(hidden, manga_id):
+            continue
+        _add_sitemap_entry(
+            entries,
+            seen,
+            loc=f"{base}/manga/{quote(manga_id, safe='')}",
+            lastmod=_sitemap_pick_lastmod(manga),
+            changefreq="weekly",
+            priority="0.75",
+        )
+        added += 1
+
+
+def _otruyen_items_from_payload(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    candidates = [
+        data.get("items"),
+        payload.get("items"),
+        data.get("mangas"),
+        payload.get("mangas"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            return [item for item in candidate if isinstance(item, dict)]
+    return []
+
+
+async def _collect_otruyen_sitemap_entries(
+    request: Request,
+    hidden: dict[str, str],
+    entries: list[dict[str, str]],
+    seen: set[str],
+    limit: int,
+) -> None:
+    if limit <= 0:
+        return
+    base = _public_site_base(request)
+    jobs = [otruyen_service.get_home()]
+    for list_type in ("truyen-moi", "dang-phat-hanh", "hoan-thanh"):
+        for page in (1, 2, 3):
+            jobs.append(otruyen_service.get_list(list_type, page))
+
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*jobs, return_exceptions=True),
+            timeout=12.0,
+        )
+    except Exception:
+        results = []
+
+    added = 0
+    for payload in results:
+        if added >= limit or not isinstance(payload, dict):
+            continue
+        for item in _otruyen_items_from_payload(payload):
+            if added >= limit:
+                break
+            slug = _clean_slug(item.get("slug"))
+            if not slug or _is_invalid_manga_slug(slug) or _hidden_reason_for_slug(hidden, slug):
+                continue
+            before = len(seen)
+            _add_sitemap_entry(
+                entries,
+                seen,
+                loc=f"{base}/manga/{quote(slug, safe='')}",
+                lastmod=_sitemap_pick_lastmod(item),
+                changefreq="weekly",
+                priority="0.7",
+            )
+            if len(seen) > before:
+                added += 1
+
+
 @router.get("/share/{share_path:path}", response_class=HTMLResponse)
 async def manga_share_preview(
     request: Request,
     share_path: str,
     db=Depends(get_supabase_public),
 ):
-    parts = [part for part in str(share_path or "").strip("/").split("/") if part]
-    if len(parts) == 1:
-        source = None
-        identifier = parts[0]
-    elif len(parts) == 2 and parts[0].lower() in {"mangadex", "otruyen"}:
-        source = parts[0].lower()
-        identifier = parts[1]
-    else:
-        raise HTTPException(status_code=404, detail="Manga not found")
+    source, identifier = _parse_share_path(share_path)
 
     meta = await _build_manga_share_meta(
         request,
@@ -2437,6 +2735,70 @@ async def manga_share_preview(
             "X-Robots-Tag": "index, follow",
         },
     )
+
+
+@router.get("/seo/{share_path:path}", response_class=HTMLResponse)
+async def manga_seo_preview(
+    request: Request,
+    share_path: str,
+    db=Depends(get_supabase_public),
+):
+    source, identifier = _parse_share_path(share_path)
+    meta = await _build_manga_share_meta(
+        request,
+        identifier=identifier,
+        source=source,
+        db=db,
+    )
+    return HTMLResponse(
+        content=_render_manga_seo_html(meta),
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Cache-Control": "public, max-age=600, stale-while-revalidate=86400",
+            "X-Robots-Tag": "index, follow, max-image-preview:large",
+        },
+    )
+
+
+@router.get("/sitemap-manga.xml")
+async def manga_sitemap_xml(
+    request: Request,
+    limit: int = Query(3000, ge=1, le=10000),
+    db=Depends(get_supabase_public),
+):
+    hidden = await _get_hidden_slugs(db)
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+    upload_limit = min(1000, limit)
+
+    await _collect_uploaded_sitemap_entries(
+        request,
+        db,
+        hidden,
+        entries,
+        seen,
+        upload_limit,
+    )
+
+    mangadex_limit = max(0, min(5000, limit - len(entries)))
+    _collect_mangadex_sitemap_entries(
+        request,
+        hidden,
+        entries,
+        seen,
+        mangadex_limit,
+    )
+
+    otruyen_limit = max(0, min(1000, limit - len(entries)))
+    await _collect_otruyen_sitemap_entries(
+        request,
+        hidden,
+        entries,
+        seen,
+        otruyen_limit,
+    )
+
+    return _sitemap_xml_response(_render_sitemap_urlset(entries), max_age=1800)
 
 
 @router.get("/detail/{slug}")
