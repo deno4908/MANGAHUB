@@ -61,6 +61,17 @@ def create_app() -> Flask:
         response = jsonify(maintenance_payload(state))
         response.status_code = 503
         response.headers["Retry-After"] = "60"
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+    @app.after_request
+    def prevent_auth_response_cache(response):
+        if request.path.startswith("/auth/"):
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
         return response
 
     # Register auth blueprint

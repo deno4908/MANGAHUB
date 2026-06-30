@@ -191,7 +191,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
             isRestoringSession: true,
             lastAuthRestoreError: 'refresh-pending',
           });
-          scheduleRestoreRetry(() => get().loadUser({ force: true }));
+          scheduleRestoreRetry(() => get().loadUser({ force: true }), 3_000);
           return;
         }
       }
@@ -280,7 +280,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
               isRestoringSession: true,
               lastAuthRestoreError: msg || 'refresh-pending',
             });
-            scheduleRestoreRetry(() => get().loadUser({ force: true }));
+            scheduleRestoreRetry(() => get().loadUser({ force: true }), 3_000);
           }
         } else if (hasSessionHint() || getAccessToken()) {
           set({
@@ -288,7 +288,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
             isRestoringSession: true,
             lastAuthRestoreError: msg || 'restore-pending',
           });
-          scheduleRestoreRetry(() => get().loadUser({ force: true }));
+          scheduleRestoreRetry(() => get().loadUser({ force: true }), 5_000);
         }
         // else: network/5xx error - keep the user logged in, just skip setting user
       }

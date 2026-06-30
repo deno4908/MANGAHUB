@@ -302,7 +302,12 @@ async def enforce_maintenance_mode(request: Request, call_next):
     if is_admin:
         return await call_next(request)
 
-    headers = {"Retry-After": "60"}
+    headers = {
+        "Retry-After": "60",
+        "Cache-Control": "no-store, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
     origin = request.headers.get("Origin")
     if origin in _cors_origins:
         headers["Access-Control-Allow-Origin"] = origin

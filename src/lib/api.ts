@@ -119,11 +119,14 @@ const refreshTabId =
     : `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 const REFRESH_BACKOFF_MS = 15_000;
+const REFRESH_RETRYABLE_BACKOFF_MS = 1_500;
 const REFRESH_RATE_LIMIT_BACKOFF_MS = 60_000;
-const REFRESH_LOCK_TTL_MS = 12_000;
-const REFRESH_LOCK_WAIT_MS = 10_000;
+const REFRESH_LOCK_TTL_MS = 25_000;
+const REFRESH_LOCK_WAIT_MS = 20_000;
 const REFRESH_LOCK_POLL_MS = 180;
 const PEER_TOKEN_WAIT_MS = 350;
+const REFRESH_RETRYABLE_ATTEMPTS = 5;
+const REFRESH_RETRYABLE_DELAY_MS = 500;
 const HARD_REFRESH_FAILURE_MIN_COUNT = 3;
 const HARD_REFRESH_FAILURE_GRACE_MS = 60_000;
 const MISSING_REFRESH_TOKEN_MIN_COUNT = 3;
@@ -347,6 +350,10 @@ function setRefreshBackoff(message: string) {
     ? REFRESH_RATE_LIMIT_BACKOFF_MS
     : REFRESH_BACKOFF_MS;
   refreshBlockedUntil = Math.max(refreshBlockedUntil, Date.now() + backoffMs);
+}
+
+function setRefreshRetryableBackoff() {
+  refreshBlockedUntil = Math.max(refreshBlockedUntil, Date.now() + REFRESH_RETRYABLE_BACKOFF_MS);
 }
 
 function emitForceLogout(reason: string) {
@@ -1147,6 +1154,9 @@ export const authApi = {
     if (!accessToken && await waitForPeerAccessToken()) {
       return true;
     }
+    if (refreshBlockedUntil > Date.now()) {
+      return waitForPeerAccessToken(1_000);
+    }
     return withRefreshLock(async () => {
       try {
         if (accessToken && !shouldRefreshBeforeRequest(accessToken)) {
@@ -1155,13 +1165,24 @@ export const authApi = {
         if (!accessToken && await waitForPeerAccessToken(800)) {
           return true;
         }
-        const response = await authRawResponse("/auth/refresh", {
-          method: "POST",
-          body: JSON.stringify({ access_token: accessToken || "" }),
-          timeoutMs: 15_000,
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
+
+        for (let attempt = 0; attempt < REFRESH_RETRYABLE_ATTEMPTS; attempt += 1) {
+          const response = await authRawResponse("/auth/refresh", {
+            method: "POST",
+            body: JSON.stringify({ access_token: accessToken || "" }),
+            timeoutMs: 20_000,
+          });
+          const data = await response.json().catch(() => ({}));
+          if (response.ok) {
+            if (data.session) {
+              setTokens(data.session.access_token);
+              return true;
+            }
+            markRefreshFailure("refresh failed", false);
+            setRefreshBackoff("refresh failed");
+            return false;
+          }
+
           const message = String(
             data?.error ||
             data?.detail ||
@@ -1169,20 +1190,27 @@ export const authApi = {
           );
           if (response.status === 409 || data?.requires_retry) {
             markRefreshFailure(message, false);
-            setRefreshBackoff(message);
+            if (await waitForPeerAccessToken(1_000)) {
+              markRefreshFailure("", false);
+              refreshBlockedUntil = 0;
+              return true;
+            }
+            if (attempt < REFRESH_RETRYABLE_ATTEMPTS - 1) {
+              await sleep(REFRESH_RETRYABLE_DELAY_MS * (attempt + 1));
+              continue;
+            }
+            setRefreshRetryableBackoff();
             return false;
           }
+
           const hardFailure = Boolean(data?.requires_relogin) || isHardRefreshFailure(message);
           markRefreshFailure(message, hardFailure);
           setRefreshBackoff(message);
           return false;
         }
-        if (data.session) {
-          setTokens(data.session.access_token);
-          return true;
-        }
-        markRefreshFailure("refresh failed", false);
-        setRefreshBackoff("refresh failed");
+
+        markRefreshFailure("refresh retry exhausted", false);
+        setRefreshRetryableBackoff();
         return false;
       } catch (e: any) {
         const message = String(e?.message || "refresh error");
