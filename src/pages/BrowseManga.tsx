@@ -3582,6 +3582,15 @@ const BrowseManga = () => {
     !useGlobalTopRatedMode &&
     typeof mangadexCatalogRequestLimit === 'number' &&
     mangadexCatalogRequestLimit < baseMangaDexCatalogLimit;
+  const mangaDexLoadedFilteredPages = Math.max(
+    1,
+    Math.ceil(stableMergedFiltered.length / pageSize),
+  );
+  const isMangaDexDemandPagePending =
+    mangaDexHasNarrowClientFilters &&
+    canExpandMangaDexCatalog &&
+    stableMergedFiltered.length > 0 &&
+    page > mangaDexLoadedFilteredPages;
   const estimatedClientTotalPages = useMemo(() => {
     if (!isClientPaginationMode) return 1;
 
@@ -3604,7 +3613,7 @@ const BrowseManga = () => {
       canExpandMangaDexCatalog &&
       estimatedItems > 0
     ) {
-      estimatedPages = Math.max(estimatedPages, page + 1);
+      estimatedPages = Math.max(estimatedPages, Math.ceil(estimatedItems / pageSize) + 1);
     }
 
     return estimatedPages;
@@ -3616,7 +3625,6 @@ const BrowseManga = () => {
     globalSortProbeQuery.data,
     mangaDexHasNarrowClientFilters,
     canExpandMangaDexCatalog,
-    page,
     pageSize,
   ]);
 
@@ -4595,6 +4603,7 @@ const BrowseManga = () => {
 
   const isTabLoadingState =
     isInitialMergedLoading ||
+    isMangaDexDemandPagePending ||
     (
       displayItems.length === 0 &&
       (
@@ -4681,6 +4690,9 @@ const BrowseManga = () => {
               </div>
               <MangaGridSkeleton count={18} />
               <div className="h-10 rounded-xl bg-muted/40 animate-pulse" />
+              {isMangaDexDemandPagePending && totalPages > 1 && (
+                <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} />
+              )}
             </div>
           ) : (
             <>
@@ -4709,6 +4721,11 @@ const BrowseManga = () => {
               ) : (
                 <div className="text-center py-20">
                   <BookOpen className="w-10 h-10 text-muted-foreground/30 mx-auto mb-3" />
+                  {totalPages > 1 && (
+                    <div className="mb-6">
+                      <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} />
+                    </div>
+                  )}
                   <p className="text-muted-foreground font-medium">Không tìm thấy truyện nào phù hợp.</p>
                 </div>
               )}
