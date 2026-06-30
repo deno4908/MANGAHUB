@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowLeft, Lock, Loader2, CheckCircle2 } from "lucide-react";
+import { AlertCircle, ArrowLeft, Lock, Loader2, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
@@ -25,6 +25,12 @@ const VerifyOtpPage = () => {
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [resetting, setResetting] = useState(false);
+  const [retryingOAuth, setRetryingOAuth] = useState(false);
+  const [callbackError, setCallbackError] = useState<{
+    title: string;
+    message: string;
+    detail?: string;
+  } | null>(null);
   const [searchParams] = useSearchParams();
   const email = searchParams.get("email") || "";
   const navigate = useNavigate();
@@ -33,7 +39,28 @@ const VerifyOtpPage = () => {
   // Handle OAuth redirect — supports both PKCE (?code=) and implicit (#access_token=)
   useEffect(() => {
     const hash = window.location.hash.substring(1);
+    const error = searchParams.get("error");
+    const errorCode = searchParams.get("error_code");
+    const errorDescription = searchParams.get("error_description");
     const code = searchParams.get("code");
+
+    if (error || errorCode || errorDescription) {
+      const description = errorDescription || errorCode || error || "OAuth failed";
+      const isBadState =
+        errorCode === "bad_oauth_state" ||
+        description.toLowerCase().includes("state not found") ||
+        description.toLowerCase().includes("expired");
+
+      setCallbackError({
+        title: "Đăng nhập Google không hoàn tất",
+        message: isBadState
+          ? "Phiên đăng nhập Google đã hết hạn hoặc bị mở lại từ liên kết cũ. Vui lòng bắt đầu đăng nhập lại để tạo phiên mới."
+          : "Nhà cung cấp đăng nhập trả về lỗi. Vui lòng thử đăng nhập lại.",
+        detail: description,
+      });
+      setLoading(false);
+      return;
+    }
 
     // --- PKCE flow: ?code=xxx ---
     if (code) {
@@ -114,6 +141,30 @@ const VerifyOtpPage = () => {
     }
   }, []);
 
+  const handleRetryGoogleLogin = async () => {
+    setRetryingOAuth(true);
+    try {
+      const data = await authApi.googleLogin();
+      if (data.url) {
+        window.location.href = data.url;
+        return;
+      }
+      toast({
+        title: "Lỗi",
+        description: data.error || "Không thể bắt đầu đăng nhập Google.",
+        variant: "destructive",
+      });
+    } catch (err: any) {
+      toast({
+        title: "Lỗi",
+        description: err.message || "Không thể bắt đầu đăng nhập Google.",
+        variant: "destructive",
+      });
+    } finally {
+      setRetryingOAuth(false);
+    }
+  };
+
   const handleResetPassword = async () => {
     if (!newPassword || newPassword.length < 8) {
       toast({ variant: "destructive", title: "Mật khẩu quá ngắn", description: "Mật khẩu phải ít nhất 8 ký tự." });
@@ -163,7 +214,52 @@ const VerifyOtpPage = () => {
 
         {/* Card */}
         <div className="bg-card border border-border rounded-2xl p-8 shadow-sm">
-          {verified ? (
+          {callbackError ? (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="space-y-5"
+            >
+              <div className="text-center">
+                <div className="w-14 h-14 rounded-full bg-destructive/10 flex items-center justify-center mx-auto mb-4">
+                  <AlertCircle className="w-7 h-7 text-destructive" />
+                </div>
+                <h2 className="text-xl font-bold text-foreground">{callbackError.title}</h2>
+                <p className="text-sm text-muted-foreground mt-2">{callbackError.message}</p>
+              </div>
+
+              {callbackError.detail && (
+                <div className="rounded-xl border border-border bg-secondary/30 p-3">
+                  <p className="text-xs font-medium text-muted-foreground break-words">
+                    {callbackError.detail}
+                  </p>
+                </div>
+              )}
+
+              <Button
+                onClick={handleRetryGoogleLogin}
+                className="w-full h-11 font-bold"
+                disabled={retryingOAuth}
+              >
+                {retryingOAuth ? (
+                  <span className="flex items-center gap-2">
+                    <span className="w-4 h-4 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />
+                    Đang mở Google...
+                  </span>
+                ) : (
+                  "Thử đăng nhập Google lại"
+                )}
+              </Button>
+
+              <Button
+                variant="outline"
+                className="w-full h-11 font-bold"
+                onClick={() => navigate("/login", { replace: true })}
+              >
+                Quay lại đăng nhập
+              </Button>
+            </motion.div>
+          ) : verified ? (
             <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -250,7 +346,7 @@ const VerifyOtpPage = () => {
         {/* Back */}
         <div className="text-center mt-6">
           <Link
-            to="/forgot-password"
+            to={callbackError ? "/login" : "/forgot-password"}
             className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
           >
             <ArrowLeft className="w-4 h-4" /> Quay lại
