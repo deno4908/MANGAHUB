@@ -2550,14 +2550,23 @@ def _sitemap_pick_lastmod(item: dict[str, Any]) -> str:
     return ""
 
 
-def _sitemap_xml_response(xml: str, max_age: int = 1800) -> Response:
+def _sitemap_xml_response(
+    xml: str,
+    max_age: int = 1800,
+    extra_headers: dict[str, str] | None = None,
+) -> Response:
+    headers = {
+        "Cache-Control": f"public, max-age={max_age}, stale-while-revalidate=86400",
+        "X-Robots-Tag": "index, follow",
+        "X-MangaHub-Sitemap-Version": SITEMAP_CACHE_VERSION,
+        "X-MangaHub-Sitemap-Url-Count": str(xml.count("<url>")),
+    }
+    if extra_headers:
+        headers.update(extra_headers)
     return Response(
         content=xml,
         media_type="application/xml; charset=utf-8",
-        headers={
-            "Cache-Control": f"public, max-age={max_age}, stale-while-revalidate=86400",
-            "X-Robots-Tag": "index, follow",
-        },
+        headers=headers,
     )
 
 
@@ -2832,7 +2841,11 @@ async def manga_sitemap_xml(
     cache_key = f"manga:sitemap:{SITEMAP_CACHE_VERSION}:{limit}"
     cached_xml = cache.get(cache_key)
     if cached_xml:
-        return _sitemap_xml_response(cached_xml, max_age=SITEMAP_CACHE_TTL_SECONDS)
+        return _sitemap_xml_response(
+            cached_xml,
+            max_age=SITEMAP_CACHE_TTL_SECONDS,
+            extra_headers={"X-MangaHub-Sitemap-Cache": "HIT"},
+        )
 
     hidden = await _get_hidden_slugs(db)
     entries: list[dict[str, str]] = []
@@ -2847,6 +2860,7 @@ async def manga_sitemap_xml(
         seen,
         upload_limit,
     )
+    uploaded_count = len(entries)
 
     mangadex_limit = max(0, min(5000, limit - len(entries)))
     await _collect_mangadex_sitemap_entries(
@@ -2856,6 +2870,7 @@ async def manga_sitemap_xml(
         seen,
         mangadex_limit,
     )
+    mangadex_count = len(entries) - uploaded_count
 
     otruyen_limit = max(0, limit - len(entries))
     await _collect_otruyen_sitemap_entries(
@@ -2865,10 +2880,20 @@ async def manga_sitemap_xml(
         seen,
         otruyen_limit,
     )
+    otruyen_count = len(entries) - uploaded_count - mangadex_count
 
     xml = _render_sitemap_urlset(entries)
     cache.set(cache_key, xml, SITEMAP_CACHE_TTL_SECONDS)
-    return _sitemap_xml_response(xml, max_age=SITEMAP_CACHE_TTL_SECONDS)
+    return _sitemap_xml_response(
+        xml,
+        max_age=SITEMAP_CACHE_TTL_SECONDS,
+        extra_headers={
+            "X-MangaHub-Sitemap-Cache": "MISS",
+            "X-MangaHub-Sitemap-Uploads": str(uploaded_count),
+            "X-MangaHub-Sitemap-MangaDex": str(mangadex_count),
+            "X-MangaHub-Sitemap-OTruyen": str(otruyen_count),
+        },
+    )
 
 
 @router.get("/detail/{slug}")
