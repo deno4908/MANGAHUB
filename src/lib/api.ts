@@ -126,6 +126,8 @@ const REFRESH_LOCK_POLL_MS = 180;
 const PEER_TOKEN_WAIT_MS = 350;
 const HARD_REFRESH_FAILURE_MIN_COUNT = 3;
 const HARD_REFRESH_FAILURE_GRACE_MS = 60_000;
+const MISSING_REFRESH_TOKEN_MIN_COUNT = 3;
+const MISSING_REFRESH_TOKEN_GRACE_MS = 45_000;
 
 export type MaintenanceState = {
   enabled: boolean;
@@ -250,7 +252,11 @@ export function wasLastRefreshFailureMissingToken() {
 
 export function shouldStopRestoringSession() {
   if (!lastRefreshFailureHard) return false;
-  if (wasLastRefreshFailureMissingToken()) return false;
+  if (wasLastRefreshFailureMissingToken()) {
+    if (hardRefreshFailureCount < MISSING_REFRESH_TOKEN_MIN_COUNT) return false;
+    if (!firstHardRefreshFailureAt) return false;
+    return Date.now() - firstHardRefreshFailureAt >= MISSING_REFRESH_TOKEN_GRACE_MS;
+  }
   if (hardRefreshFailureCount < HARD_REFRESH_FAILURE_MIN_COUNT) return false;
   if (!firstHardRefreshFailureAt) return false;
   return Date.now() - firstHardRefreshFailureAt >= HARD_REFRESH_FAILURE_GRACE_MS;
@@ -826,8 +832,38 @@ function auth<T>(path: string, options?: ApiRequestInit) {
   return apiFetch<T>(`${AUTH_BASE}${path}`, options);
 }
 
-function authResponse(path: string, options?: ApiRequestInit) {
-  return apiFetchResponse(`${AUTH_BASE}${path}`, options);
+function authRawResponse(path: string, options: ApiRequestInit = {}) {
+  const {
+    timeoutMs,
+    skipAuth = false,
+    suppressForbiddenRedirect: _suppressForbiddenRedirect,
+    ...requestOptions
+  } = options;
+  const requestTimeoutMs =
+    typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : DEFAULT_TIMEOUT_MS;
+  const headers: Record<string, string> = {
+    ...((requestOptions.headers as Record<string, string>) || {}),
+  };
+  const hasContentType = Object.keys(headers).some(
+    (k) => k.toLowerCase() === "content-type",
+  );
+  if (
+    requestOptions.body &&
+    !hasContentType &&
+    !(requestOptions.body instanceof FormData)
+  ) {
+    headers["Content-Type"] = "application/json";
+  }
+  if (!skipAuth && accessToken) {
+    headers["Authorization"] = `Bearer ${accessToken}`;
+  }
+  return fetchWithTimeout(
+    `${AUTH_BASE}${path}`,
+    { ...requestOptions, headers },
+    requestTimeoutMs,
+  );
 }
 
 // ─── Manga API (proxy OTruyenAPI) ───
@@ -1119,7 +1155,7 @@ export const authApi = {
         if (!accessToken && await waitForPeerAccessToken(800)) {
           return true;
         }
-        const response = await authResponse("/auth/refresh", {
+        const response = await authRawResponse("/auth/refresh", {
           method: "POST",
           body: JSON.stringify({ access_token: accessToken || "" }),
           timeoutMs: 15_000,

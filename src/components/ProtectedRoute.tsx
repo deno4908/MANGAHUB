@@ -1,5 +1,5 @@
 import { Navigate } from 'react-router-dom';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useUserStore } from '@/store/userStore';
 import BannedPage from '@/pages/BannedPage';
 
@@ -16,20 +16,88 @@ const ROLE_HIERARCHY: Record<string, number> = {
   admin: 3,
 };
 
-const LoadingGate = () => (
-  <div className="flex items-center justify-center min-h-[60vh]">
-    <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-  </div>
-);
+const LoadingGate = ({
+  message = 'Đang tải...',
+  showRecovery = false,
+  onRetry,
+  onRelogin,
+}: {
+  message?: string;
+  showRecovery?: boolean;
+  onRetry?: () => void;
+  onRelogin?: () => void;
+}) => {
+  const [showActions, setShowActions] = useState(false);
+
+  useEffect(() => {
+    if (!showRecovery) {
+      setShowActions(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setShowActions(true), 12_000);
+    return () => window.clearTimeout(timer);
+  }, [showRecovery]);
+
+  return (
+    <div className="flex min-h-[60vh] items-center justify-center px-4">
+      <div className="flex max-w-sm flex-col items-center gap-4 text-center">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+        <p className="text-sm font-medium text-muted-foreground">{message}</p>
+        {showActions ? (
+          <div className="flex flex-wrap justify-center gap-2">
+            <button
+              type="button"
+              onClick={onRetry}
+              className="rounded-lg border border-border px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-muted"
+            >
+              Thử lại
+            </button>
+            <button
+              type="button"
+              onClick={onRelogin}
+              className="rounded-lg bg-primary px-3 py-2 text-sm font-bold text-primary-foreground transition-opacity hover:opacity-90"
+            >
+              Đăng nhập lại
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+};
 
 const ProtectedRoute = ({ children, requireAuth = true, allowedRoles }: ProtectedRouteProps) => {
-  const { user, isLoggedIn, isLoading, hasCheckedSession, loadUser } = useUserStore();
+  const {
+    user,
+    isLoggedIn,
+    isLoading,
+    hasCheckedSession,
+    isRestoringSession,
+    logout,
+    loadUser,
+  } = useUserStore();
 
   useEffect(() => {
     if (!hasCheckedSession && !isLoading) {
       loadUser();
     }
   }, [hasCheckedSession, isLoading, loadUser]);
+
+  useEffect(() => {
+    if (
+      requireAuth &&
+      hasCheckedSession &&
+      isLoggedIn &&
+      !user &&
+      !isLoading &&
+      !isRestoringSession
+    ) {
+      const timer = window.setTimeout(() => {
+        loadUser({ force: true });
+      }, 1_200);
+      return () => window.clearTimeout(timer);
+    }
+  }, [requireAuth, hasCheckedSession, isLoggedIn, user, isLoading, isRestoringSession, loadUser]);
 
   if (!hasCheckedSession || isLoading) {
     return <LoadingGate />;
@@ -40,7 +108,17 @@ const ProtectedRoute = ({ children, requireAuth = true, allowedRoles }: Protecte
   }
 
   if (requireAuth && isLoggedIn && !user) {
-    return <LoadingGate />;
+    return (
+      <LoadingGate
+        message="Đang khôi phục phiên đăng nhập..."
+        showRecovery
+        onRetry={() => loadUser({ force: true })}
+        onRelogin={() => {
+          logout('local', { server: false });
+          window.location.href = '/login';
+        }}
+      />
+    );
   }
 
   if (isLoggedIn && user?.isBanned) {

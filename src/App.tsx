@@ -467,6 +467,8 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
   const logout = useUserStore(s => s.logout);
   const fetchNotifications = useUserStore(s => s.fetchNotifications);
   const isLoggedIn = useUserStore(s => s.isLoggedIn);
+  const isAuthLoading = useUserStore(s => s.isLoading);
+  const isRestoringSession = useUserStore(s => s.isRestoringSession);
   const user = useUserStore(s => s.user);
   const hasCheckedSession = useUserStore(s => s.hasCheckedSession);
   const navigate = useNavigate();
@@ -479,10 +481,16 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
   }, [hasCheckedSession, loadUser]);
 
   useEffect(() => {
-    if (hasCheckedSession && isLoggedIn && !user) {
-      loadUser();
+    if (
+      hasCheckedSession &&
+      isLoggedIn &&
+      !user &&
+      !isAuthLoading &&
+      !isRestoringSession
+    ) {
+      loadUser({ force: true });
     }
-  }, [hasCheckedSession, isLoggedIn, user, loadUser]);
+  }, [hasCheckedSession, isLoggedIn, user, isAuthLoading, isRestoringSession, loadUser]);
 
   useEffect(() => {
     if (!maintenanceLocked && isLoggedIn && user) {
@@ -491,7 +499,7 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
   }, [isLoggedIn, user?.id, loadSettings, maintenanceLocked]);
 
   useEffect(() => {
-    if (maintenanceLocked || !isLoggedIn) return;
+    if (maintenanceLocked || !isLoggedIn || !user || isRestoringSession) return;
     let refreshing = false;
     const keepSessionAlive = () => {
       if (refreshing || document.hidden) return;
@@ -512,7 +520,7 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
       window.removeEventListener('online', keepSessionAlive);
       document.removeEventListener('visibilitychange', keepSessionAlive);
     };
-  }, [isLoggedIn, maintenanceLocked]);
+  }, [isLoggedIn, user?.id, isRestoringSession, maintenanceLocked]);
 
   useEffect(() => {
     const handleForceLogout = (e: Event) => {
@@ -537,7 +545,7 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
   }, [navigate]);
 
   useEffect(() => {
-    if (maintenanceLocked || !isLoggedIn) return;
+    if (maintenanceLocked || !isLoggedIn || !user || isRestoringSession) return;
     let isChecking = false;
     const checkBanStatus = () => {
       if (isChecking || !getAccessToken() || document.hidden) return;
@@ -563,10 +571,10 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
       window.removeEventListener('focus', checkBanStatus);
       document.removeEventListener('visibilitychange', checkBanStatus);
     };
-  }, [isLoggedIn, loadUser, location.pathname, navigate, maintenanceLocked]);
+  }, [isLoggedIn, user?.id, isRestoringSession, loadUser, location.pathname, navigate, maintenanceLocked]);
 
   useEffect(() => {
-    if (maintenanceLocked || !isLoggedIn) return;
+    if (maintenanceLocked || !isLoggedIn || !user || isRestoringSession) return;
     let isFetching = false;
     const syncNotifications = () => {
       if (isFetching || document.hidden) return;
@@ -584,7 +592,7 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
       window.removeEventListener('focus', syncNotifications);
       document.removeEventListener('visibilitychange', syncNotifications);
     };
-  }, [isLoggedIn, fetchNotifications, maintenanceLocked]);
+  }, [isLoggedIn, user?.id, isRestoringSession, fetchNotifications, maintenanceLocked]);
 
   return null;
 };

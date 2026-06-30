@@ -9,8 +9,10 @@ const GuestRoute = ({ children }: { children: React.ReactNode }) => {
   const isLoggedIn = useUserStore(s => s.isLoggedIn);
   const isLoading = useUserStore(s => s.isLoading);
   const hasCheckedSession = useUserStore(s => s.hasCheckedSession);
+  const isRestoringSession = useUserStore(s => s.isRestoringSession);
+  const user = useUserStore(s => s.user);
 
-  if (!hasCheckedSession || isLoading) {
+  if (!hasCheckedSession || isLoading || (isLoggedIn && !user && isRestoringSession)) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
@@ -18,7 +20,7 @@ const GuestRoute = ({ children }: { children: React.ReactNode }) => {
     );
   }
 
-  if (isLoggedIn) {
+  if (isLoggedIn && user) {
     return <Navigate to="/" replace />;
   }
 

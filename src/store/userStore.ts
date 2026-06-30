@@ -24,6 +24,8 @@ interface UserStore {
   unreadCount: number;
   isLoading: boolean;
   hasCheckedSession: boolean;
+  isRestoringSession: boolean;
+  lastAuthRestoreError: string | null;
 
   // Auth
   login: (email: string, password: string, recaptchaToken?: string) => Promise<{ success: boolean; error?: string }>;
@@ -93,20 +95,31 @@ function shouldKeepRestoringSession() {
   return hasSessionHint() && !shouldStopRestoringSession();
 }
 
+const initialHasSessionHint = hasSessionHint();
+const initialAccessToken = getAccessToken();
+
 export const useUserStore = create<UserStore>((set, get) => ({
   user: null,
-  isLoggedIn: !!getAccessToken() || hasSessionHint(),
+  isLoggedIn: !!initialAccessToken || initialHasSessionHint,
   notifications: [],
   unreadCount: 0,
   isLoading: false,
   hasCheckedSession: false,
+  isRestoringSession: !initialAccessToken && initialHasSessionHint,
+  lastAuthRestoreError: null,
 
   login: async (email, password, recaptchaToken) => {
     try {
       const data = await authApi.login(email, password, recaptchaToken);
       if (data.profile) {
         clearRestoreRetry();
-        set({ user: mapProfile(data.profile), isLoggedIn: true, hasCheckedSession: true });
+        set({
+          user: mapProfile(data.profile),
+          isLoggedIn: true,
+          hasCheckedSession: true,
+          isRestoringSession: false,
+          lastAuthRestoreError: null,
+        });
         get().fetchNotifications();
         return { success: true };
       }
@@ -138,6 +151,9 @@ export const useUserStore = create<UserStore>((set, get) => ({
       notifications: [],
       unreadCount: 0,
       hasCheckedSession: true,
+      isLoading: false,
+      isRestoringSession: false,
+      lastAuthRestoreError: null,
     });
   },
 
@@ -148,7 +164,11 @@ export const useUserStore = create<UserStore>((set, get) => ({
     }
 
     const run = (async () => {
-    set({ isLoading: true });
+    set({
+      isLoading: true,
+      isRestoringSession: !getAccessToken() && hasSessionHint(),
+      lastAuthRestoreError: null,
+    });
     try {
       if (!getAccessToken()) {
         const refreshed = await authApi.refresh();
@@ -156,11 +176,21 @@ export const useUserStore = create<UserStore>((set, get) => ({
           if (!shouldKeepRestoringSession()) {
             clearRestoreRetry();
             clearTokens();
-            set({ user: null, isLoggedIn: false });
+            set({
+              user: null,
+              isLoggedIn: false,
+              isRestoringSession: false,
+              lastAuthRestoreError: 'session-expired',
+            });
             return;
           }
 
-          set({ user: null, isLoggedIn: true });
+          set({
+            user: null,
+            isLoggedIn: true,
+            isRestoringSession: true,
+            lastAuthRestoreError: 'refresh-pending',
+          });
           scheduleRestoreRetry(() => get().loadUser({ force: true }));
           return;
         }
@@ -170,7 +200,14 @@ export const useUserStore = create<UserStore>((set, get) => ({
       if (data.profile) {
         clearRestoreRetry();
         const user = mapProfile(data.profile);
-        set({ user, isLoggedIn: true, hasCheckedSession: true, isLoading: false });
+        set({
+          user,
+          isLoggedIn: true,
+          hasCheckedSession: true,
+          isLoading: false,
+          isRestoringSession: false,
+          lastAuthRestoreError: null,
+        });
         void get().fetchNotifications();
 
         // Stats are optional and must never block route rendering.
@@ -197,11 +234,25 @@ export const useUserStore = create<UserStore>((set, get) => ({
             });
           })
           .catch(() => {});
+      } else {
+        clearRestoreRetry();
+        clearTokens();
+        set({
+          user: null,
+          isLoggedIn: false,
+          isRestoringSession: false,
+          lastAuthRestoreError: 'profile-missing',
+        });
       }
     } catch (e: any) {
       if (e?.message === 'BANNED') {
         // Keep isLoggedIn true so BannedPage shows
-        set({ isLoggedIn: true, hasCheckedSession: true });
+        set({
+          isLoggedIn: true,
+          hasCheckedSession: true,
+          isRestoringSession: false,
+          lastAuthRestoreError: null,
+        });
       } else {
         // Only clear session on definitive auth failures (401), NOT on network
         // errors, timeouts or server errors (5xx) - prevents false logout.
@@ -216,13 +267,27 @@ export const useUserStore = create<UserStore>((set, get) => ({
           if (!shouldKeepRestoringSession()) {
             clearRestoreRetry();
             clearTokens();
-            set({ user: null, isLoggedIn: false });
+            set({
+              user: null,
+              isLoggedIn: false,
+              isRestoringSession: false,
+              lastAuthRestoreError: msg || 'session-expired',
+            });
           } else {
-            set({ user: null, isLoggedIn: true });
+            set({
+              user: null,
+              isLoggedIn: true,
+              isRestoringSession: true,
+              lastAuthRestoreError: msg || 'refresh-pending',
+            });
             scheduleRestoreRetry(() => get().loadUser({ force: true }));
           }
         } else if (hasSessionHint() || getAccessToken()) {
-          set({ isLoggedIn: true });
+          set({
+            isLoggedIn: true,
+            isRestoringSession: true,
+            lastAuthRestoreError: msg || 'restore-pending',
+          });
           scheduleRestoreRetry(() => get().loadUser({ force: true }));
         }
         // else: network/5xx error - keep the user logged in, just skip setting user
