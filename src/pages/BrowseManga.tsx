@@ -102,6 +102,8 @@ const MANGADEX_DEMAND_EDGE_DELAY_MS = 80;
 const MANGADEX_DEMAND_ADVANCE_COOLDOWN_MS = 1800;
 const MANGADEX_DEMAND_BACKGROUND_DELAY_MS = 1000;
 const MANGADEX_DEMAND_BACKGROUND_LIMIT = 6000;
+const MANGADEX_DEMAND_FILTERED_INITIAL_LIMIT = 6000;
+const MANGADEX_DEMAND_FILTERED_LIMIT_STEP = 1000;
 const MANGADEX_CATALOG_QUERY_VERSION = 'v20260426-demand-small-batches';
 const DEFAULT_CARD_COVER_FALLBACK = '/no-cover.svg';
 const MANGADEX_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1473,9 +1475,13 @@ const getNextMangaDexDemandLimit = (
   currentLimit: number,
   targetPage: number,
   baseLimit: number,
+  aggressive = false,
 ): number => {
   const requestedPageLimit = getMangaDexDemandLimitForPage(targetPage);
-  const steppedLimit = currentLimit + MANGADEX_DEMAND_LIMIT_STEP;
+  const step = aggressive
+    ? Math.max(MANGADEX_DEMAND_FILTERED_LIMIT_STEP, MANGADEX_DEMAND_LIMIT_STEP)
+    : MANGADEX_DEMAND_LIMIT_STEP;
+  const steppedLimit = currentLimit + step;
   return Math.min(
     baseLimit,
     Math.max(currentLimit, steppedLimit, requestedPageLimit),
@@ -1640,6 +1646,17 @@ const BrowseManga = () => {
 
   // Local-only filters (year/minRating) are client-side; pagination must follow filtered results.
   const hasLocalClientFilters = Boolean(filters.year) || filters.minRating > 0;
+  const mangaDexHasNarrowClientFilters =
+    isMangaDexSourceTab &&
+    (
+      hasSearch ||
+      selectedGenreAliasGroups.length > 0 ||
+      hasLocalClientFilters ||
+      Boolean(filters.status)
+    );
+  const mangaDexInitialDemandLimit = mangaDexHasNarrowClientFilters
+    ? MANGADEX_DEMAND_FILTERED_INITIAL_LIMIT
+    : MANGADEX_DEMAND_INITIAL_LIMIT;
 
   // Keep first 20 pages globally continuous for non-popular tabs.
   const wantsGlobalClientSortMode =
@@ -1698,7 +1715,7 @@ const BrowseManga = () => {
     : shouldUseLightMangaDexCatalog
       ? Math.min(baseMangaDexCatalogLimit, lightCatalogLimit)
       : isMangaDexSourceTab
-        ? Math.min(baseMangaDexCatalogLimit, Math.max(MANGADEX_DEMAND_INITIAL_LIMIT, mangaDexDemandLimit))
+        ? Math.min(baseMangaDexCatalogLimit, Math.max(mangaDexInitialDemandLimit, mangaDexDemandLimit))
         : baseMangaDexCatalogLimit;
   const mangadexCatalogRequestLimit: number | 'all' = mangadexCatalogLimit;
 
@@ -1819,11 +1836,12 @@ const BrowseManga = () => {
   });
 
   useEffect(() => {
-    setMangaDexDemandLimit(MANGADEX_DEMAND_INITIAL_LIMIT);
+    setMangaDexDemandLimit(mangaDexInitialDemandLimit);
     mangaDexDemandAdvanceStateRef.current = { key: '', at: 0 };
     mangaDexEdgeRefetchStateRef.current = { key: '', at: 0 };
   }, [
     isMangaDexSourceTab,
+    mangaDexInitialDemandLimit,
     showMatureContent,
     filters.search,
     filters.genres,
@@ -3559,6 +3577,11 @@ const BrowseManga = () => {
   const pageSize = BROWSE_PAGE_SIZE;
 
   const otruyenServerPages = isClientPaginationMode ? 0 : (data?.totalPages || 1);
+  const canExpandMangaDexCatalog =
+    isMangaDexSourceTab &&
+    !useGlobalTopRatedMode &&
+    typeof mangadexCatalogRequestLimit === 'number' &&
+    mangadexCatalogRequestLimit < baseMangaDexCatalogLimit;
   const estimatedClientTotalPages = useMemo(() => {
     if (!isClientPaginationMode) return 1;
 
@@ -3571,13 +3594,29 @@ const BrowseManga = () => {
       }
     }
 
-    return Math.max(1, Math.ceil(estimatedItems / pageSize));
+    let estimatedPages = Math.max(1, Math.ceil(estimatedItems / pageSize));
+
+    // MangaDex search/genre filtering happens on the loaded catalog snapshot.
+    // If the backend can still expand that snapshot, keep one extra page open so
+    // moving forward triggers a deeper catalog fetch instead of looking "stuck".
+    if (
+      mangaDexHasNarrowClientFilters &&
+      canExpandMangaDexCatalog &&
+      estimatedItems > 0
+    ) {
+      estimatedPages = Math.max(estimatedPages, page + 1);
+    }
+
+    return estimatedPages;
   }, [
     isClientPaginationMode,
     stableMergedFiltered.length,
     useGlobalClientSortMode,
     filters.sort,
     globalSortProbeQuery.data,
+    mangaDexHasNarrowClientFilters,
+    canExpandMangaDexCatalog,
+    page,
     pageSize,
   ]);
 
@@ -3592,11 +3631,7 @@ const BrowseManga = () => {
       ? estimatedClientTotalPages
       : otruyenServerPages;
   const currentPage = Math.min(page, totalPages);
-  const canExpandMangaDexDemand =
-    isMangaDexSourceTab &&
-    !useGlobalTopRatedMode &&
-    typeof mangadexCatalogRequestLimit === 'number' &&
-    mangadexCatalogRequestLimit < baseMangaDexCatalogLimit;
+  const canExpandMangaDexDemand = canExpandMangaDexCatalog;
   const isAtMangaDexLoadedLimit =
     canExpandMangaDexDemand &&
     totalPages > 0 &&
@@ -3665,6 +3700,7 @@ const BrowseManga = () => {
           currentLimit,
           targetPage,
           baseMangaDexCatalogLimit,
+          mangaDexHasNarrowClientFilters,
         );
         return nextLimit > currentLimit ? nextLimit : currentLimit;
       });
@@ -3683,6 +3719,7 @@ const BrowseManga = () => {
     mangaDexRemainingLoadedItems,
     mangadexCatalogRequestLimit,
     baseMangaDexCatalogLimit,
+    mangaDexHasNarrowClientFilters,
   ]);
 
   useEffect(() => {
@@ -3747,6 +3784,7 @@ const BrowseManga = () => {
           currentLimit,
           targetPage,
           backgroundLimit,
+          mangaDexHasNarrowClientFilters,
         );
         return nextLimit > currentLimit ? nextLimit : currentLimit;
       });
@@ -3764,6 +3802,7 @@ const BrowseManga = () => {
     baseMangaDexCatalogLimit,
     page,
     currentPage,
+    mangaDexHasNarrowClientFilters,
   ]);
 
   const pagedItems = useMemo(() => {
