@@ -26,7 +26,7 @@ const HistoryPage = () => {
       snapshots.forEach(([key, value]) => qc.setQueryData(key, value));
       toast.error('Không thể xoá lịch sử. Vui lòng thử lại.');
     } finally {
-      qc.invalidateQueries({ queryKey: ['history'], refetchType: 'inactive' });
+      qc.invalidateQueries({ queryKey: ['history'], refetchType: 'active' });
     }
   };
 
@@ -45,7 +45,7 @@ const HistoryPage = () => {
       snapshots.forEach(([key, value]) => qc.setQueryData(key, value));
       toast.error('Không thể xoá lịch sử. Vui lòng thử lại.');
     } finally {
-      qc.invalidateQueries({ queryKey: ['history'], refetchType: 'inactive' });
+      qc.invalidateQueries({ queryKey: ['history'], refetchType: 'active' });
     }
   };
 

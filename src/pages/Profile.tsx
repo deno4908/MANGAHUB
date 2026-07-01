@@ -255,12 +255,12 @@ const Profile = () => {
   };
   const removeHistoryItem = async (slug: string) => {
     await historyApi.remove(slug);
-    qc.invalidateQueries({ queryKey: ['history'] });
+    qc.invalidateQueries({ queryKey: ['history'], refetchType: 'active' });
   };
   const clearHistory = async () => {
     if (!confirm('Xoá tất cả lịch sử đọc?')) return;
     await historyApi.clear();
-    qc.invalidateQueries({ queryKey: ['history'] });
+    qc.invalidateQueries({ queryKey: ['history'], refetchType: 'active' });
   };
   const [customizeOpen, setCustomizeOpen] = useState(false);
   const [tab, setTab] = useState<ProfileTab>('overview');
@@ -341,10 +341,10 @@ const Profile = () => {
       return (Array.isArray(res?.comments) ? res.comments : []).map((c: any) => normalizeProfileComment(c));
     },
     enabled: !!user,
-    staleTime: 2 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
+    staleTime: 0,
+    gcTime: 5 * 60 * 1000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
     refetchOnReconnect: true,
     retry: 1,
     placeholderData: (previousData) => previousData,
@@ -356,10 +356,10 @@ const Profile = () => {
     queryKey: ['ratings', 'me', 'profile', user?.id || user?.username || 'anonymous'],
     queryFn: () => ratingApi.getMyRatedManga(200),
     enabled: !!user,
-    staleTime: 2 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
+    staleTime: 0,
+    gcTime: 5 * 60 * 1000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
     refetchOnReconnect: true,
     retry: 1,
     placeholderData: (previousData) => previousData,

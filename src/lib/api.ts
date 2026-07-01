@@ -592,7 +592,9 @@ function isHardRefreshFailure(message: string): boolean {
 }
 
 async function refreshAccessToken(): Promise<boolean> {
-  if (refreshBlockedUntil > Date.now()) return false;
+  if (refreshBlockedUntil > Date.now()) {
+    return waitForPeerAccessToken(1_000);
+  }
   if (!refreshInFlight) {
     refreshInFlight = authApi.refresh().finally(() => {
       refreshInFlight = null;
@@ -653,6 +655,35 @@ function mutationDedupeKey(url: string, options: ApiRequestInit): string | null 
   return `${method} ${url} ${bodyKey}`;
 }
 
+function shouldRestoreSessionBeforeRequest(url: string, method = "GET"): boolean {
+  if (!hasSessionHint() || accessToken) return false;
+  const upperMethod = method.toUpperCase();
+  if (upperMethod !== "GET" && upperMethod !== "HEAD") return true;
+
+  try {
+    const parsed = new URL(url, window.location.origin);
+    const path = parsed.pathname;
+    return (
+      path === "/auth/me" ||
+      path === "/auth/logout" ||
+      path.startsWith("/api/admin/") ||
+      path.startsWith("/api/users/") ||
+      path.startsWith("/api/bookmarks/") ||
+      path.startsWith("/api/history/") ||
+      path.startsWith("/api/notifications/") ||
+      path.startsWith("/api/reports/") ||
+      path.startsWith("/api/groups/") ||
+      path === "/api/comments/me" ||
+      path.startsWith("/api/comments/me/") ||
+      path === "/api/ratings/me" ||
+      path.startsWith("/api/ratings/me/") ||
+      path.startsWith("/api/uploads/")
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Promise<Response> {
   const {
     timeoutMs,
@@ -671,6 +702,14 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
     !skipAuth &&
     accessToken &&
     shouldRefreshBeforeRequest(accessToken)
+  ) {
+    await refreshAccessToken();
+  }
+  if (
+    !isRefreshRequest &&
+    !skipAuth &&
+    !accessToken &&
+    shouldRestoreSessionBeforeRequest(url, String(requestOptions.method || "GET"))
   ) {
     await refreshAccessToken();
   }
@@ -710,7 +749,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
     throw new Error(body.error || body.detail || "Dịch vụ đang tạm thời gián đoạn");
   }
 
-  if (res.status === 401 && accessToken && !isRefreshRequest && !skipAuth) {
+  if (res.status === 401 && !isRefreshRequest && !skipAuth && (accessToken || hasSessionHint())) {
     const refreshed = await refreshAccessToken();
     if (refreshed) {
       headers["Authorization"] = `Bearer ${accessToken}`;

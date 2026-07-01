@@ -34,6 +34,14 @@ const HOMEPAGE_MANGADEX_PRIMARY_TIMEOUT_MS = 5_500;
 const HOMEPAGE_MANGADEX_FALLBACK_TIMEOUT_MS = 5_500;
 const HOMEPAGE_MANGADEX_RECOVERY_TIMEOUT_MS = 7_000;
 const LOCAL_COVER_FALLBACK = "/no-cover.svg";
+const USER_DATA_QUERY_OPTIONS = {
+  staleTime: 0,
+  gcTime: 5 * 60 * 1000,
+  refetchOnMount: "always" as const,
+  refetchOnWindowFocus: true,
+  refetchOnReconnect: true,
+  retry: 1,
+};
 
 function isOTruyenErrorPayload(data: any): boolean {
   const status = String(data?.status || "").trim().toLowerCase();
@@ -789,12 +797,7 @@ export function useBookmarks() {
       });
     },
     enabled: isLoggedIn,
-    staleTime: 2 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: true,
-    retry: 1,
+    ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
 }
@@ -808,6 +811,7 @@ export function useIsBookmarked(slug: string) {
       return data.is_bookmarked;
     },
     enabled: !!slug && isLoggedIn,
+    ...USER_DATA_QUERY_OPTIONS,
   });
 }
 
@@ -872,8 +876,9 @@ export function useToggleBookmark() {
       qc.setQueryData(["bookmark", "check", vars.slug], ctx.prevCheck);
     },
     onSettled: (_data, _err, vars) => {
-      qc.invalidateQueries({ queryKey: ["bookmarks"] });
-      qc.invalidateQueries({ queryKey: ["bookmark", "check", vars.slug] });
+      qc.invalidateQueries({ queryKey: ["bookmarks"], refetchType: "active" });
+      qc.invalidateQueries({ queryKey: ["bookmark", "check", vars.slug], refetchType: "active" });
+      qc.invalidateQueries({ queryKey: ["public-profile"], refetchType: "active" });
     },
   });
 }
@@ -896,12 +901,7 @@ export function useFollows() {
       });
     },
     enabled: isLoggedIn,
-    staleTime: 2 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: true,
-    retry: 1,
+    ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
 }
@@ -915,6 +915,7 @@ export function useIsFollowing(slug: string) {
       return data.is_following;
     },
     enabled: !!slug && isLoggedIn,
+    ...USER_DATA_QUERY_OPTIONS,
   });
 }
 
@@ -979,8 +980,9 @@ export function useToggleFollow() {
       qc.setQueryData(["follow", "check", vars.slug], ctx.prevCheck);
     },
     onSettled: (_data, _err, vars) => {
-      qc.invalidateQueries({ queryKey: ["follows"] });
-      qc.invalidateQueries({ queryKey: ["follow", "check", vars.slug] });
+      qc.invalidateQueries({ queryKey: ["follows"], refetchType: "active" });
+      qc.invalidateQueries({ queryKey: ["follow", "check", vars.slug], refetchType: "active" });
+      qc.invalidateQueries({ queryKey: ["public-profile"], refetchType: "active" });
     },
   });
 }
@@ -1059,12 +1061,7 @@ export function useHistory(options: UseHistoryOptions = {}) {
       });
     },
     enabled,
-    staleTime: enrichThumbs ? 2 * 60 * 1000 : 60 * 1000,
-    gcTime: 10 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: true,
-    retry: 1,
+    ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
 }
@@ -1073,7 +1070,7 @@ export function useSaveHistory() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: historyApi.add,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["history"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["history"], refetchType: "active" }),
   });
 }
 
