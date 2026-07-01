@@ -1657,15 +1657,10 @@ const BrowseManga = () => {
   const useMangaDexServerSearchMode =
     isMangaDexSourceTab &&
     filters.sort !== 'rating' &&
-    !hasLocalClientFilters &&
-    (
-      hasSearch ||
-      selectedGenreAliasGroups.length > 0 ||
-      Boolean(filters.status)
-    );
+    !hasLocalClientFilters;
   const mangaDexServerSearchGenreSlugs = useMemo(
-    () => Array.from(new Set(selectedGenreAliasGroups.flat().map((slug) => toSlug(slug)).filter(Boolean))),
-    [selectedGenreAliasGroups],
+    () => Array.from(new Set(filters.genres.map((slug) => toSlug(slug)).filter(Boolean))),
+    [filters.genres],
   );
   const mangaDexServerSearchSort = useMemo(
     () =>
