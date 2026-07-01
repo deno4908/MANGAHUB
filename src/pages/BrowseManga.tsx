@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMangaStore } from '@/store/mangaStore';
@@ -1667,6 +1667,59 @@ const BrowseManga = () => {
     () => Array.from(new Set(selectedGenreAliasGroups.flat().map((slug) => toSlug(slug)).filter(Boolean))),
     [selectedGenreAliasGroups],
   );
+  const mangaDexServerSearchSort = useMemo(
+    () =>
+      filters.sort === 'popular'
+        ? 'popular'
+        : filters.sort === 'alphabetical'
+          ? 'title'
+          : 'latest',
+    [filters.sort],
+  );
+  const getMangaDexServerSearchQueryKey = useCallback(
+    (targetPage: number) => [
+      'manga',
+      'mangadex',
+      'server-search',
+      normalizedSearch,
+      mangaDexServerSearchGenreSlugs,
+      filters.status,
+      mangaDexServerSearchSort,
+      targetPage,
+      showMatureContent,
+    ] as const,
+    [
+      normalizedSearch,
+      mangaDexServerSearchGenreSlugs,
+      filters.status,
+      mangaDexServerSearchSort,
+      showMatureContent,
+    ],
+  );
+  const fetchMangaDexServerSearchPage = useCallback(
+    async (targetPage: number) => {
+      const payload = await mangaApi.searchMangaDex({
+        keyword: normalizedSearch,
+        page: targetPage,
+        limit: BROWSE_PAGE_SIZE,
+        genreSlugs: mangaDexServerSearchGenreSlugs,
+        status: filters.status || '',
+        sort: mangaDexServerSearchSort,
+        showMature: showMatureContent,
+        attachRatings: false,
+        filterHidden: true,
+        timeoutMs: 12_000,
+      });
+      return adaptListData(payload);
+    },
+    [
+      normalizedSearch,
+      mangaDexServerSearchGenreSlugs,
+      filters.status,
+      mangaDexServerSearchSort,
+      showMatureContent,
+    ],
+  );
   const mangaDexInitialDemandLimit = mangaDexHasNarrowClientFilters
     ? MANGADEX_DEMAND_FILTERED_INITIAL_LIMIT
     : MANGADEX_DEMAND_INITIAL_LIMIT;
@@ -1849,38 +1902,8 @@ const BrowseManga = () => {
   });
 
   const mangaDexServerSearchQuery = useQuery({
-    queryKey: [
-      'manga',
-      'mangadex',
-      'server-search',
-      normalizedSearch,
-      mangaDexServerSearchGenreSlugs,
-      filters.status,
-      filters.sort,
-      page,
-      showMatureContent,
-    ] as const,
-    queryFn: async () => {
-      const sort =
-        filters.sort === 'popular'
-          ? 'popular'
-          : filters.sort === 'alphabetical'
-            ? 'title'
-            : 'latest';
-      const payload = await mangaApi.searchMangaDex({
-        keyword: normalizedSearch,
-        page,
-        limit: BROWSE_PAGE_SIZE,
-        genreSlugs: mangaDexServerSearchGenreSlugs,
-        status: filters.status || '',
-        sort,
-        showMature: showMatureContent,
-        attachRatings: false,
-        filterHidden: true,
-        timeoutMs: 15_000,
-      });
-      return adaptListData(payload);
-    },
+    queryKey: getMangaDexServerSearchQueryKey(page),
+    queryFn: () => fetchMangaDexServerSearchPage(page),
     enabled: useMangaDexServerSearchMode,
     staleTime: 2 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
@@ -2303,6 +2326,11 @@ const BrowseManga = () => {
         ? combinedListQuery.isFetching
         : (useOTruyenCategory ? categoryQuery.isFetching : listQuery.isFetching)) ||
     (useGlobalClientSortMode && (globalSortedListQuery.isFetching || isGlobalSortBackgroundFetching));
+  const isMangaDexServerPageTransition =
+    useMangaDexServerSearchMode &&
+    mangaDexServerSearchQuery.isFetching &&
+    Boolean(mangaDexServerSearchQuery.data) &&
+    Boolean(mangaDexServerSearchQuery.isPlaceholderData);
 
   // MangaDex is ALWAYS available — from dedicated catalog query (works for ALL tag types)
   const mangaDexMangas = useMemo<MangaDexCatalogItem[]>(() => {
@@ -4642,9 +4670,8 @@ const BrowseManga = () => {
   ]);
 
   // ── Browser-level preload (limited) ───────────────────────────────────────
-  // Avoid preloading the whole page; only warm a few OTruyen covers.
+  // Avoid preloading the whole page; only warm the first visible covers.
   useEffect(() => {
-    if (isMangaDexSourceTab) return;
     const urls = displayItems
       .slice(0, 6)
       .map(m => m.cover)
@@ -4653,12 +4680,38 @@ const BrowseManga = () => {
       const img = new window.Image();
       img.src = url;
     });
-  }, [displayItems, isMangaDexSourceTab]);
+  }, [displayItems]);
 
   useEffect(() => {
     if (isNearMangaDexLoadedLimit) return;
     if (page > totalPages) setPage(totalPages);
   }, [page, totalPages, isNearMangaDexLoadedLimit]);
+
+  // Prefetch adjacent MangaDex search pages so pagination feels instant.
+  useEffect(() => {
+    if (!useMangaDexServerSearchMode) return;
+    const total = Math.max(1, mangaDexServerTotalPages);
+    const targetPages = Array.from(new Set([page + 1, page - 1]))
+      .filter((targetPage) => targetPage >= 1 && targetPage <= total);
+
+    targetPages.forEach((targetPage) => {
+      queryClient.prefetchQuery({
+        queryKey: getMangaDexServerSearchQueryKey(targetPage),
+        queryFn: () => fetchMangaDexServerSearchPage(targetPage),
+        staleTime: 2 * 60 * 1000,
+        gcTime: 8 * 60 * 1000,
+      }).catch(() => {
+        // Best-effort warmup only; normal navigation still handles errors.
+      });
+    });
+  }, [
+    useMangaDexServerSearchMode,
+    page,
+    mangaDexServerTotalPages,
+    queryClient,
+    getMangaDexServerSearchQueryKey,
+    fetchMangaDexServerSearchPage,
+  ]);
 
   // Prefetch next OTruyen page
   useEffect(() => {
@@ -4802,7 +4855,7 @@ const BrowseManga = () => {
             </div>
           ) : (
             <>
-              {isFetching && displayItems.length > 0 && (
+              {isFetching && displayItems.length > 0 && !isMangaDexServerPageTransition && (
                 <div className="flex justify-center mb-3">
                   <Loader2 className="w-4 h-4 animate-spin text-primary" />
                 </div>
