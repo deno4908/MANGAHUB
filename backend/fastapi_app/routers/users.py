@@ -1045,63 +1045,104 @@ async def get_stats(user=Depends(get_current_user), db=Depends(get_supabase)):
     start_local = datetime.combine(dates[0], datetime.min.time(), tzinfo=tz)
     start_utc_iso = start_local.astimezone(timezone.utc).isoformat()
 
+    use_activity_events = True
     try:
-        profile, history_rows, streak_rows = await asyncio.gather(
+        profile = await asyncio.to_thread(
+            lambda: db.table("profiles")
+            .select("chapters_read, total_reading_time, comments_posted, reading_streak")
+            .eq("id", user_id)
+            .single()
+            .execute()
+        )
+        history_rows, streak_rows = await asyncio.gather(
             asyncio.to_thread(
-                lambda: db.table("profiles")
-                .select("chapters_read, total_reading_time, comments_posted, reading_streak")
-                .eq("id", user_id)
-                .single()
-                .execute()
-            ),
-            asyncio.to_thread(
-                lambda: db.table("reading_history")
-                .select("read_at")
+                lambda: db.table("reading_activity_events")
+                .select("activity_date,read_count")
                 .eq("user_id", user_id)
-                .gte("read_at", start_utc_iso)
-                .order("read_at", desc=False)
+                .gte("activity_date", dates[0].isoformat())
+                .order("activity_date", desc=False)
                 .limit(USER_STATS_WEEKLY_HISTORY_LIMIT)
                 .execute()
             ),
             asyncio.to_thread(
-                lambda: db.table("reading_history")
-                .select("read_at")
+                lambda: db.table("reading_activity_events")
+                .select("activity_date")
                 .eq("user_id", user_id)
-                .order("read_at", desc=True)
+                .order("activity_date", desc=True)
                 .limit(USER_STATS_STREAK_HISTORY_LIMIT)
                 .execute()
             ),
         )
     except Exception:
-        if isinstance(stale_cached, dict):
-            return stale_cached
-        raise
+        use_activity_events = False
+        try:
+            profile, history_rows, streak_rows = await asyncio.gather(
+                asyncio.to_thread(
+                    lambda: db.table("profiles")
+                    .select("chapters_read, total_reading_time, comments_posted, reading_streak")
+                    .eq("id", user_id)
+                    .single()
+                    .execute()
+                ),
+                asyncio.to_thread(
+                    lambda: db.table("reading_history")
+                    .select("read_at")
+                    .eq("user_id", user_id)
+                    .gte("read_at", start_utc_iso)
+                    .order("read_at", desc=False)
+                    .limit(USER_STATS_WEEKLY_HISTORY_LIMIT)
+                    .execute()
+                ),
+                asyncio.to_thread(
+                    lambda: db.table("reading_history")
+                    .select("read_at")
+                    .eq("user_id", user_id)
+                    .order("read_at", desc=True)
+                    .limit(USER_STATS_STREAK_HISTORY_LIMIT)
+                    .execute()
+                ),
+            )
+        except Exception:
+            if isinstance(stale_cached, dict):
+                return stale_cached
+            raise
 
     for row in history_rows.data or []:
-        read_at = row.get("read_at")
-        if not read_at:
-            continue
-        try:
-            dt = datetime.fromisoformat(read_at.replace("Z", "+00:00"))
-            day_key = dt.astimezone(tz).date().isoformat()
+        if use_activity_events:
+            day_key = str(row.get("activity_date") or "").strip()
             if day_key in counts_by_day:
-                counts_by_day[day_key] += 1
-        except Exception:
-            continue
+                counts_by_day[day_key] += max(1, int(row.get("read_count") or 1))
+        else:
+            read_at = row.get("read_at")
+            if not read_at:
+                continue
+            try:
+                dt = datetime.fromisoformat(read_at.replace("Z", "+00:00"))
+                day_key = dt.astimezone(tz).date().isoformat()
+                if day_key in counts_by_day:
+                    counts_by_day[day_key] += 1
+            except Exception:
+                continue
 
     weekly = [counts_by_day[d.isoformat()] for d in dates]
 
     # Reading streak (consecutive active days up to today in local timezone)
     active_days = set()
     for row in streak_rows.data or []:
-        read_at = row.get("read_at")
-        if not read_at:
-            continue
-        try:
-            dt = datetime.fromisoformat(read_at.replace("Z", "+00:00"))
-            active_days.add(dt.astimezone(tz).date())
-        except Exception:
-            continue
+        if use_activity_events:
+            try:
+                active_days.add(datetime.fromisoformat(str(row.get("activity_date"))).date())
+            except Exception:
+                continue
+        else:
+            read_at = row.get("read_at")
+            if not read_at:
+                continue
+            try:
+                dt = datetime.fromisoformat(read_at.replace("Z", "+00:00"))
+                active_days.add(dt.astimezone(tz).date())
+            except Exception:
+                continue
 
     streak = 0
     cursor = now_local.date()

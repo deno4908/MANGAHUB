@@ -4,6 +4,7 @@ Reading history router.
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -15,6 +16,7 @@ router = APIRouter()
 
 HISTORY_UPDATE_LIMIT_PER_MINUTE = 90
 HISTORY_UPDATE_LIMIT_PER_10_MINUTES = 600
+READING_ACTIVITY_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 def _parse_client_read_at(value: str | None) -> datetime | None:
@@ -31,6 +33,30 @@ def _parse_client_read_at(value: str | None) -> datetime | None:
         return parsed
     except Exception:
         return None
+
+
+def _activity_date_for(read_at: datetime) -> str:
+    return read_at.astimezone(READING_ACTIVITY_TZ).date().isoformat()
+
+
+def _record_reading_activity_event(db, user_id: str, data: HistoryEntry, read_at: datetime) -> None:
+    manga_slug = str(data.manga_slug or "").strip()
+    if not user_id or not manga_slug:
+        return
+    try:
+        db.rpc(
+            "record_reading_activity_event",
+            {
+                "p_user_id": user_id,
+                "p_manga_slug": manga_slug,
+                "p_chapter_id": str(data.chapter_id or "").strip(),
+                "p_activity_date": _activity_date_for(read_at),
+                "p_read_at": read_at.isoformat(),
+            },
+        ).execute()
+    except Exception:
+        # The migration may not be applied yet; history should still work.
+        pass
 
 
 @router.get("/")
@@ -116,6 +142,14 @@ async def add_or_update_history(
             "progress": data.progress,
             "read_at": now_iso,
         }
+
+        await asyncio.to_thread(
+            _record_reading_activity_event,
+            db,
+            user["id"],
+            data,
+            read_at_dt,
+        )
 
         if rows:
             keep_id = rows[0]["id"]

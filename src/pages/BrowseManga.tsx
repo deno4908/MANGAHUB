@@ -1654,6 +1654,19 @@ const BrowseManga = () => {
       hasLocalClientFilters ||
       Boolean(filters.status)
     );
+  const useMangaDexServerSearchMode =
+    isMangaDexSourceTab &&
+    filters.sort !== 'rating' &&
+    !hasLocalClientFilters &&
+    (
+      hasSearch ||
+      selectedGenreAliasGroups.length > 0 ||
+      Boolean(filters.status)
+    );
+  const mangaDexServerSearchGenreSlugs = useMemo(
+    () => Array.from(new Set(selectedGenreAliasGroups.flat().map((slug) => toSlug(slug)).filter(Boolean))),
+    [selectedGenreAliasGroups],
+  );
   const mangaDexInitialDemandLimit = mangaDexHasNarrowClientFilters
     ? MANGADEX_DEMAND_FILTERED_INITIAL_LIMIT
     : MANGADEX_DEMAND_INITIAL_LIMIT;
@@ -1827,12 +1840,56 @@ const BrowseManga = () => {
     },
     staleTime: isMangaDexSourceTab ? 45 * 1000 : 10 * 60 * 1000,
     gcTime: isMangaDexSourceTab ? 5 * 60 * 1000 : 8 * 60 * 1000,
-    enabled: isMangaDexSourceTab && !useCombinedList && !useTrendingPopularMode,
+    enabled: isMangaDexSourceTab && !useCombinedList && !useTrendingPopularMode && !useMangaDexServerSearchMode,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     placeholderData: (prev) => prev,
     retry: (failureCount) => failureCount < 2,
     retryDelay: 3000,
+  });
+
+  const mangaDexServerSearchQuery = useQuery({
+    queryKey: [
+      'manga',
+      'mangadex',
+      'server-search',
+      normalizedSearch,
+      mangaDexServerSearchGenreSlugs,
+      filters.status,
+      filters.sort,
+      page,
+      showMatureContent,
+    ] as const,
+    queryFn: async () => {
+      const sort =
+        filters.sort === 'popular'
+          ? 'popular'
+          : filters.sort === 'alphabetical'
+            ? 'title'
+            : 'latest';
+      const payload = await mangaApi.searchMangaDex({
+        keyword: normalizedSearch,
+        page,
+        limit: BROWSE_PAGE_SIZE,
+        genreSlugs: mangaDexServerSearchGenreSlugs,
+        status: filters.status || '',
+        sort,
+        showMature: showMatureContent,
+        attachRatings: false,
+        filterHidden: true,
+        timeoutMs: 15_000,
+      });
+      return adaptListData(payload);
+    },
+    enabled: useMangaDexServerSearchMode,
+    staleTime: 2 * 60 * 1000,
+    gcTime: 8 * 60 * 1000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: 1,
+    retryDelay: 1200,
+    placeholderData: (previousData) => previousData,
   });
 
   useEffect(() => {
@@ -2072,9 +2129,10 @@ const BrowseManga = () => {
   const activeMangaDexCatalog = useMemo(
     () => {
       if (!isMangaDexSourceTab) return [] as MangaDexCatalogItem[];
+      if (useMangaDexServerSearchMode) return [] as MangaDexCatalogItem[];
       return useCombinedList ? (combinedListQuery.data?.mangadex || []) : (mangadexCatalogQuery.data || []);
     },
-    [isMangaDexSourceTab, useCombinedList, combinedListQuery.data?.mangadex, mangadexCatalogQuery.data],
+    [isMangaDexSourceTab, useMangaDexServerSearchMode, useCombinedList, combinedListQuery.data?.mangadex, mangadexCatalogQuery.data],
   );
 
   useEffect(() => {
@@ -2086,19 +2144,28 @@ const BrowseManga = () => {
   // Refetch if MangaDex catalog came back empty (backend still building cache)
   const activeMangaDexLoading = useCombinedList
     ? combinedListQuery.isLoading
-    : mangadexCatalogQuery.isLoading;
+    : useMangaDexServerSearchMode
+      ? mangaDexServerSearchQuery.isLoading
+      : mangadexCatalogQuery.isLoading;
   const activeMangaDexFetching = useCombinedList
     ? combinedListQuery.isFetching
-    : mangadexCatalogQuery.isFetching;
+    : useMangaDexServerSearchMode
+      ? mangaDexServerSearchQuery.isFetching
+      : mangadexCatalogQuery.isFetching;
   const activeMangaDexSuccess = useCombinedList
     ? combinedListQuery.isSuccess
-    : mangadexCatalogQuery.isSuccess;
+    : useMangaDexServerSearchMode
+      ? mangaDexServerSearchQuery.isSuccess
+      : mangadexCatalogQuery.isSuccess;
   const refetchActiveMangaDex = useCombinedList
     ? combinedListQuery.refetch
-    : mangadexCatalogQuery.refetch;
+    : useMangaDexServerSearchMode
+      ? mangaDexServerSearchQuery.refetch
+      : mangadexCatalogQuery.refetch;
 
   const mangadexIsEmpty =
     isMangaDexSourceTab &&
+    !useMangaDexServerSearchMode &&
     !activeMangaDexLoading &&
     !activeMangaDexFetching &&
     activeMangaDexSuccess &&
@@ -2223,24 +2290,34 @@ const BrowseManga = () => {
   ]);
 
   const isLoading =
-    (useCombinedList
-      ? combinedListQuery.isLoading
-      : (useOTruyenCategory ? categoryQuery.isLoading : listQuery.isLoading)) ||
+    (useMangaDexServerSearchMode
+      ? mangaDexServerSearchQuery.isLoading
+      : useCombinedList
+        ? combinedListQuery.isLoading
+        : (useOTruyenCategory ? categoryQuery.isLoading : listQuery.isLoading)) ||
     (useGlobalClientSortMode && globalSortedListQuery.isLoading);
   const isFetching =
-    (useCombinedList
-      ? combinedListQuery.isFetching
-      : (useOTruyenCategory ? categoryQuery.isFetching : listQuery.isFetching)) ||
+    (useMangaDexServerSearchMode
+      ? mangaDexServerSearchQuery.isFetching
+      : useCombinedList
+        ? combinedListQuery.isFetching
+        : (useOTruyenCategory ? categoryQuery.isFetching : listQuery.isFetching)) ||
     (useGlobalClientSortMode && (globalSortedListQuery.isFetching || isGlobalSortBackgroundFetching));
 
   // MangaDex is ALWAYS available — from dedicated catalog query (works for ALL tag types)
   const mangaDexMangas = useMemo<MangaDexCatalogItem[]>(() => {
     if (!isMangaDexSourceTab) return [];
+    if (useMangaDexServerSearchMode) return [];
     if (useTrendingPopularMode) return [];
     const catalogItems = activeMangaDexCatalog;
     if (catalogItems.length) return catalogItems;
     return lastNonEmptyMangaDexRef.current[mangaDexCatalogMode] || [];
-  }, [isMangaDexSourceTab, activeMangaDexCatalog, useTrendingPopularMode, mangaDexCatalogMode]);
+  }, [isMangaDexSourceTab, useMangaDexServerSearchMode, activeMangaDexCatalog, useTrendingPopularMode, mangaDexCatalogMode]);
+
+  const mangaDexServerItems = useMemo<Manga[]>(
+    () => useMangaDexServerSearchMode ? (mangaDexServerSearchQuery.data?.items || []) : [],
+    [useMangaDexServerSearchMode, mangaDexServerSearchQuery.data?.items],
+  );
 
   const popularTrendingState = queryClient.getQueryState(popularTrendingQueryKey);
   const popularTrendingCachedRows = Array.isArray(popularTrendingState?.data)
@@ -2258,6 +2335,8 @@ const BrowseManga = () => {
   // In default list mode, render both sources from one combined payload (no front/back stagger).
   const isInitialMergedLoading = useCombinedList
     ? (combinedListQuery.isLoading && !combinedListQuery.data)
+    : useMangaDexServerSearchMode
+      ? (mangaDexServerSearchQuery.isLoading && !mangaDexServerSearchQuery.data)
     : useGlobalClientSortMode
       ? (globalSortedListQuery.isLoading && globalSortedItemsLength === 0)
       : useTrendingPopularMode
@@ -2508,6 +2587,13 @@ const BrowseManga = () => {
   ]);
 
   const mangaDexFiltered = useMemo(() => {
+    if (useMangaDexServerSearchMode) {
+      let serverItems = [...mangaDexServerItems];
+      if (!showMatureContent) {
+        serverItems = serverItems.filter((m) => !isMatureManga(m));
+      }
+      return serverItems;
+    }
     if (!mangaDexItems.length) return [];
     let items = [...mangaDexItems];
     if (!showMatureContent) {
@@ -2540,6 +2626,8 @@ const BrowseManga = () => {
     }
     return items;
   }, [
+    useMangaDexServerSearchMode,
+    mangaDexServerItems,
     mangaDexItems,
     showMatureContent,
     filters.status,
@@ -3458,6 +3546,10 @@ const BrowseManga = () => {
       return guestTopRatedFilteredBySource;
     }
 
+    if (useMangaDexServerSearchMode) {
+      return mangaDexFiltered;
+    }
+
     const sourceItems = isMangaDexSourceTab ? mangaDexFiltered : filtered;
 
     const merged =
@@ -3509,6 +3601,7 @@ const BrowseManga = () => {
     isOTruyenSourceTab,
     filtered,
     mangaDexFiltered,
+    useMangaDexServerSearchMode,
     myRatedOverlayItemsForSource,
     popularTrendingItemsBySource,
     isClientPaginationMode,
@@ -3524,7 +3617,7 @@ const BrowseManga = () => {
 
   const mangaDexSearchSnapshotKey = `${browsePageMemoryKey}|mature:${showMatureContent ? 1 : 0}`;
   const stableMergedFiltered = useMemo(() => {
-    if (!isMangaDexSourceTab || !hasSearch || !isClientPaginationMode) {
+    if (useMangaDexServerSearchMode || !isMangaDexSourceTab || !hasSearch || !isClientPaginationMode) {
       return mergedFiltered;
     }
 
@@ -3567,6 +3660,7 @@ const BrowseManga = () => {
     return stableItems;
   }, [
     isMangaDexSourceTab,
+    useMangaDexServerSearchMode,
     hasSearch,
     isClientPaginationMode,
     mergedFiltered,
@@ -3579,6 +3673,7 @@ const BrowseManga = () => {
   const otruyenServerPages = isClientPaginationMode ? 0 : (data?.totalPages || 1);
   const canExpandMangaDexCatalog =
     isMangaDexSourceTab &&
+    !useMangaDexServerSearchMode &&
     !useGlobalTopRatedMode &&
     typeof mangadexCatalogRequestLimit === 'number' &&
     mangadexCatalogRequestLimit < baseMangaDexCatalogLimit;
@@ -3632,9 +3727,15 @@ const BrowseManga = () => {
     () => Math.max(1, Math.ceil(guestTopRatedFilteredBySource.length / pageSize)),
     [guestTopRatedFilteredBySource.length, pageSize],
   );
+  const mangaDexServerTotalPages = Math.max(
+    1,
+    Number(mangaDexServerSearchQuery.data?.totalPages || 1),
+  );
 
   const totalPages = useGlobalTopRatedMode
     ? guestTopRatedTotalPages
+    : useMangaDexServerSearchMode
+      ? mangaDexServerTotalPages
     : isClientPaginationMode
       ? estimatedClientTotalPages
       : otruyenServerPages;
@@ -3818,6 +3919,10 @@ const BrowseManga = () => {
       return guestTopRatedFilteredBySource.slice((currentPage - 1) * pageSize, currentPage * pageSize);
     }
 
+    if (useMangaDexServerSearchMode) {
+      return stableMergedFiltered;
+    }
+
     if (isClientPaginationMode) {
       return stableMergedFiltered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
     }
@@ -3865,6 +3970,7 @@ const BrowseManga = () => {
       : sortable;
   }, [
     isClientPaginationMode,
+    useMangaDexServerSearchMode,
     stableMergedFiltered,
     currentPage,
     pageSize,

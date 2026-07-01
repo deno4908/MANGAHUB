@@ -3410,6 +3410,59 @@ async def search(
     return data
 
 
+@router.get("/mangadex/search")
+async def mangadex_search(
+    keyword: str = Query(""),
+    page: int = Query(1, ge=1),
+    limit: int = Query(24, ge=1, le=100),
+    genre_slugs: str = Query(""),
+    status: str = Query(""),
+    sort: str = Query("latest"),
+    show_mature: bool = Query(False),
+    attach_ratings: bool = Query(False),
+    filter_hidden: bool = Query(True),
+    user=Depends(get_optional_user),
+    db=Depends(get_supabase_public),
+):
+    genre_values = [
+        part.strip().lower()
+        for part in str(genre_slugs or "").split(",")
+        if part.strip()
+    ]
+    status_values = [
+        part.strip().lower()
+        for part in str(status or "").split(",")
+        if part.strip()
+    ]
+
+    data = await mangadex_service.search_manga(
+        keyword=keyword,
+        page=page,
+        limit=limit,
+        translated_language="vi",
+        attach_latest=True,
+        included_tag_slugs=genre_values,
+        statuses=status_values,
+        sort=sort,
+        content_ratings=(
+            ["safe", "suggestive", "erotica", "pornographic"]
+            if show_mature
+            else ["safe", "suggestive"]
+        ),
+    )
+
+    if filter_hidden:
+        hidden = await _get_hidden_slugs(db)
+        items = ((data.get("data") or {}).get("items") or [])
+        if hidden and isinstance(items, list):
+            data.setdefault("data", {})["items"] = _filter_hidden(items, hidden)
+
+    if attach_ratings:
+        await _async_attach_ratings_to_items(data, db, user)
+
+    return data
+
+
 @router.get("/mangadex/vi-catalog")
 async def mangadex_vi_catalog(
     max_chapters: str = Query("2000"),

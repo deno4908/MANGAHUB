@@ -121,8 +121,8 @@ const refreshTabId =
 const REFRESH_BACKOFF_MS = 15_000;
 const REFRESH_RETRYABLE_BACKOFF_MS = 1_500;
 const REFRESH_RATE_LIMIT_BACKOFF_MS = 60_000;
-const REFRESH_LOCK_TTL_MS = 25_000;
-const REFRESH_LOCK_WAIT_MS = 20_000;
+const REFRESH_LOCK_TTL_MS = 75_000;
+const REFRESH_LOCK_WAIT_MS = 80_000;
 const REFRESH_LOCK_POLL_MS = 180;
 const PEER_TOKEN_WAIT_MS = 350;
 const REFRESH_RETRYABLE_ATTEMPTS = 5;
@@ -320,9 +320,19 @@ function releaseRefreshLock() {
 }
 
 async function withRefreshLock<T>(task: () => Promise<T>): Promise<T> {
+  const webLocks = typeof navigator !== "undefined" ? (navigator as any).locks : null;
+  if (webLocks?.request) {
+    return webLocks.request("mangahub-auth-refresh", { mode: "exclusive" }, task);
+  }
+
   const startedAt = Date.now();
   while (!tryAcquireRefreshLock()) {
-    if (Date.now() - startedAt > REFRESH_LOCK_WAIT_MS) break;
+    if (await waitForPeerAccessToken(PEER_TOKEN_WAIT_MS)) {
+      return true as T;
+    }
+    if (Date.now() - startedAt > REFRESH_LOCK_WAIT_MS) {
+      throw new Error("refresh lock timeout");
+    }
     await sleep(REFRESH_LOCK_POLL_MS);
   }
   try {
@@ -965,6 +975,42 @@ export const mangaApi = {
       `/api/manga/mangadex/latest-chapters?${query.toString()}`,
       { timeoutMs: 15_000 },
     );
+  },
+  searchMangaDex: (
+    options: {
+      keyword?: string;
+      page?: number;
+      limit?: number;
+      genreSlugs?: string[];
+      status?: string;
+      sort?: string;
+      showMature?: boolean;
+      attachRatings?: boolean;
+      filterHidden?: boolean;
+      timeoutMs?: number;
+    } = {},
+  ) => {
+    const query = new URLSearchParams({
+      keyword: String(options.keyword || ""),
+      page: String(Math.max(1, Math.floor(Number(options.page || 1)))),
+      limit: String(Math.max(1, Math.min(100, Math.floor(Number(options.limit || 24))))),
+      sort: String(options.sort || "latest"),
+      show_mature: String(options.showMature ?? false),
+      attach_ratings: String(options.attachRatings ?? false),
+      filter_hidden: String(options.filterHidden ?? true),
+    });
+    const genreSlugs = Array.from(
+      new Set((options.genreSlugs || []).map((slug) => String(slug || "").trim().toLowerCase()).filter(Boolean)),
+    );
+    if (genreSlugs.length) {
+      query.set("genre_slugs", genreSlugs.join(","));
+    }
+    if (options.status) {
+      query.set("status", String(options.status));
+    }
+    return api<any>(`/api/manga/mangadex/search?${query.toString()}`, {
+      timeoutMs: options.timeoutMs ?? 12_000,
+    });
   },
   getMangaDexDetail: (
     mangaId: string,

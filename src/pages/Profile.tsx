@@ -1,6 +1,6 @@
 import { useUserStore } from '@/store/userStore';
 import { useBookmarks, useFollows, useHistory, useToggleFollow, useToggleBookmark } from '@/hooks/useApi';
-import { historyApi, commentApi, mangaApi, ratingApi } from '@/lib/api';
+import { historyApi, commentApi, mangaApi, ratingApi, userApi } from '@/lib/api';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import AvatarEditorModal from '@/components/manga/AvatarEditorModal';
 import OptimizedImage from '@/components/ui/OptimizedImage';
@@ -331,6 +331,19 @@ const Profile = () => {
   const { data: followedManga = [] } = useFollows();
   const { data: bookmarkedManga = [] } = useBookmarks();
   const { data: historyItems = [] } = useHistory({ enrichThumbs: false });
+  const { data: profileStatsPayload } = useQuery({
+    queryKey: ['users', 'stats', 'profile', user?.id || 'anonymous'],
+    queryFn: userApi.getStats,
+    enabled: !!user,
+    staleTime: 0,
+    gcTime: 5 * 60 * 1000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
+    retry: 1,
+    placeholderData: (previousData) => previousData,
+  });
+  const profileStats = (profileStatsPayload as any)?.stats || user?.stats || {};
   const {
     data: profileComments = [],
     isFetching: profileCommentsFetching,
@@ -600,7 +613,7 @@ const Profile = () => {
 
             <AnimatePresence mode="wait">
               <motion.div key={tab} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.2 }}>
-                {tab === 'overview' && <OverviewTab user={user} followedManga={followedManga} historyItems={historyItems} />}
+                {tab === 'overview' && <OverviewTab user={user} stats={profileStats} followedManga={followedManga} historyItems={historyItems} />}
                 {tab === 'following' && <FollowingTab manga={followedManga} onUnfollow={toggleFollow} />}
                 {tab === 'bookmarks' && <BookmarksTab manga={bookmarkedManga} onRemove={toggleBookmark} sort={bookmarkSort} setSort={setBookmarkSort} />}
                 {tab === 'history' && <HistoryTab items={historyItems} onRemove={removeHistoryItem} onClear={clearHistory} sort={historySort} setSort={setHistorySort} />}
@@ -649,7 +662,7 @@ const Profile = () => {
 };
 
 /* === OVERVIEW TAB === */
-const OverviewTab = ({ user, followedManga, historyItems }: { user: any; followedManga: any[]; historyItems: any[] }) => {
+const OverviewTab = ({ user, stats, followedManga, historyItems }: { user: any; stats: any; followedManga: any[]; historyItems: any[] }) => {
   const { labels, weeklyActivity } = (() => {
     const now = new Date();
     const result = [];
@@ -699,14 +712,32 @@ const OverviewTab = ({ user, followedManga, historyItems }: { user: any; followe
     };
   })();
 
-  const maxActivity = Math.max(...weeklyActivity, 1);
+  const rawStatsWeeklyActivity = Array.isArray(stats?.weekly_activity)
+    ? stats.weekly_activity
+    : Array.isArray(stats?.weeklyActivity)
+      ? stats.weeklyActivity
+      : [];
+  const statsWeeklyActivity = Array.isArray(rawStatsWeeklyActivity)
+    ? rawStatsWeeklyActivity.map((value: unknown) => Math.max(0, Number(value) || 0)).slice(-7)
+    : [];
+  const activityLabels = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date();
+    date.setDate(date.getDate() - (6 - index));
+    const day = date.getDay();
+    return day === 0 ? 'CN' : `T${day + 1}`;
+  });
+  const displayedWeeklyActivity =
+    statsWeeklyActivity.length === 7 ? statsWeeklyActivity : weeklyActivity;
+  const displayedLabels =
+    statsWeeklyActivity.length === 7 ? activityLabels : labels;
+  const maxActivity = Math.max(...displayedWeeklyActivity, 1);
 
   return (
     <div className="space-y-6">
       <div className="p-5 rounded-xl bg-card border border-border/50">
         <h3 className="text-sm font-bold mb-4 flex items-center gap-2"><TrendingUp className="w-4 h-4 text-primary" /> Hoạt động đọc trong tuần</h3>
         <div className="flex items-end gap-2 h-24 sm:h-28">
-          {weeklyActivity.map((count: number, i: number) => (
+          {displayedWeeklyActivity.map((count: number, i: number) => (
             <div key={i} className="flex-1 h-full flex flex-col items-center gap-1">
               <span className={`text-[10px] font-bold ${count > 0 ? 'text-muted-foreground' : 'text-muted-foreground/30'}`}>{count}</span>
               <div className="w-full flex-1 flex items-end">
@@ -718,7 +749,7 @@ const OverviewTab = ({ user, followedManga, historyItems }: { user: any; followe
                   style={{ minHeight: 4 }}
                 />
               </div>
-              <span className="text-[10px] text-muted-foreground">{labels[i]}</span>
+              <span className="text-[10px] text-muted-foreground">{displayedLabels[i]}</span>
             </div>
           ))}
         </div>

@@ -49,7 +49,7 @@ _REFRESH_COOKIE_MAX_AGE_SECONDS = max(
 _OAUTH_VERIFIER_COOKIE_MAX_AGE_SECONDS = 10 * 60
 _REFRESH_SINGLEFLIGHT_TTL_SECONDS = 20
 _REFRESH_SINGLEFLIGHT_LOCK_SECONDS = 25
-_REFRESH_SINGLEFLIGHT_WAIT_SECONDS = 12
+_REFRESH_SINGLEFLIGHT_WAIT_SECONDS = 25
 _REFRESH_ROTATION_GRACE_SECONDS = max(
     _REFRESH_SINGLEFLIGHT_TTL_SECONDS,
     int(getattr(config, "REFRESH_ROTATION_GRACE_SECONDS", 2 * 60 * 60)),
@@ -1328,7 +1328,7 @@ def refresh_token():
             return _json({
                 "error": "Refresh đang được xử lý, vui lòng thử lại",
                 "requires_retry": True,
-            }, 409)
+            }, 503)
         if (
             "invalid refresh" in normalized
             or "refresh token not found" in normalized

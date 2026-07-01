@@ -758,6 +758,77 @@ def _extract_genres(attributes: dict[str, Any]) -> list[str]:
     return genres
 
 
+def _slugify_tag(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    return text.strip("-")
+
+
+async def _get_mangadex_tag_id_by_slug() -> dict[str, str]:
+    cache_key = "mangadex:tag-id-by-slug:v1"
+    cached = cache.get(cache_key)
+    if cached:
+        try:
+            parsed = json.loads(cached)
+            if isinstance(parsed, dict):
+                return {str(k): str(v) for k, v in parsed.items() if k and v}
+        except Exception:
+            cache.delete(cache_key)
+
+    payload = await _request_json("/manga/tag")
+    tag_map: dict[str, str] = {}
+    for tag in payload.get("data") or []:
+        tag_id = str(tag.get("id") or "").strip()
+        attributes = tag.get("attributes") or {}
+        names = attributes.get("name") or {}
+        if not tag_id or not isinstance(names, dict):
+            continue
+        for name in names.values():
+            slug = _slugify_tag(name)
+            if slug:
+                tag_map.setdefault(slug, tag_id)
+
+    # Common front-end aliases that do not exactly match MangaDex tag names.
+    alias_to_slug = {
+        "xuyen-khong": "isekai",
+        "chuyen-sinh": "reincarnation",
+        "tinh-cam": "romance",
+        "ngon-tinh": "romance",
+        "lang-man": "romance",
+        "hai-huoc": "comedy",
+        "hanh-dong": "action",
+        "phieu-luu": "adventure",
+        "kinh-di": "horror",
+        "doi-thuong": "slice-of-life",
+        "the-thao": "sports",
+        "hoc-duong": "school-life",
+        "lich-su": "historical",
+        "tam-ly": "psychological",
+        "bi-an": "mystery",
+        "vo-thuat": "martial-arts",
+        "sieu-nhien": "supernatural",
+        "khoa-hoc-vien-tuong": "sci-fi",
+    }
+    for alias, target in alias_to_slug.items():
+        if target in tag_map:
+            tag_map.setdefault(alias, tag_map[target])
+
+    cache.set(cache_key, json.dumps(tag_map, ensure_ascii=False), ttl=24 * 60 * 60)
+    return tag_map
+
+
+async def _resolve_mangadex_tag_ids(slugs: list[str] | None) -> list[str]:
+    normalized = [_slugify_tag(slug) for slug in (slugs or [])]
+    normalized = [slug for slug in dict.fromkeys(normalized) if slug]
+    if not normalized:
+        return []
+    try:
+        tag_map = await _get_mangadex_tag_id_by_slug()
+    except Exception:
+        return []
+    return [tag_map[slug] for slug in normalized if slug in tag_map]
+
+
 def _relation_bucket(item: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     bucket: dict[str, list[dict[str, Any]]] = {}
     for relation in item.get("relationships", []):
@@ -1448,6 +1519,7 @@ def _to_legacy_item(manga: dict[str, Any], latest_chapter: dict[str, str] | None
         "last_chapter": str(manga.get("last_chapter") or ""),
         "rating_average": 0,
         "view_count": 0,
+        "content_rating": str(manga.get("content_rating") or "").strip().lower(),
         "source": "mangadex",
     }
 
@@ -2097,9 +2169,22 @@ async def search_manga(
     limit: int = 24,
     translated_language: str = "vi",
     attach_latest: bool = True,
+    included_tag_slugs: list[str] | None = None,
+    statuses: list[str] | None = None,
+    sort: str = "relevance",
+    content_ratings: list[str] | None = None,
 ) -> dict[str, Any]:
     normalized_keyword = str(keyword or "").strip()
-    if not normalized_keyword:
+    tag_ids = await _resolve_mangadex_tag_ids(included_tag_slugs)
+    normalized_statuses = [
+        status
+        for status in (
+            str(value or "").strip().lower()
+            for value in (statuses or [])
+        )
+        if status in {"ongoing", "completed", "hiatus", "cancelled"}
+    ]
+    if not normalized_keyword and not tag_ids and not normalized_statuses:
         return {
             "data": {
                 "items": [],
@@ -2119,9 +2204,22 @@ async def search_manga(
         normalized_language = "all"
     should_attach_latest = bool(attach_latest) and normalized_language == "vi"
     offset = (page - 1) * limit
+    normalized_sort = str(sort or "relevance").strip().lower()
+    if normalized_sort not in {"relevance", "latest", "popular", "updated", "title"}:
+        normalized_sort = "relevance"
+    normalized_content_ratings = [
+        rating
+        for rating in (
+            str(value or "").strip().lower()
+            for value in (content_ratings or ["safe", "suggestive", "erotica", "pornographic"])
+        )
+        if rating in {"safe", "suggestive", "erotica", "pornographic"}
+    ] or ["safe", "suggestive"]
     cache_key = (
         f"mangadex:search:{normalized_keyword.lower()}:{page}:{limit}:"
-        f"lang={normalized_language}:latest={1 if should_attach_latest else 0}"
+        f"lang={normalized_language}:latest={1 if should_attach_latest else 0}:"
+        f"tags={','.join(tag_ids)}:status={','.join(normalized_statuses)}:"
+        f"sort={normalized_sort}:rating={','.join(normalized_content_ratings)}"
     )
     cached = cache.get(cache_key)
     if cached:
@@ -2149,15 +2247,31 @@ async def search_manga(
         "includes[]": ["author", "artist", "cover_art"],
         "limit": limit,
         "offset": offset,
-        "contentRating[]": ["safe", "suggestive", "erotica", "pornographic"],
+        "contentRating[]": normalized_content_ratings,
     }
     if normalized_language not in {"all", "non_vi"}:
         params["availableTranslatedLanguage[]"] = normalized_language
+    if tag_ids:
+        params["includedTags[]"] = tag_ids
+        params["includedTagsMode"] = "AND"
+    if normalized_statuses:
+        params["status[]"] = normalized_statuses
     if is_mangadex_tag:
         params["order[latestUploadedChapter]"] = "desc"
+    elif normalized_sort == "latest":
+        params["order[latestUploadedChapter]"] = "desc"
+    elif normalized_sort == "updated":
+        params["order[updatedAt]"] = "desc"
+    elif normalized_sort == "popular":
+        params["order[followedCount]"] = "desc"
+    elif normalized_sort == "title":
+        params["order[title]"] = "asc"
     else:
-        params["title"] = normalized_keyword
-        params["order[relevance]"] = "desc"
+        if normalized_keyword:
+            params["title"] = normalized_keyword
+            params["order[relevance]"] = "desc"
+        else:
+            params["order[latestUploadedChapter]"] = "desc"
 
     try:
         payload = await _request_json("/manga", params)
