@@ -1657,7 +1657,8 @@ const BrowseManga = () => {
   const useMangaDexServerSearchMode =
     isMangaDexSourceTab &&
     filters.sort !== 'rating' &&
-    !hasLocalClientFilters;
+    !hasLocalClientFilters &&
+    hasSearch;
   const mangaDexServerSearchGenreSlugs = useMemo(
     () => Array.from(new Set(filters.genres.map((slug) => toSlug(slug)).filter(Boolean))),
     [filters.genres],

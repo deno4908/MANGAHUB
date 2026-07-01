@@ -1038,8 +1038,9 @@ async def get_stats(user=Depends(get_current_user), db=Depends(get_supabase)):
     tz = ZoneInfo("Asia/Ho_Chi_Minh")
     now_local = datetime.now(timezone.utc).astimezone(tz)
 
-    # Build 7-day window (oldest -> newest)
-    dates = [(now_local.date() - timedelta(days=i)) for i in range(6, -1, -1)]
+    # Build current calendar week in local time: Monday -> Sunday.
+    week_start = now_local.date() - timedelta(days=now_local.date().weekday())
+    dates = [week_start + timedelta(days=i) for i in range(7)]
     counts_by_day = {d.isoformat(): 0 for d in dates}
 
     start_local = datetime.combine(dates[0], datetime.min.time(), tzinfo=tz)

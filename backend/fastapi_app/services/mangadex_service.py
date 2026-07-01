@@ -2184,6 +2184,19 @@ async def search_manga(
         )
         if status in {"ongoing", "completed", "hiatus", "cancelled"}
     ]
+    if not normalized_keyword and not tag_ids and not normalized_statuses:
+        return {
+            "data": {
+                "items": [],
+                "params": {
+                    "pagination": {
+                        "totalItems": 0,
+                        "totalItemsPerPage": limit,
+                        "currentPage": page,
+                    }
+                },
+            }
+        }
     page = max(1, int(page))
     limit = max(1, min(100, int(limit)))
     normalized_language = str(translated_language or "vi").strip().lower()

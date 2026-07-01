@@ -720,12 +720,7 @@ const OverviewTab = ({ user, stats, followedManga, historyItems }: { user: any; 
   const statsWeeklyActivity = Array.isArray(rawStatsWeeklyActivity)
     ? rawStatsWeeklyActivity.map((value: unknown) => Math.max(0, Number(value) || 0)).slice(-7)
     : [];
-  const activityLabels = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date();
-    date.setDate(date.getDate() - (6 - index));
-    const day = date.getDay();
-    return day === 0 ? 'CN' : `T${day + 1}`;
-  });
+  const activityLabels = ['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'];
   const displayedWeeklyActivity =
     statsWeeklyActivity.length === 7 ? statsWeeklyActivity : weeklyActivity;
   const displayedLabels =
