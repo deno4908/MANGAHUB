@@ -8,6 +8,8 @@ import {
   hasSessionHint,
   notificationApi,
   shouldStopRestoringSession,
+  wasLastRefreshFailureHard,
+  wasLastRefreshFailureMissingToken,
 } from '@/lib/api';
 
 type AvatarCropArea = {
@@ -92,7 +94,14 @@ function scheduleRestoreRetry(loadUser: () => Promise<void>, delayMs = 15_000) {
 }
 
 function shouldKeepRestoringSession() {
-  return hasSessionHint() && !shouldStopRestoringSession();
+  if (!wasLastRefreshFailureHard()) return hasSessionHint();
+  if (wasLastRefreshFailureMissingToken() && !hasSessionHint()) return false;
+  return !shouldStopRestoringSession();
+}
+
+function shouldRetryRefreshRestore() {
+  if (!wasLastRefreshFailureHard()) return true;
+  return shouldKeepRestoringSession();
 }
 
 const initialHasSessionHint = hasSessionHint();
@@ -173,7 +182,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
       if (!getAccessToken()) {
         const refreshed = await authApi.refresh();
         if (!refreshed) {
-          if (!shouldKeepRestoringSession()) {
+          if (!shouldRetryRefreshRestore()) {
             clearRestoreRetry();
             clearTokens();
             set({
@@ -189,7 +198,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
             user: null,
             isLoggedIn: true,
             isRestoringSession: true,
-            lastAuthRestoreError: 'refresh-pending',
+            lastAuthRestoreError: wasLastRefreshFailureHard() ? 'refresh-pending' : 'refresh-retryable',
           });
           scheduleRestoreRetry(() => get().loadUser({ force: true }), 3_000);
           return;
@@ -264,7 +273,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
           msg.toLowerCase().includes('token expired');
 
         if (isAuthFailure) {
-          if (!shouldKeepRestoringSession()) {
+          if (!shouldRetryRefreshRestore()) {
             clearRestoreRetry();
             clearTokens();
             set({

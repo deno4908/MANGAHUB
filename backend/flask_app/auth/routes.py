@@ -1300,6 +1300,31 @@ def refresh_token():
         message = str(e)
         normalized = message.lower()
         if "already used" in normalized or "reuse" in normalized:
+            try:
+                cached_session = _wait_for_cached_refresh_result(_refresh_token_cache_key(refresh_token))
+                if cached_session and _refresh_payload_is_fresh(cached_session):
+                    cached_access_token = str(cached_session.get("access_token") or "")
+                    cached_payload = _decode_access_token_payload(cached_access_token)
+                    cached_user_id = str(cached_payload.get("sub") or "").strip()
+                    if presented_user_id and cached_user_id and presented_user_id != cached_user_id:
+                        return jsonify({"error": "Refresh token không khớp phiên đăng nhập"}), 401
+
+                    cached_profile = presented_profile if presented_user_id == cached_user_id else {}
+                    if cached_user_id and not cached_profile:
+                        cached_profile = _fetch_session_profile(cached_user_id)
+                    if cached_profile.get("is_banned"):
+                        return jsonify({"error": "Tài khoản đã bị cấm"}), 403
+                    if _is_access_token_revoked(cached_access_token, cached_profile):
+                        return jsonify({"error": "Phiên đăng nhập cần xác thực lại"}), 401
+
+                    return _json({
+                        "session": {
+                            "access_token": cached_access_token,
+                            "expires_at": cached_session.get("expires_at"),
+                        }
+                    }, 200, refresh_token=cached_session.get("refresh_token") or "")
+            except Exception:
+                pass
             return _json({
                 "error": "Refresh đang được xử lý, vui lòng thử lại",
                 "requires_retry": True,
