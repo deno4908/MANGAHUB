@@ -93,6 +93,9 @@ _MANGADEX_LOCAL_VIEWED_INJECT_LIMIT = 48
 _MANGADEX_POPULAR_LOCAL_VIEW_LIMIT = 500
 _MANGADEX_LOCAL_VIEWED_LOOKUP_CONCURRENCY = 2
 _MANGADEX_LOCAL_VIEWED_LOOKUP_TIMEOUT_SECONDS = 8.0
+_MANGADEX_RATING_SORT_CANDIDATE_LIMIT = _env_int("MANGADEX_RATING_SORT_CANDIDATE_LIMIT", 300, minimum=48)
+_MANGADEX_RATING_SORT_MAX_CANDIDATES = _env_int("MANGADEX_RATING_SORT_MAX_CANDIDATES", 600, minimum=100)
+_MANGADEX_RATING_SORT_PAGE_SIZE = 100
 VIEW_DEDUP_SECONDS = 15 * 60
 VIEW_DB_DEDUP_SECONDS = 15 * 60
 VIEW_BURST_LIMIT_PER_MINUTE = 180
@@ -1074,11 +1077,19 @@ def _attach_ratings_to_items(payload: Any, db: Any, user: dict | None = None) ->
     if not isinstance(items, list) or not items:
         return
 
+    item_lookup_keys: dict[str, list[str]] = {}
     slugs: list[str] = []
     for item in items:
         slug = str((item or {}).get("slug") or "").strip()
-        if slug:
-            slugs.append(slug)
+        if not slug:
+            continue
+        lookup_keys = [slug]
+        manga_id = _extract_mangadex_id(slug)
+        if manga_id:
+            lookup_keys.extend([manga_id, f"mdx-{manga_id}"])
+        lookup_keys = list(dict.fromkeys(key for key in lookup_keys if key))
+        item_lookup_keys[slug] = lookup_keys
+        slugs.extend(lookup_keys)
     slugs = list(dict.fromkeys(slugs))
     if not slugs:
         return
@@ -1107,7 +1118,12 @@ def _attach_ratings_to_items(payload: Any, db: Any, user: dict | None = None) ->
 
     for item in items:
         slug = str((item or {}).get("slug") or "").strip()
-        avg, count = agg.get(slug, (0.0, 0))
+        lookup_keys = item_lookup_keys.get(slug) or [slug]
+        avg, count = 0.0, 0
+        for lookup_key in lookup_keys:
+            avg, count = agg.get(lookup_key, (0.0, 0))
+            if count > 0:
+                break
         if count <= 0:
             item["rating_average"] = 0
             item["rating_count"] = 0
@@ -1118,7 +1134,10 @@ def _attach_ratings_to_items(payload: Any, db: Any, user: dict | None = None) ->
         item["rating_average"] = avg
         item["rating_count"] = count
         if user:
-            item["my_rating"] = my_scores.get(slug)
+            item["my_rating"] = next(
+                (my_scores.get(lookup_key) for lookup_key in lookup_keys if lookup_key in my_scores),
+                None,
+            )
 
 
 async def _async_attach_ratings_to_items(payload: Any, db: Any, user: dict | None = None) -> None:
@@ -2126,6 +2145,123 @@ def _sort_mangadex_items_by_local_views_first(items: list[dict[str, Any]]) -> li
     return [item for _, item in decorated]
 
 
+_MANGADEX_TAG_ALIAS_TO_SLUG = {
+    "xuyen-khong": "isekai",
+    "chuyen-sinh": "reincarnation",
+    "tinh-cam": "romance",
+    "ngon-tinh": "romance",
+    "lang-man": "romance",
+    "hai-huoc": "comedy",
+    "hanh-dong": "action",
+    "phieu-luu": "adventure",
+    "kinh-di": "horror",
+    "doi-thuong": "slice-of-life",
+    "the-thao": "sports",
+    "hoc-duong": "school-life",
+    "lich-su": "historical",
+    "tam-ly": "psychological",
+    "bi-an": "mystery",
+    "vo-thuat": "martial-arts",
+    "sieu-nhien": "supernatural",
+    "khoa-hoc-vien-tuong": "sci-fi",
+}
+
+
+def _mangadex_tag_slug(value: Any) -> str:
+    normalized = _normalize_loose_text(value)
+    if not normalized:
+        normalized = str(value or "").strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+    return _MANGADEX_TAG_ALIAS_TO_SLUG.get(slug, slug)
+
+
+def _mangadex_lookup_matches_search_filters(
+    manga: dict[str, Any],
+    *,
+    keyword: str,
+    translated_language: str,
+    genre_values: list[str],
+    original_language_values: list[str],
+    status_values: list[str],
+    content_ratings: list[str],
+) -> bool:
+    normalized_language = str(translated_language or "").strip().lower()
+    if normalized_language and normalized_language not in {"all", "any", "*", "non_vi"}:
+        available = {
+            str(language or "").strip().lower()
+            for language in (manga.get("available_translated_languages") or [])
+            if str(language or "").strip()
+        }
+        if normalized_language not in available:
+            return False
+
+    normalized_content_rating = str(manga.get("content_rating") or "").strip().lower()
+    if content_ratings and normalized_content_rating not in set(content_ratings):
+        return False
+
+    normalized_status = str(manga.get("status") or "").strip().lower()
+    if status_values and normalized_status not in set(status_values):
+        return False
+
+    normalized_original_language = str(manga.get("original_language") or "").strip().lower()
+    if original_language_values and normalized_original_language not in set(original_language_values):
+        return False
+
+    if genre_values:
+        required_slugs = {
+            _mangadex_tag_slug(value)
+            for value in genre_values
+            if _mangadex_tag_slug(value)
+        }
+        manga_tag_slugs = {
+            _mangadex_tag_slug(value)
+            for value in (manga.get("genres") or [])
+            if _mangadex_tag_slug(value)
+        }
+        if required_slugs and not required_slugs.issubset(manga_tag_slugs):
+            return False
+
+    normalized_keyword = _normalize_loose_text(keyword)
+    if normalized_keyword:
+        haystack_parts: list[str] = [
+            str(manga.get("title") or ""),
+            str(manga.get("description") or ""),
+            str(manga.get("authors_text") or ""),
+            " ".join(str(value or "") for value in (manga.get("genres") or [])),
+        ]
+        haystack = _normalize_loose_text(" ".join(haystack_parts))
+        if normalized_keyword not in haystack:
+            return False
+
+    return True
+
+
+def _parse_sort_timestamp(value: Any) -> float:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _sort_mangadex_items_by_rating(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decorated = list(enumerate(items))
+    decorated.sort(
+        key=lambda entry: (
+            -_safe_float((entry[1] or {}).get("rating_average") or (entry[1] or {}).get("average_rating")),
+            -_safe_int((entry[1] or {}).get("rating_count") or (entry[1] or {}).get("ratings_count")),
+            -_safe_int((entry[1] or {}).get("views") or (entry[1] or {}).get("view_count")),
+            -_parse_sort_timestamp(
+                (entry[1] or {}).get("local_last_published_at") or (entry[1] or {}).get("updatedAt")
+            ),
+            entry[0],
+        )
+    )
+    return [item for _, item in decorated]
+
+
 def _legacy_mangadex_search_item_from_lookup(manga: dict[str, Any], views: int) -> dict[str, Any]:
     manga_id = str(manga.get("id") or "").strip().lower()
     genres = [str(genre or "").strip() for genre in (manga.get("genres") or []) if str(genre or "").strip()]
@@ -2175,10 +2311,29 @@ async def _resolve_local_viewed_mangadex_search_rows(
     *,
     offset: int,
     limit: int,
-) -> list[dict[str, Any]]:
-    target = ranked[offset: offset + limit]
-    if not target:
-        return []
+    keyword: str = "",
+    translated_language: str = "all",
+    genre_values: list[str] | None = None,
+    original_language_values: list[str] | None = None,
+    status_values: list[str] | None = None,
+    content_ratings: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    filtering_required = bool(
+        str(keyword or "").strip()
+        or (genre_values or [])
+        or (original_language_values or [])
+        or (status_values or [])
+        or str(translated_language or "").strip().lower() not in {"", "all", "any", "*"}
+    )
+
+    if not filtering_required:
+        if limit <= 0:
+            return [], len(ranked)
+        target = ranked[offset: offset + limit]
+        if not target:
+            return [], len(ranked)
+    else:
+        target = ranked
 
     semaphore = asyncio.Semaphore(max(1, _MANGADEX_LOCAL_VIEWED_LOOKUP_CONCURRENCY))
 
@@ -2194,15 +2349,38 @@ async def _resolve_local_viewed_mangadex_search_rows(
             manga = (lookup_payload or {}).get("manga") if isinstance(lookup_payload, dict) else None
             if not isinstance(manga, dict):
                 return None
+            if filtering_required and not _mangadex_lookup_matches_search_filters(
+                manga,
+                keyword=keyword,
+                translated_language=translated_language,
+                genre_values=genre_values or [],
+                original_language_values=original_language_values or [],
+                status_values=status_values or [],
+                content_ratings=content_ratings or [],
+            ):
+                return None
             manga = dict(manga)
             manga["id"] = manga_id
             return _legacy_mangadex_search_item_from_lookup(manga, views)
 
-    resolved = await asyncio.gather(
-        *[_resolve(manga_id, views) for manga_id, views in target],
-        return_exceptions=True,
-    )
-    return [item for item in resolved if isinstance(item, dict)]
+    if not filtering_required:
+        resolved = await asyncio.gather(
+            *[_resolve(manga_id, views) for manga_id, views in target],
+            return_exceptions=True,
+        )
+        return [item for item in resolved if isinstance(item, dict)], len(ranked)
+
+    matched: list[dict[str, Any]] = []
+    batch_size = max(1, _MANGADEX_LOCAL_VIEWED_LOOKUP_CONCURRENCY * 4)
+    for start in range(0, len(target), batch_size):
+        batch = target[start: start + batch_size]
+        resolved = await asyncio.gather(
+            *[_resolve(manga_id, views) for manga_id, views in batch],
+            return_exceptions=True,
+        )
+        matched.extend(item for item in resolved if isinstance(item, dict))
+
+    return matched[offset: offset + limit], len(matched)
 
 
 async def _fetch_mangadex_latest_search_fill(
@@ -2291,15 +2469,34 @@ async def _build_mangadex_popular_with_local_views(
     ranked_ids = {manga_id for manga_id, _ in ranked}
 
     local_rows: list[dict[str, Any]] = []
+    local_match_count = len(ranked)
     if offset < len(ranked):
-        local_rows = await _resolve_local_viewed_mangadex_search_rows(
+        local_rows, local_match_count = await _resolve_local_viewed_mangadex_search_rows(
             ranked,
             offset=offset,
             limit=limit,
+            keyword=keyword,
+            translated_language=translated_language,
+            genre_values=genre_values,
+            original_language_values=original_language_values,
+            status_values=status_values,
+            content_ratings=content_ratings,
+        )
+    elif genre_values or original_language_values or status_values or str(keyword or "").strip():
+        _, local_match_count = await _resolve_local_viewed_mangadex_search_rows(
+            ranked,
+            offset=0,
+            limit=0,
+            keyword=keyword,
+            translated_language=translated_language,
+            genre_values=genre_values,
+            original_language_values=original_language_values,
+            status_values=status_values,
+            content_ratings=content_ratings,
         )
 
-    fill_offset = max(0, offset - len(ranked))
-    if offset < len(ranked):
+    fill_offset = max(0, offset - local_match_count)
+    if offset < local_match_count:
         fill_offset = 0
     fill_limit = max(0, limit - len(local_rows))
     latest_rows, upstream_total = await _fetch_mangadex_latest_search_fill(
@@ -2334,7 +2531,7 @@ async def _build_mangadex_popular_with_local_views(
     payload = {"mangas": items}
     await _async_attach_local_views_to_mangadex_payload(payload, db)
 
-    total = max(upstream_total, len(ranked))
+    total = max(upstream_total, local_match_count)
     return {
         "data": {
             "items": payload.get("mangas") or [],
@@ -2347,6 +2544,91 @@ async def _build_mangadex_popular_with_local_views(
             },
         }
     }
+
+
+async def _build_mangadex_rating_search(
+    *,
+    keyword: str,
+    page: int,
+    limit: int,
+    translated_language: str,
+    genre_values: list[str],
+    original_language_values: list[str],
+    status_values: list[str],
+    content_ratings: list[str],
+    hidden: dict[str, str],
+    user: dict | None,
+    db: Any,
+) -> dict[str, Any]:
+    offset = (max(1, page) - 1) * limit
+    candidate_target = min(
+        _MANGADEX_RATING_SORT_MAX_CANDIDATES,
+        max(_MANGADEX_RATING_SORT_CANDIDATE_LIMIT, offset + limit),
+    )
+    upstream_limit = max(24, min(100, _MANGADEX_RATING_SORT_PAGE_SIZE))
+    max_pages = max(1, math.ceil(candidate_target / upstream_limit))
+
+    collected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    upstream_total = 0
+
+    for upstream_page in range(1, max_pages + 1):
+        payload = await mangadex_service.search_manga(
+            keyword=keyword,
+            page=upstream_page,
+            limit=upstream_limit,
+            translated_language=translated_language,
+            attach_latest=True,
+            included_tag_slugs=genre_values,
+            included_tags_mode="AND",
+            original_languages=original_language_values,
+            statuses=status_values,
+            sort="latest",
+            content_ratings=content_ratings,
+        )
+        page_data = payload.get("data") or {}
+        pagination = (page_data.get("params") or {}).get("pagination") or {}
+        upstream_total = max(upstream_total, _safe_int(pagination.get("totalItems")))
+        page_items = page_data.get("items") or []
+        if not isinstance(page_items, list) or not page_items:
+            break
+
+        for item in page_items:
+            manga_id = _extract_mangadex_id((item or {}).get("slug") or (item or {}).get("id"))
+            if not manga_id or manga_id in seen:
+                continue
+            if hidden and _hidden_reason_for_slug(hidden, manga_id):
+                continue
+            seen.add(manga_id)
+            collected.append(item)
+            if len(collected) >= candidate_target:
+                break
+
+        if len(collected) >= candidate_target or len(page_items) < upstream_limit:
+            break
+
+    local_payload = {"mangas": collected}
+    await _async_attach_local_views_to_mangadex_payload(local_payload, db)
+    collected = local_payload.get("mangas") or []
+
+    rating_payload = {
+        "data": {
+            "items": collected,
+            "params": {
+                "pagination": {
+                    "totalItems": upstream_total,
+                    "totalItemsPerPage": limit,
+                    "currentPage": page,
+                }
+            },
+        }
+    }
+    await _async_attach_ratings_to_items(rating_payload, db, user)
+    sorted_items = _sort_mangadex_items_by_rating((rating_payload.get("data") or {}).get("items") or [])
+    paged_items = sorted_items[offset: offset + limit]
+    rating_payload["data"]["items"] = paged_items
+    rating_payload["data"]["params"]["pagination"]["totalItems"] = max(upstream_total, len(sorted_items))
+    return rating_payload
 
 
 async def _async_inject_local_viewed_mangadex_rows(
@@ -3711,23 +3993,19 @@ async def mangadex_search(
         if show_mature
         else ["safe", "suggestive"]
     )
+    effective_translated_language = "vi" if genre_values else translated_language
     hidden: dict[str, str] = {}
     if filter_hidden:
         hidden = await _get_hidden_slugs(db)
 
-    is_default_popular = (
-        str(sort or "").strip().lower() == "popular"
-        and not str(keyword or "").strip()
-        and not genre_values
-        and not original_language_values
-        and not status_values
-    )
-    if is_default_popular:
+    normalized_sort = str(sort or "").strip().lower()
+    uses_popular_builder = normalized_sort == "popular"
+    if uses_popular_builder:
         data = await _build_mangadex_popular_with_local_views(
             keyword=keyword,
             page=page,
             limit=limit,
-            translated_language=translated_language,
+            translated_language=effective_translated_language,
             genre_values=genre_values,
             original_language_values=original_language_values,
             status_values=status_values,
@@ -3735,12 +4013,26 @@ async def mangadex_search(
             hidden=hidden,
             db=db,
         )
+    elif normalized_sort == "rating":
+        data = await _build_mangadex_rating_search(
+            keyword=keyword,
+            page=page,
+            limit=limit,
+            translated_language=effective_translated_language,
+            genre_values=genre_values,
+            original_language_values=original_language_values,
+            status_values=status_values,
+            content_ratings=content_ratings,
+            hidden=hidden,
+            user=user,
+            db=db,
+        )
     else:
         data = await mangadex_service.search_manga(
             keyword=keyword,
             page=page,
             limit=limit,
-            translated_language=translated_language,
+            translated_language=effective_translated_language,
             attach_latest=True,
             included_tag_slugs=genre_values,
             included_tags_mode="AND",
@@ -3760,11 +4052,9 @@ async def mangadex_search(
     payload = {"mangas": items}
     await _async_attach_local_views_to_mangadex_payload(payload, db)
     items = payload.get("mangas") or []
-    if str(sort or "").strip().lower() == "popular" and not is_default_popular:
-        items = _sort_mangadex_items_by_local_views_first(items)
     data.setdefault("data", {})["items"] = items
 
-    if attach_ratings:
+    if attach_ratings and normalized_sort != "rating":
         await _async_attach_ratings_to_items(data, db, user)
 
     return data

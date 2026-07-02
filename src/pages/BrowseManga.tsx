@@ -1645,8 +1645,6 @@ const BrowseManga = () => {
     filters.minRating <= 0 &&
     !useOTruyenCategory;
 
-  const useGlobalTopRatedMode = filters.sort === 'rating';
-
   // Local-only filters (year/minRating) are client-side; pagination must follow filtered results.
   const hasLocalClientFilters = Boolean(filters.year) || filters.minRating > 0;
   const mangaDexHasNarrowClientFilters =
@@ -1668,9 +1666,14 @@ const BrowseManga = () => {
     hasSearch ||
     filters.genres.length > 0 ||
     Boolean(filters.status);
+  const useMangaDexServerRatingMode =
+    isMangaDexSourceTab &&
+    filters.sort === 'rating' &&
+    !hasLocalClientFilters &&
+    mangaDexHasServerQueryableFilters;
+  const useGlobalTopRatedMode = filters.sort === 'rating' && !useMangaDexServerRatingMode;
   const useMangaDexServerSearchMode =
     isMangaDexSourceTab &&
-    filters.sort !== 'rating' &&
     !hasLocalClientFilters &&
     !useMangaDexLatestFeedMode &&
     (
@@ -1686,6 +1689,8 @@ const BrowseManga = () => {
     () =>
       filters.sort === 'popular'
         ? 'popular'
+        : filters.sort === 'rating'
+          ? 'rating'
         : filters.sort === 'alphabetical'
           ? 'title'
           : 'latest',
@@ -1721,7 +1726,7 @@ const BrowseManga = () => {
         status: filters.status || '',
         sort: mangaDexServerSearchSort,
         showMature: showMatureContent,
-        attachRatings: false,
+        attachRatings: filters.sort === 'rating',
         filterHidden: true,
         timeoutMs: 12_000,
       });
@@ -1733,6 +1738,7 @@ const BrowseManga = () => {
       filters.status,
       mangaDexServerSearchSort,
       showMatureContent,
+      filters.sort,
     ],
   );
   const mangaDexInitialDemandLimit = mangaDexHasNarrowClientFilters
@@ -1927,7 +1933,6 @@ const BrowseManga = () => {
     refetchOnReconnect: false,
     retry: 1,
     retryDelay: 1200,
-    placeholderData: (previousData) => previousData,
   });
 
   const getMangaDexLatestFeedQueryKey = useCallback(

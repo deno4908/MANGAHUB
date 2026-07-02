@@ -6,6 +6,57 @@ import { Manga } from '@/types/manga';
 import OptimizedImage from '@/components/ui/OptimizedImage';
 import { getMangaDetailPath, normalizeMangaDexId } from '@/lib/mangaLinks';
 
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const DEFAULT_COVER_FALLBACK = '/no-cover.svg';
+
+const isImageProxyUrl = (value: string): boolean => {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+  try {
+    return new URL(raw, API_BASE).pathname === '/api/images/img';
+  } catch {
+    return false;
+  }
+};
+
+const isMangaDexImageUrl = (value: string): boolean => {
+  const raw = String(value || '').trim();
+  if (!/^https?:\/\//i.test(raw)) return false;
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host.endsWith('uploads.mangadex.org') || host.endsWith('mangadex.network');
+  } catch {
+    return false;
+  }
+};
+
+const toMangaDexProxyImageUrl = (value: string): string => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (isImageProxyUrl(raw)) return raw;
+  if (!isMangaDexImageUrl(raw)) return '';
+  return `${API_BASE}/api/images/img?url=${encodeURIComponent(raw)}`;
+};
+
+const resolveMangaDexHeroCover = (cover?: string, fallback?: string): string => {
+  const candidates = [cover, fallback].map((value) => String(value || '').trim()).filter(Boolean);
+  const proxied = candidates.find(isImageProxyUrl);
+  if (proxied) return proxied;
+
+  for (const candidate of candidates) {
+    const proxiedCandidate = toMangaDexProxyImageUrl(candidate);
+    if (proxiedCandidate) return proxiedCandidate;
+  }
+
+  return candidates[0] || DEFAULT_COVER_FALLBACK;
+};
+
+const resolveMangaDexCurrentCover = (mangaId?: string): string => {
+  const normalized = normalizeMangaDexId(String(mangaId || '').trim());
+  if (!normalized) return '';
+  return `${API_BASE}/api/manga/mangadex-cover/${encodeURIComponent(normalized)}`;
+};
+
 const HeroSlider = ({ manga }: { manga: Manga[] }) => {
   const [current, setCurrent] = useState(0);
   const items = manga.slice(0, 5);
@@ -18,7 +69,15 @@ const HeroSlider = ({ manga }: { manga: Manga[] }) => {
   const m = items[current];
   if (!m) return null;
 
-  const isMangaDexManga = !!normalizeMangaDexId(m.id);
+  const mangaDexId = normalizeMangaDexId(m.id);
+  const isMangaDexManga = !!mangaDexId;
+  const mangaDexFallbackCover = resolveMangaDexHeroCover(m.cover, m.coverProxy);
+  const heroCoverSrc = isMangaDexManga
+    ? (resolveMangaDexCurrentCover(m.id) || mangaDexFallbackCover)
+    : m.cover;
+  const heroCoverFallbackSrc = isMangaDexManga
+    ? mangaDexFallbackCover
+    : (String(m.coverProxy || '').trim() || DEFAULT_COVER_FALLBACK);
   const chapterCandidates = (m.chapters || []).filter((chapter) => {
     const chapterId = String(chapter?.id || '').trim();
     if (!chapterId) return false;
@@ -56,10 +115,10 @@ const HeroSlider = ({ manga }: { manga: Manga[] }) => {
     <div className="relative w-full h-[320px] md:h-[420px] rounded-lg overflow-hidden group border border-border">
       <AnimatePresence mode="wait">
         <motion.div key={m.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.5 }} className="absolute inset-0">
-          <OptimizedImage src={m.cover} alt={m.title} className="w-full h-full object-cover scale-115 blur-[2px] opacity-85" priority />
+          <OptimizedImage src={heroCoverSrc} fallbackSrc={heroCoverFallbackSrc} fallbackDelayMs={isMangaDexManga ? 12000 : undefined} maxRetries={isMangaDexManga ? 5 : 2} alt={m.title} className="w-full h-full object-cover scale-115 blur-[2px] opacity-85" priority />
           <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.10)_0%,rgba(255,255,255,0)_70%)]" />
           <div className="absolute inset-0 p-0 md:p-1">
-            <OptimizedImage src={m.cover} alt={m.title} className="w-full h-full object-contain scale-[1.03] brightness-95 saturate-100 drop-shadow-[0_10px_30px_rgba(0,0,0,0.35)]" priority />
+            <OptimizedImage src={heroCoverSrc} fallbackSrc={heroCoverFallbackSrc} fallbackDelayMs={isMangaDexManga ? 12000 : undefined} maxRetries={isMangaDexManga ? 5 : 2} alt={m.title} className="w-full h-full object-contain scale-[1.03] brightness-95 saturate-100 drop-shadow-[0_10px_30px_rgba(0,0,0,0.35)]" priority />
           </div>
           <div className="absolute inset-0 bg-gradient-to-r from-foreground/84 via-foreground/62 to-transparent" />
           <div className="absolute inset-0 bg-gradient-to-t from-foreground/52 via-transparent to-transparent" />
