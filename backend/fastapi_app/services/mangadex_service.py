@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -20,6 +21,10 @@ except Exception:  # pragma: no cover - fallback to httpx-only mode
 logger = logging.getLogger(__name__)
 
 _CHAPTER_NUMBER_RE = re.compile(r"(\d+(?:[\.,]\d+)?)")
+_MANGADEX_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 BASE_URL = "https://api.mangadex.org"
@@ -72,6 +77,9 @@ THROTTLE_BACKOFF_SECONDS = _env_float(
 )
 THROTTLE_GLOBAL_COOLDOWN_SECONDS = _env_float(
     "MANGADEX_THROTTLE_GLOBAL_COOLDOWN_SECONDS", 2.5, minimum=0.0
+)
+THROTTLE_ENHANCE_YOUR_CALM_COOLDOWN_SECONDS = _env_float(
+    "MANGADEX_ENHANCE_YOUR_CALM_COOLDOWN_SECONDS", 45.0, minimum=5.0
 )
 
 _http_client: httpx.AsyncClient | None = None
@@ -156,6 +164,12 @@ VI_CATALOG_POPULAR_FIRST_CHAPTER_BUDGET = _env_int(
     "MANGADEX_VI_CATALOG_POPULAR_FIRST_CHAPTER_BUDGET", 300, minimum=0
 )
 MANGADEX_POPULARITY_SCORE_BASE = 1_000_000
+LATEST_FEED_CHAPTER_PAGE_SIZE = _env_int(
+    "MANGADEX_LATEST_FEED_CHAPTER_PAGE_SIZE", 100, minimum=24
+)
+LATEST_FEED_MAX_BATCHES = _env_int(
+    "MANGADEX_LATEST_FEED_MAX_BATCHES", 30, minimum=2
+)
 
 
 class _MangaDexStatusError(RuntimeError):
@@ -658,6 +672,7 @@ async def _request_json(path: str, params: dict[str, Any] | None = None) -> dict
 
     for attempt in range(REQUEST_RETRIES):
         saw_throttle_signal = False
+        saw_hard_throttle_signal = False
         status_retry_delay: float | None = None
         for transport in transports:
             try:
@@ -684,6 +699,12 @@ async def _request_json(path: str, params: dict[str, Any] | None = None) -> dict
                     or "429" in error_text
                 ):
                     saw_throttle_signal = True
+                    if "ENHANCE_YOUR_CALM" in error_text or "curl: (92)" in error_text:
+                        saw_hard_throttle_signal = True
+                        _throttle_until_ts = max(
+                            _throttle_until_ts,
+                            time.monotonic() + THROTTLE_ENHANCE_YOUR_CALM_COOLDOWN_SECONDS,
+                        )
                 if transport == TRANSPORT_HTTPX:
                     await _reset_client()
                 else:
@@ -696,6 +717,9 @@ async def _request_json(path: str, params: dict[str, Any] | None = None) -> dict
             )
             await asyncio.sleep(status_retry_delay)
             continue
+
+        if saw_hard_throttle_signal:
+            break
 
         if attempt < REQUEST_RETRIES - 1:
             retry_delay = REQUEST_RETRY_BACKOFF_SECONDS * (attempt + 1)
@@ -826,6 +850,8 @@ async def _resolve_mangadex_tag_ids(slugs: list[str] | None) -> list[str]:
         tag_map = await _get_mangadex_tag_id_by_slug()
     except Exception:
         return []
+    if any(slug in {"all", "any", "*"} for slug in normalized):
+        return list(dict.fromkeys(str(tag_id) for tag_id in tag_map.values() if tag_id))
     return [tag_map[slug] for slug in normalized if slug in tag_map]
 
 
@@ -2141,6 +2167,192 @@ async def get_latest_vi_chapters_for_manga_ids(
     )
 
 
+async def get_latest_vi_chapter_feed(
+    page: int = 1,
+    limit: int = 24,
+    *,
+    content_ratings: list[str] | None = None,
+    excluded_manga_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return latest MangaDex VI updates as unique manga pages.
+
+    MangaDex /chapter is chapter-paginated. A single title can publish several
+    chapters at once, so slicing the raw chapter offset creates short pages and
+    repeated manga across page boundaries. Build a unique manga window from the
+    top of the feed first, then slice by manga page.
+    """
+    page = max(1, int(page or 1))
+    limit = max(1, min(24, int(limit or 24)))
+    target_unique = page * limit
+    normalized_content_ratings = [
+        rating
+        for rating in (
+            str(value or "").strip().lower()
+            for value in (content_ratings or ["safe", "suggestive"])
+        )
+        if rating in {"safe", "suggestive", "erotica", "pornographic"}
+    ] or ["safe", "suggestive"]
+    normalized_excluded_ids: set[str] = set()
+    for raw in excluded_manga_ids or []:
+        value = str(raw or "").strip().lower()
+        if value.startswith("mdx-"):
+            value = value[4:]
+        if _MANGADEX_UUID_RE.fullmatch(value):
+            normalized_excluded_ids.add(value)
+    excluded_cache_token = "none"
+    if normalized_excluded_ids:
+        excluded_cache_token = hashlib.sha1(
+            ",".join(sorted(normalized_excluded_ids)).encode("utf-8")
+        ).hexdigest()[:12]
+
+    cache_key = (
+        f"mangadex:latest-vi-feed:v2:{page}:{limit}:"
+        f"rating={','.join(normalized_content_ratings)}:"
+        f"excluded={excluded_cache_token}"
+    )
+    cached = cache.get(cache_key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            cache.delete(cache_key)
+
+    mangas: dict[str, dict[str, Any]] = {}
+    latest_by_manga: dict[str, dict[str, Any]] = {}
+    total = 0
+    offset = 0
+    request_limit = min(100, max(24, int(LATEST_FEED_CHAPTER_PAGE_SIZE or 100)))
+    max_batches = max(2, min(LATEST_FEED_MAX_BATCHES, page * 4 + 4))
+
+    for _ in range(max_batches):
+        payload = await _request_json(
+            "/chapter",
+            {
+                "translatedLanguage[]": "vi",
+                "includes[]": ["user", "scanlation_group", "manga"],
+                "contentRating[]": normalized_content_ratings,
+                "order[readableAt]": "desc",
+                "limit": request_limit,
+                "offset": offset,
+            },
+        )
+        total = max(total, int(payload.get("total") or 0))
+        chapters = payload.get("data") or []
+        if not chapters:
+            break
+
+        for chapter in chapters:
+            attributes = (chapter or {}).get("attributes") or {}
+            if str(attributes.get("translatedLanguage") or "").strip().lower() != "vi":
+                continue
+            relations = _relation_bucket(chapter or {})
+            manga_relations = relations.get("manga") or []
+            if not manga_relations:
+                continue
+            manga_relation = manga_relations[0]
+            manga_id = str(manga_relation.get("id") or "").strip()
+            manga_attributes = manga_relation.get("attributes") or {}
+            if not manga_id or not isinstance(manga_attributes, dict):
+                continue
+            if manga_id.lower() in normalized_excluded_ids:
+                continue
+
+            if manga_id not in mangas:
+                mangas[manga_id] = _parse_manga(
+                    manga_attributes,
+                    manga_id,
+                    authors=[],
+                    artists=[],
+                    cover_url="",
+                )
+
+            scanlation_groups = _parse_scanlation_groups(relations.get("scanlation_group", []))
+            chapter_value = str(attributes.get("chapter") or "").strip()
+            chapter_entry = {
+                "id": str((chapter or {}).get("id") or "").strip(),
+                "chapter": chapter_value,
+                "chapter_with_groups": _build_chapter_with_groups(chapter_value, scanlation_groups),
+                "publish_at": str(attributes.get("publishAt") or ""),
+                "readable_at": str(attributes.get("readableAt") or ""),
+                "created_at": str(attributes.get("createdAt") or ""),
+                "updated_at": str(attributes.get("updatedAt") or ""),
+                "translation_source": "mangadex",
+                "translation_source_label": "MangaDex",
+            }
+            current = latest_by_manga.get(manga_id)
+            if current is None or _is_preferred_latest_chapter(
+                chapter_entry,
+                current,
+                manga_updated_at=str(mangas[manga_id].get("updated_at") or ""),
+            ):
+                latest_by_manga[manga_id] = chapter_entry
+                chapter_time = _pick_chapter_time(
+                    chapter_entry,
+                    manga_updated_at=str(mangas[manga_id].get("updated_at") or ""),
+                )
+                if chapter_time:
+                    mangas[manga_id]["local_last_published_at"] = chapter_time
+
+        if len(mangas) >= target_unique:
+            break
+        offset += len(chapters)
+        if len(chapters) < request_limit or (total and offset >= total):
+            break
+
+    ordered_manga_ids = list(mangas.keys())
+    page_manga_ids = ordered_manga_ids[(page - 1) * limit : page * limit]
+
+    missing_cover_ids = [
+        manga_id
+        for manga_id in page_manga_ids
+        for manga in [mangas.get(manga_id) or {}]
+        if not str(manga.get("cover_url") or "").strip()
+    ]
+    if missing_cover_ids:
+        cover_map = await _fetch_cover_urls_for_manga_ids(missing_cover_ids)
+        for manga_id, cover_url in cover_map.items():
+            if manga_id in mangas and cover_url:
+                mangas[manga_id]["cover_url"] = cover_url
+
+    items: list[dict[str, Any]] = []
+    for manga_id in page_manga_ids:
+        manga = mangas[manga_id]
+        latest = latest_by_manga.get(manga_id) or {}
+        latest_time = _pick_chapter_time(
+            latest,
+            manga_updated_at=str(manga.get("updated_at") or ""),
+        )
+        item = _to_legacy_item(
+            manga,
+            latest_chapter={
+                "chapter_name": str(latest.get("chapter") or ""),
+                "chapter_title": str(latest.get("chapter_with_groups") or ""),
+                "publish_at": latest_time,
+            },
+        )
+        if latest.get("id") and item.get("chaptersLatest"):
+            item["chaptersLatest"][0]["chapter_api_data"] = str(latest.get("id") or "")
+            item["chaptersLatest"][0]["publish_at"] = str(latest.get("readable_at") or latest.get("publish_at") or latest_time)
+            item["chaptersLatest"][0]["updated_at"] = str(latest.get("updated_at") or latest.get("readable_at") or latest.get("publish_at") or latest_time)
+        items.append(item)
+
+    result = {
+        "data": {
+            "items": items,
+            "params": {
+                "pagination": {
+                    "totalItems": total,
+                    "totalItemsPerPage": limit,
+                    "currentPage": page,
+                    "uniqueItemsInWindow": len(ordered_manga_ids),
+                }
+            },
+        }
+    }
+    _cache_payload(cache_key, result, ttl=60)
+    return result
+
+
 async def get_total_vi_manga_count() -> int:
     cache_key = "mangadex:total-vi-manga"
     cached = cache.get(cache_key)
@@ -2170,12 +2382,36 @@ async def search_manga(
     translated_language: str = "vi",
     attach_latest: bool = True,
     included_tag_slugs: list[str] | None = None,
+    included_tags_mode: str = "AND",
+    original_languages: list[str] | None = None,
     statuses: list[str] | None = None,
     sort: str = "relevance",
     content_ratings: list[str] | None = None,
 ) -> dict[str, Any]:
     normalized_keyword = str(keyword or "").strip()
+    page = max(1, int(page))
+    limit = max(1, min(100, int(limit)))
+    normalized_language = str(translated_language or "vi").strip().lower()
+    if normalized_language in {"", "all", "any"}:
+        normalized_language = "all"
+    should_attach_latest = bool(attach_latest) and normalized_language == "vi"
+    offset = (page - 1) * limit
+    normalized_sort = str(sort or "relevance").strip().lower()
+    if normalized_sort not in {"relevance", "latest", "popular", "updated", "title"}:
+        normalized_sort = "relevance"
     tag_ids = await _resolve_mangadex_tag_ids(included_tag_slugs)
+    normalized_tags_mode = str(included_tags_mode or "AND").strip().upper()
+    if normalized_tags_mode not in {"AND", "OR"}:
+        normalized_tags_mode = "AND"
+    normalized_original_languages = [
+        language
+        for language in (
+            str(value or "").strip().lower()
+            for value in (original_languages or [])
+        )
+        if language and language not in {"all", "any", "*"}
+    ]
+    normalized_original_languages = list(dict.fromkeys(normalized_original_languages))
     normalized_statuses = [
         status
         for status in (
@@ -2184,7 +2420,8 @@ async def search_manga(
         )
         if status in {"ongoing", "completed", "hiatus", "cancelled"}
     ]
-    if not normalized_keyword and not tag_ids and not normalized_statuses:
+    allow_empty_catalog_query = normalized_sort in {"latest", "popular", "updated", "title"}
+    if not normalized_keyword and not tag_ids and not normalized_statuses and not allow_empty_catalog_query:
         return {
             "data": {
                 "items": [],
@@ -2197,16 +2434,6 @@ async def search_manga(
                 },
             }
         }
-    page = max(1, int(page))
-    limit = max(1, min(100, int(limit)))
-    normalized_language = str(translated_language or "vi").strip().lower()
-    if normalized_language in {"", "all", "any"}:
-        normalized_language = "all"
-    should_attach_latest = bool(attach_latest) and normalized_language == "vi"
-    offset = (page - 1) * limit
-    normalized_sort = str(sort or "relevance").strip().lower()
-    if normalized_sort not in {"relevance", "latest", "popular", "updated", "title"}:
-        normalized_sort = "relevance"
     normalized_content_ratings = [
         rating
         for rating in (
@@ -2216,9 +2443,10 @@ async def search_manga(
         if rating in {"safe", "suggestive", "erotica", "pornographic"}
     ] or ["safe", "suggestive"]
     cache_key = (
-        f"mangadex:search:{normalized_keyword.lower()}:{page}:{limit}:"
+        f"mangadex:search:v2:{normalized_keyword.lower()}:{page}:{limit}:"
         f"lang={normalized_language}:latest={1 if should_attach_latest else 0}:"
-        f"tags={','.join(tag_ids)}:status={','.join(normalized_statuses)}:"
+        f"tags={','.join(tag_ids)}:tag_mode={normalized_tags_mode}:status={','.join(normalized_statuses)}:"
+        f"orig_lang={','.join(normalized_original_languages)}:"
         f"sort={normalized_sort}:rating={','.join(normalized_content_ratings)}"
     )
     cached = cache.get(cache_key)
@@ -2251,9 +2479,12 @@ async def search_manga(
     }
     if normalized_language not in {"all", "non_vi"}:
         params["availableTranslatedLanguage[]"] = normalized_language
+    if normalized_original_languages:
+        params["originalLanguage[]"] = normalized_original_languages
     if tag_ids:
         params["includedTags[]"] = tag_ids
-        params["includedTagsMode"] = "AND"
+        params["includedTagsMode"] = normalized_tags_mode
+        params["excludedTagsMode"] = "OR"
     if normalized_statuses:
         params["status[]"] = normalized_statuses
     if is_mangadex_tag:
@@ -2263,7 +2494,7 @@ async def search_manga(
     elif normalized_sort == "updated":
         params["order[updatedAt]"] = "desc"
     elif normalized_sort == "popular":
-        params["order[followedCount]"] = "desc"
+        params["order[latestUploadedChapter]"] = "desc"
     elif normalized_sort == "title":
         params["order[title]"] = "asc"
     else:

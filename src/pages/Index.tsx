@@ -11,6 +11,7 @@ import GenreCloud from '@/components/manga/GenreCloud';
 import { AlertTriangle, ArrowRight, Bell, CalendarDays, Wrench, X } from 'lucide-react';
 import { announcementApi, mangaApi, ratingApi, subscribeHomepageRefresh } from '@/lib/api';
 import {
+  adaptListData,
   adaptMangaDetail,
   pickBestTitle as pickBestMangaTitle,
   repairMojibakeText,
@@ -1047,6 +1048,23 @@ const Index = () => {
     isLoading: isInitialMergedLoading,
     refetch: refetchHomepageCombined,
   } = useHomepageCombined(120);
+  const { data: homeBannerData, isLoading: isHomeBannerLoading } = useQuery({
+    queryKey: ['manga', 'home', 'banner', 'mangadex', showMatureContent],
+    queryFn: async () => {
+      const payload = await mangaApi.getMangaDexHomeBanner({
+        limit: 8,
+        showMature: showMatureContent,
+        filterHidden: true,
+        timeoutMs: 8_000,
+      });
+      return adaptListData(payload);
+    },
+    staleTime: 5 * 60 * 1000,
+    gcTime: 15 * 60 * 1000,
+    retry: 1,
+    refetchOnWindowFocus: false,
+    placeholderData: (previousData) => previousData,
+  });
   const { data: announcementData } = useQuery({
     queryKey: ['site-announcements', 'active-home-popup'],
     queryFn: () => announcementApi.getActive(3),
@@ -1152,6 +1170,19 @@ const Index = () => {
   const visibleFeatured = useMemo(
     () => (showMatureContent ? featured : featured.filter((m) => !isMatureManga(m))),
     [featured, showMatureContent],
+  );
+
+  const homeBannerItems = useMemo(
+    () => {
+      const items = homeBannerData?.items || [];
+      const visible = showMatureContent ? items : items.filter((m) => !isMatureManga(m));
+      return visible.filter((m) => {
+        const title = String(m.title || '').trim();
+        const cover = String(m.cover || '').trim();
+        return title && cover && !cover.includes('no-cover');
+      });
+    },
+    [homeBannerData?.items, showMatureContent],
   );
 
   const latestMerged = useMemo(() => {
@@ -1633,7 +1664,7 @@ const Index = () => {
   };
 
   const heroBannerItems = useMemo(() => {
-    const merged = dedupeById([...featuredRated, ...latestMergedRated, ...ongoingMergedRated]);
+    const merged = dedupeById([...featuredRated, ...homeBannerItems, ...latestMergedRated, ...ongoingMergedRated]);
     const visibleForBanner = showMatureContent
       ? merged
       : merged.filter((m) => !isEcchiManga(m));
@@ -1673,7 +1704,7 @@ const Index = () => {
       if (updatedDiff !== 0) return updatedDiff;
       return compareByPopular(a, b);
     });
-  }, [featuredRated, latestMergedRated, ongoingMergedRated, showMatureContent]);
+  }, [featuredRated, homeBannerItems, latestMergedRated, ongoingMergedRated, showMatureContent]);
 
   const { data: trendingPayload, isLoading: isTrendingLoading } = useQuery({
     queryKey: ['manga', 'home', 'trending-popular-v3', HOME_POPULAR_TRENDING_FETCH_LIMIT],
@@ -1889,11 +1920,13 @@ const Index = () => {
     };
   }, [homeCoverWarmupUrls]);
 
+  const isHeroBannerLoading = !heroBannerItems.length && (isHomeBannerLoading || isInitialMergedLoading);
+
   return (
     <div className="min-h-screen">
       <HomeAnnouncementPopup key={activeAnnouncement?.id || 'none'} announcement={activeAnnouncement} />
       <section className="container mx-auto px-4 pt-5">
-        {isInitialMergedLoading ? (
+        {isHeroBannerLoading ? (
           <div className="h-[340px] bg-muted rounded-2xl animate-pulse" />
         ) : heroBannerItems.length > 0 ? (
           <HeroSlider manga={heroBannerItems.slice(0, 5)} />

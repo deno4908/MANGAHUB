@@ -931,6 +931,23 @@ export const mangaApi = {
   getHome: () => api<any>("/api/manga/home"),
   getHomepage: () => api<any>("/api/manga/homepage"),
   getFeatured: (limit = 12) => api<any>(`/api/manga/featured?limit=${limit}`),
+  getMangaDexHomeBanner: (
+    options: {
+      limit?: number;
+      showMature?: boolean;
+      filterHidden?: boolean;
+      timeoutMs?: number;
+    } = {},
+  ) => {
+    const query = new URLSearchParams({
+      limit: String(Math.max(1, Math.min(16, Math.floor(Number(options.limit || 8))))),
+      show_mature: String(options.showMature ?? false),
+      filter_hidden: String(options.filterHidden ?? true),
+    });
+    return api<any>(`/api/manga/mangadex/home-banner?${query.toString()}`, {
+      timeoutMs: options.timeoutMs ?? 8_000,
+    });
+  },
   getMangaDexViCatalog: (
     maxChapters: number | "all" = 200,
     options?: {
@@ -976,12 +993,33 @@ export const mangaApi = {
       { timeoutMs: 15_000 },
     );
   },
+  getMangaDexLatestFeed: (
+    options: {
+      page?: number;
+      limit?: number;
+      showMature?: boolean;
+      filterHidden?: boolean;
+      timeoutMs?: number;
+    } = {},
+  ) => {
+    const query = new URLSearchParams({
+      page: String(Math.max(1, Math.floor(Number(options.page || 1)))),
+      limit: String(Math.max(1, Math.min(24, Math.floor(Number(options.limit || 24))))),
+      show_mature: String(options.showMature ?? false),
+      filter_hidden: String(options.filterHidden ?? true),
+    });
+    return api<any>(`/api/manga/mangadex/latest-feed?${query.toString()}`, {
+      timeoutMs: options.timeoutMs ?? 12_000,
+    });
+  },
   searchMangaDex: (
     options: {
       keyword?: string;
       page?: number;
       limit?: number;
       genreSlugs?: string[];
+      translatedLanguage?: string;
+      originalLanguage?: string;
       status?: string;
       sort?: string;
       showMature?: boolean;
@@ -1004,6 +1042,12 @@ export const mangaApi = {
     );
     if (genreSlugs.length) {
       query.set("genre_slugs", genreSlugs.join(","));
+    }
+    if (options.translatedLanguage) {
+      query.set("translated_language", String(options.translatedLanguage));
+    }
+    if (options.originalLanguage) {
+      query.set("original_language", String(options.originalLanguage));
     }
     if (options.status) {
       query.set("status", String(options.status));
