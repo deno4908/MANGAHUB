@@ -31,9 +31,7 @@ import type { Manga } from "@/types/manga";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const MANGADEX_CATALOG_TIMEOUT_MS = 15_000;
-const HOMEPAGE_MANGADEX_PRIMARY_TIMEOUT_MS = 5_500;
-const HOMEPAGE_MANGADEX_FALLBACK_TIMEOUT_MS = 5_500;
-const HOMEPAGE_MANGADEX_RECOVERY_TIMEOUT_MS = 7_000;
+const HOMEPAGE_MANGADEX_FALLBACK_TIMEOUT_MS = 6_000;
 const LOCAL_COVER_FALLBACK = "/no-cover.svg";
 const USER_DATA_QUERY_OPTIONS = {
   staleTime: 0,
@@ -308,44 +306,17 @@ export function useHomepageCombined(maxChapters = 120) {
         }>;
       };
 
-      const readDirectCatalogItems = (payload: any): HomepageMangaDexItem[] => {
-        const items = (payload?.mangas || []) as HomepageMangaDexItem[];
-        return Array.isArray(items) ? items : [];
-      };
-
-      const readCombinedCatalogItems = (payload: any): HomepageMangaDexItem[] => {
-        const items = (payload?.mangadex?.mangas || []) as HomepageMangaDexItem[];
-        return Array.isArray(items) ? items : [];
-      };
-
       const cachedCatalogRaw = queryClient.getQueryData(mangadexCatalogKey);
       const cachedCatalog = Array.isArray(cachedCatalogRaw)
         ? (cachedCatalogRaw as HomepageMangaDexItem[])
         : [];
-      const hasCachedCatalog = cachedCatalog.length > 0;
 
       const homepagePromise = mangaApi.getHomepage();
       const featuredPromise = mangaApi.getFeatured(12);
 
-      const directCatalogPromise = withTimeout(
-        mangaApi.getMangaDexViCatalog(maxChapters),
-        HOMEPAGE_MANGADEX_PRIMARY_TIMEOUT_MS,
-      )
-        .then(readDirectCatalogItems)
-        .catch(() => [] as HomepageMangaDexItem[]);
-
-      const combinedCatalogPromise = withTimeout(
-        mangaApi.getCombinedList("truyen-moi", 1, maxChapters),
-        HOMEPAGE_MANGADEX_FALLBACK_TIMEOUT_MS,
-      )
-        .then(readCombinedCatalogItems)
-        .catch(() => [] as HomepageMangaDexItem[]);
-
-      const [homepageResult, featuredResult, directCatalogResult, combinedCatalogResult] = await Promise.allSettled([
+      const [homepageResult, featuredResult] = await Promise.allSettled([
         homepagePromise,
         featuredPromise,
-        directCatalogPromise,
-        combinedCatalogPromise,
       ]);
 
       const homepagePayload = homepageResult.status === "fulfilled" ? homepageResult.value : {};
@@ -354,67 +325,21 @@ export function useHomepageCombined(maxChapters = 120) {
       const ongoing = adaptListData((homepagePayload as any).ongoing || {});
       const featured = adaptListData(featuredPayload || {});
 
-      const directItems =
-        directCatalogResult.status === "fulfilled" ? directCatalogResult.value : [];
-      const combinedItems =
-        combinedCatalogResult.status === "fulfilled" ? combinedCatalogResult.value : [];
-
-      let mangaDexMangas: HomepageMangaDexItem[] = [];
-      if (directItems.length > 0) {
-        mangaDexMangas = directItems;
-      } else if (combinedItems.length > 0) {
-        mangaDexMangas = combinedItems;
-      }
-
-      if (!mangaDexMangas.length && hasCachedCatalog) {
-        mangaDexMangas = cachedCatalog;
-      }
-
-      if (!mangaDexMangas.length) {
-        const [directRecoveryResult, combinedRecoveryResult] = await Promise.allSettled([
-          withTimeout(
-            mangaApi.getMangaDexViCatalog(maxChapters),
-            HOMEPAGE_MANGADEX_RECOVERY_TIMEOUT_MS,
-          )
-            .then(readDirectCatalogItems)
-            .catch(() => [] as HomepageMangaDexItem[]),
-          withTimeout(
-            mangaApi.getCombinedList("truyen-moi", 1, maxChapters),
-            HOMEPAGE_MANGADEX_RECOVERY_TIMEOUT_MS,
-          )
-            .then(readCombinedCatalogItems)
-            .catch(() => [] as HomepageMangaDexItem[]),
-        ]);
-
-        const directRecovered =
-          directRecoveryResult.status === "fulfilled" ? directRecoveryResult.value : [];
-        const combinedRecovered =
-          combinedRecoveryResult.status === "fulfilled" ? combinedRecoveryResult.value : [];
-        if (directRecovered.length > 0) {
-          mangaDexMangas = directRecovered;
-        } else if (combinedRecovered.length > 0) {
-          mangaDexMangas = combinedRecovered;
-        }
-      }
-
-      if (mangaDexMangas.length) {
-        queryClient.setQueryData(mangadexCatalogKey, mangaDexMangas);
-      }
-
       return {
         latest,
         ongoing,
         featured,
-        mangaDexMangas,
+        mangaDexMangas: cachedCatalog,
       };
     },
-    staleTime: 2 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
+    staleTime: 3 * 60 * 1000,
+    gcTime: 15 * 60 * 1000,
+    placeholderData: (previousData) => previousData,
     retry: 2,
     retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
-    refetchOnMount: true,
+    refetchOnMount: false,
   });
 }
 
@@ -428,11 +353,7 @@ export function useMangaDexViCatalog(
   return useQuery({
     queryKey,
     queryFn: async () => {
-      const data = await withTimeout(
-        mangaApi.getMangaDexViCatalog(maxChapters),
-        MANGADEX_CATALOG_TIMEOUT_MS,
-      );
-      const mangas = (data?.mangas || []) as Array<{
+      type CatalogItem = {
         id: string;
         url?: string;
         title: string;
@@ -449,9 +370,34 @@ export function useMangaDexViCatalog(
           updated_at?: string;
           chapter_with_groups?: string;
         }>;
-      }>;
+      };
+
+      let mangas: CatalogItem[] = [];
+      try {
+        const data = await withTimeout(
+          mangaApi.getMangaDexViCatalog(maxChapters),
+          MANGADEX_CATALOG_TIMEOUT_MS,
+        );
+        mangas = (data?.mangas || []) as CatalogItem[];
+      } catch {
+        mangas = [];
+      }
 
       if (mangas.length > 0) return mangas;
+
+      try {
+        const fallbackMaxChapters = typeof maxChapters === "number" ? maxChapters : 200;
+        const fallback = await withTimeout(
+          mangaApi.getCombinedList("truyen-moi", 1, fallbackMaxChapters),
+          HOMEPAGE_MANGADEX_FALLBACK_TIMEOUT_MS,
+        );
+        const fallbackMangas = (fallback?.mangadex?.mangas || []) as CatalogItem[];
+        if (Array.isArray(fallbackMangas) && fallbackMangas.length > 0) {
+          return fallbackMangas;
+        }
+      } catch {
+        // Cached data below keeps the homepage usable during MangaDex hiccups.
+      }
 
       const cached = queryClient.getQueryData(queryKey);
       if (Array.isArray(cached) && cached.length > 0) {

@@ -175,6 +175,7 @@ export interface UserSettings {
     showFollowedManga: boolean;
     showComments: boolean;
     showMatureContent: boolean;
+    silentViewTracking?: boolean;
   };
 }
 

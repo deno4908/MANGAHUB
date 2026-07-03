@@ -452,6 +452,14 @@ const PrivacySection = () => {
           label="Hiển thị nội dung Mature (18+)"
           description="Tắt: ẩn khỏi banner, khám phá, xếp hạng. Bật: hiển thị đầy đủ."
         />
+        {user?.role === 'admin' && (
+          <ToggleSwitch
+            checked={Boolean(privacy.silentViewTracking)}
+            onChange={() => updatePrivacy({ silentViewTracking: !privacy.silentViewTracking })}
+            label="Xem ẩn view"
+            description="Chỉ admin: đọc truyện nhưng không tăng lượt xem. Lịch sử đọc vẫn được lưu."
+          />
+        )}
       </SectionCard>
     </>
   );

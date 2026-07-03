@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from fastapi_app.dependencies import get_current_user, get_supabase
 from fastapi_app.models.schemas import HistoryEntry
+from fastapi_app.routers.users import clear_user_stats_cache
 from fastapi_app.utils.anti_spam import enforce_user_action_limit
 
 router = APIRouter()
@@ -187,6 +188,7 @@ async def add_or_update_history(
             except Exception:
                 pass
 
+        clear_user_stats_cache(user["id"])
         return {"message": "Đã cập nhật lịch sử"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

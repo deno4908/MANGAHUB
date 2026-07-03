@@ -73,7 +73,7 @@ const OptimizedImage = memo(({
 
   const hasRemoteCandidate =
     isRemoteUrl(normalizedSrc) || isRemoteUrl(normalizedFallbackSrc);
-  const maxRecoverAttempts = Math.max(6, maxRetries + 3);
+  const maxRecoverAttempts = Math.max(1, maxRetries + 1);
   const fallbackSwitchDelayMs =
     typeof fallbackDelayMs === 'number'
       ? Math.max(0, fallbackDelayMs)
@@ -286,6 +286,7 @@ const OptimizedImage = memo(({
           loading={priority ? 'eager' : 'lazy'}
           decoding="async"
           fetchPriority={priority ? 'high' : 'auto'}
+          referrerPolicy="no-referrer"
           draggable={draggable}
           onLoad={handleLoad}
           onError={handleError}

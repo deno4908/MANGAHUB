@@ -108,6 +108,7 @@ class SettingsUpdate(BaseModel):
     show_followed_manga: Optional[bool] = None
     show_comments: Optional[bool] = None
     show_mature_content: Optional[bool] = None
+    silent_view_tracking: Optional[bool] = None
 
 
 # ============================================================

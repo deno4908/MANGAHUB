@@ -74,6 +74,7 @@ _DEFAULT_USER_SETTINGS = {
     "show_followed_manga": True,
     "show_comments": True,
     "show_mature_content": False,
+    "silent_view_tracking": False,
 }
 
 

@@ -62,6 +62,7 @@ DEFAULT_USER_SETTINGS: dict[str, object] = {
     "show_followed_manga": True,
     "show_comments": True,
     "show_mature_content": False,
+    "silent_view_tracking": False,
 }
 
 ALLOWED_NAME_COLORS = {
@@ -248,6 +249,15 @@ def _user_stats_cache_set_with_stale(key: str, payload: dict, ttl: float, stale_
     _user_stats_cache_set(f"{key}:stale", payload, stale_ttl)
 
 
+def clear_user_stats_cache(user_id: str) -> None:
+    normalized = str(user_id or "").strip()
+    if not normalized:
+        return
+    _USER_STATS_CACHE.pop(f"user_stats:{normalized}", None)
+    _USER_STATS_CACHE.pop(f"user_stats:{normalized}:stale", None)
+    _USER_STATS_CACHE.pop(_public_profile_cache_key(normalized), None)
+
+
 def _public_profile_cache_key(user_id: str) -> str:
     return f"public-profile:{str(user_id or '').strip()}"
 
@@ -260,6 +270,18 @@ def _build_default_user_settings(user_id: str) -> dict[str, object]:
     payload = dict(DEFAULT_USER_SETTINGS)
     payload["user_id"] = str(user_id or "").strip()
     return payload
+
+def _is_admin_user(user: dict | None) -> bool:
+    return str((user or {}).get("role") or "").strip().lower() == "admin"
+
+
+def _settings_for_user(user: dict, row: dict | None) -> dict[str, object]:
+    settings = _build_default_user_settings(str(user.get("id") or ""))
+    if row:
+        settings.update({k: v for k, v in row.items() if v is not None})
+    if not _is_admin_user(user):
+        settings["silent_view_tracking"] = False
+    return settings
 
 
 def _safe_get_user_settings(db, user_id: str):
@@ -940,7 +962,7 @@ async def get_settings(user=Depends(get_current_user), db=Depends(get_supabase))
     try:
         result = await asyncio.to_thread(_safe_get_user_settings, db, user_id)
         if result and result.data:
-            return {"settings": result.data}
+            return {"settings": _settings_for_user(user, result.data)}
     except Exception:
         # Fall through to self-heal + default fallback when Supabase has transient issues.
         pass
@@ -956,11 +978,11 @@ async def get_settings(user=Depends(get_current_user), db=Depends(get_supabase))
     try:
         result = await asyncio.to_thread(_safe_get_user_settings, db, user_id)
         if result and result.data:
-            return {"settings": result.data}
+            return {"settings": _settings_for_user(user, result.data)}
     except Exception:
         pass
 
-    return {"settings": _build_default_user_settings(user_id)}
+    return {"settings": _settings_for_user(user, None)}
 
 
 @router.put("/settings")
@@ -977,6 +999,9 @@ async def update_settings(
     if "profile_visibility" in update_data:
         update_data["profile_visibility"] = _normalize_profile_visibility(update_data.get("profile_visibility"))
 
+    if bool(update_data.get("silent_view_tracking")) and not _is_admin_user(user):
+        raise HTTPException(status_code=403, detail="Chỉ admin được bật xem ẩn view")
+
     user_id = str(user.get("id") or "").strip()
     if not user_id:
         raise HTTPException(status_code=401, detail="Không xác định được người dùng")
@@ -992,7 +1017,7 @@ async def update_settings(
             _clear_public_profile_cache(user_id)
             return {
                 "message": "Cập nhật thành công",
-                "settings": result.data[0],
+                "settings": _settings_for_user(user, result.data[0]),
             }
     except Exception:
         # Continue to self-heal path.
@@ -1015,7 +1040,7 @@ async def update_settings(
         _clear_public_profile_cache(user_id)
         return {
             "message": "Cập nhật thành công",
-            "settings": result.data[0] if result.data else _build_default_user_settings(user_id),
+            "settings": _settings_for_user(user, result.data[0] if result.data else None),
         }
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Không thể cập nhật cài đặt lúc này: {exc}")
@@ -1058,7 +1083,7 @@ async def get_stats(user=Depends(get_current_user), db=Depends(get_supabase)):
         history_rows, streak_rows = await asyncio.gather(
             asyncio.to_thread(
                 lambda: db.table("reading_activity_events")
-                .select("activity_date,read_count")
+                .select("activity_date")
                 .eq("user_id", user_id)
                 .gte("activity_date", dates[0].isoformat())
                 .order("activity_date", desc=False)
@@ -1112,7 +1137,7 @@ async def get_stats(user=Depends(get_current_user), db=Depends(get_supabase)):
         if use_activity_events:
             day_key = str(row.get("activity_date") or "").strip()
             if day_key in counts_by_day:
-                counts_by_day[day_key] += max(1, int(row.get("read_count") or 1))
+                counts_by_day[day_key] += 1
         else:
             read_at = row.get("read_at")
             if not read_at:

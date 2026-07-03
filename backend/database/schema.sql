@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
     show_followed_manga BOOLEAN DEFAULT TRUE,
     show_comments BOOLEAN DEFAULT TRUE,
     show_mature_content BOOLEAN DEFAULT FALSE,
+    silent_view_tracking BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -274,6 +275,62 @@ CREATE TRIGGER tr_settings_updated
 DROP TRIGGER IF EXISTS tr_ratings_updated ON ratings;
 CREATE TRIGGER tr_ratings_updated
     BEFORE UPDATE ON ratings FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- Admin-only setting guard for silent view tracking.
+CREATE OR REPLACE FUNCTION public.enforce_silent_view_tracking_admin()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_role TEXT;
+BEGIN
+    IF COALESCE(NEW.silent_view_tracking, FALSE) IS TRUE THEN
+        SELECT role INTO v_role
+        FROM public.profiles
+        WHERE id = NEW.user_id;
+
+        IF LOWER(COALESCE(v_role, 'reader')) <> 'admin' THEN
+            RAISE EXCEPTION 'silent_view_tracking is admin-only';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tr_user_settings_silent_view_admin ON user_settings;
+CREATE TRIGGER tr_user_settings_silent_view_admin
+    BEFORE INSERT OR UPDATE OF user_id, silent_view_tracking
+    ON user_settings
+    FOR EACH ROW
+    EXECUTE FUNCTION public.enforce_silent_view_tracking_admin();
+
+CREATE OR REPLACE FUNCTION public.clear_silent_view_tracking_when_non_admin()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    IF LOWER(COALESCE(NEW.role, 'reader')) <> 'admin' THEN
+        UPDATE public.user_settings
+        SET silent_view_tracking = FALSE
+        WHERE user_id = NEW.id
+          AND COALESCE(silent_view_tracking, FALSE) = TRUE;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tr_profiles_clear_silent_view_tracking ON profiles;
+CREATE TRIGGER tr_profiles_clear_silent_view_tracking
+    AFTER INSERT OR UPDATE OF role
+    ON profiles
+    FOR EACH ROW
+    EXECUTE FUNCTION public.clear_silent_view_tracking_when_non_admin();
 
 -- Update comment likes count
 CREATE OR REPLACE FUNCTION update_comment_likes()

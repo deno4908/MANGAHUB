@@ -2,7 +2,7 @@ import { useMemo, useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { useHomepageCombined } from '@/hooks/useApi';
+import { useHomepageCombined, useMangaDexViCatalog } from '@/hooks/useApi';
 import { useSettingsStore } from '@/store/settingsStore';
 import { useUserStore } from '@/store/userStore';
 import MangaGrid from '@/components/manga/MangaGrid';
@@ -323,14 +323,14 @@ type SiteAnnouncement = {
 };
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-const MY_RATED_HOME_LIMIT = 240;
+const MY_RATED_HOME_LIMIT = 80;
 const DEFAULT_CARD_COVER_FALLBACK = '/no-cover.svg';
 const GUEST_TOP_RATED_LIMIT = 24;
 const HOME_POPULAR_LIMIT = 12;
 const HOME_POPULAR_TRENDING_FETCH_LIMIT = 50;
-const RATING_BATCH_CHUNK_SIZE = 40;
-const RATING_BATCH_WAVE_SIZE = 3;
-const RATING_BATCH_TIMEOUT_MS = 6_500;
+const RATING_BATCH_CHUNK_SIZE = 30;
+const RATING_BATCH_WAVE_SIZE = 2;
+const RATING_BATCH_TIMEOUT_MS = 4_500;
 const ANNOUNCEMENT_DISMISS_KEY_PREFIX = 'mb:home-announcement-dismissed:';
 // Proxy URL = primary (local disk cache after startup warmup = instant)
 const toMangaDexCoverProxy = (coverUrl?: string, mangaId?: string) => {
@@ -960,6 +960,7 @@ const buildMangaDexLatestMetaFromDetail = (
 
 const fetchMangaDexLatestChapterMetaMap = async (
   detailIds: string[],
+  detailFallbackLimit = 3,
 ): Promise<Record<string, MangaDexLatestChapterMeta>> => {
   const ids = Array.from(new Set(detailIds.map((id) => toMangaDexDetailId(id) || String(id || '').trim().toLowerCase()).filter(Boolean)));
   const result: Record<string, MangaDexLatestChapterMeta> = {};
@@ -982,7 +983,7 @@ const fetchMangaDexLatestChapterMetaMap = async (
   const unresolved = ids.filter((detailId) => !result[detailId]?.latestChapter);
   if (unresolved.length) {
     const settled = await Promise.allSettled(
-      unresolved.slice(0, 8).map(async (detailId) => {
+      unresolved.slice(0, detailFallbackLimit).map(async (detailId) => {
         const payload = await mangaApi.getMangaDexDetail(detailId, 1, 'vi', { timeoutMs: 8_000 });
         return [detailId, buildMangaDexLatestMetaFromDetail(detailId, payload)] as const;
       }),
@@ -1048,6 +1049,8 @@ const Index = () => {
     isLoading: isInitialMergedLoading,
     refetch: refetchHomepageCombined,
   } = useHomepageCombined(120);
+  const isHomepageCoreReady = !isInitialMergedLoading;
+  const { data: deferredMangaDexMangas = [] } = useMangaDexViCatalog(120, isHomepageCoreReady);
   const { data: homeBannerData, isLoading: isHomeBannerLoading } = useQuery({
     queryKey: ['manga', 'home', 'banner', 'mangadex', showMatureContent],
     queryFn: async () => {
@@ -1073,8 +1076,6 @@ const Index = () => {
     refetchOnWindowFocus: true,
     refetchInterval: 60 * 1000,
   });
-  const isHomepageCoreReady = !isInitialMergedLoading;
-
   const activeAnnouncement = useMemo<SiteAnnouncement | null>(() => {
     const rows = (announcementData as any)?.announcements;
     if (!Array.isArray(rows)) return null;
@@ -1090,7 +1091,7 @@ const Index = () => {
   const featured = data?.featured?.items || [];
   const latest = data?.latest?.items || [];
   const ongoing = data?.ongoing?.items || [];
-  const mangaDexMangas = data?.mangaDexMangas || [];
+  const mangaDexMangas = deferredMangaDexMangas.length ? deferredMangaDexMangas : (data?.mangaDexMangas || []);
   const mangaDexItems = useMemo<Manga[]>(() => {
     return (mangaDexMangas || []).map((item: MangaDexCatalogItem) => {
       const chapter = pickLatestChapter(item);
@@ -1332,7 +1333,12 @@ const Index = () => {
 
   const ratingSlugs = useMemo(() => {
     const slugs = new Set<string>();
-    [...visibleFeatured, ...latestMerged, ...ongoingMerged, ...myRatedOverlayItems].forEach((m) => {
+    [
+      ...visibleFeatured.slice(0, 12),
+      ...latestMerged.slice(0, 18),
+      ...ongoingMerged.slice(0, 12),
+      ...myRatedOverlayItems.slice(0, 24),
+    ].forEach((m) => {
       const slug = String(m.id || '').trim();
       if (slug) slugs.add(slug);
     });
@@ -1448,7 +1454,7 @@ const Index = () => {
       seen.add(slug);
       if (topRatedKnownLookup.has(slug)) continue;
       missing.push(slug);
-      if (missing.length >= 10) break;
+      if (missing.length >= 6) break;
     }
 
     return missing;
@@ -1823,7 +1829,7 @@ const Index = () => {
 
   const { data: popularMangaDexChapterMap = {} } = useQuery({
     queryKey: ['manga', 'index', 'popular-mangadex-latest-chapter-v2', popularMangaDexIds],
-    queryFn: () => fetchMangaDexLatestChapterMetaMap(popularMangaDexIds),
+    queryFn: () => fetchMangaDexLatestChapterMetaMap(popularMangaDexIds, 3),
     enabled: isHomepageCoreReady && popularMangaDexIds.length > 0,
     staleTime: 10 * 60 * 1000,
     retry: 1,
@@ -1879,7 +1885,7 @@ const Index = () => {
 
   const { data: topRatedMangaDexChapterMap = {} } = useQuery({
     queryKey: ['manga', 'index', 'top-rated-mangadex-latest-chapter-v4', topRatedMangaDexIds],
-    queryFn: () => fetchMangaDexLatestChapterMetaMap(topRatedMangaDexIds),
+    queryFn: () => fetchMangaDexLatestChapterMetaMap(topRatedMangaDexIds, 3),
     enabled: isHomepageCoreReady && topRatedMangaDexIds.length > 0,
     staleTime: 10 * 60 * 1000,
     retry: 1,
@@ -1900,7 +1906,7 @@ const Index = () => {
         ...popularDisplay.slice(0, 12),
         ...topRatedDisplay.slice(0, 6),
       ]),
-      30,
+      18,
     );
   }, [heroBannerItems, latestMergedRated, popularDisplay, topRatedDisplay]);
 
@@ -1908,12 +1914,12 @@ const Index = () => {
     if (!homeCoverWarmupUrls.length) return;
     const timers = homeCoverWarmupUrls
       .reduce<string[][]>((chunks, url, index) => {
-        const chunkIndex = Math.floor(index / 10);
+        const chunkIndex = Math.floor(index / 6);
         if (!chunks[chunkIndex]) chunks[chunkIndex] = [];
         chunks[chunkIndex].push(url);
         return chunks;
       }, [])
-      .map((chunk, index) => window.setTimeout(() => preloadCoverCache(chunk), index * 650));
+      .map((chunk, index) => window.setTimeout(() => preloadCoverCache(chunk), 1200 + index * 900));
 
     return () => {
       timers.forEach((timer) => window.clearTimeout(timer));
@@ -1955,17 +1961,17 @@ const Index = () => {
         <Section title="Phổ biến nhất" link="/manga?sort=popular">
           {isInitialMergedLoading || (isTrendingLoading && !popularVisible.length)
             ? <SkeletonGrid count={12} />
-            : <MangaGrid manga={popularDisplay} />}
+            : <MangaGrid manga={popularDisplay} lazyBatch initialBatchSize={6} batchStep={6} batchDelayMs={240} />}
         </Section>
 
         <Section title="Đánh giá cao" link="/manga?sort=rating">
           {isTopRatedSectionLoading
             ? <SkeletonGrid />
-            : <MangaGrid manga={topRatedDisplay.slice(0, 6)} />}
+            : <MangaGrid manga={topRatedDisplay.slice(0, 6)} lazyBatch initialBatchSize={4} batchStep={2} batchDelayMs={220} />}
         </Section>
 
         <Section title="Mới thêm gần đây" link="/manga">
-          {isInitialMergedLoading ? <SkeletonGrid /> : <MangaGrid manga={ongoingMergedRated.slice(0, 6)} />}
+          {isInitialMergedLoading ? <SkeletonGrid /> : <MangaGrid manga={ongoingMergedRated.slice(0, 6)} lazyBatch initialBatchSize={4} batchStep={2} batchDelayMs={220} />}
         </Section>
 
         <section>

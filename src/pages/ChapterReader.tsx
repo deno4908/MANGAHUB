@@ -406,7 +406,9 @@ const ChapterReader = () => {
   const { data: chapterData, isLoading } = useChapter(currentChapterId || undefined);
   const store = useReaderStore();
   const imageLoadingMode = useSettingsStore((s) => s.settings.reader.imageLoading || 'preload');
+  const silentViewTracking = useSettingsStore((s) => Boolean(s.settings.privacy.silentViewTracking));
   const { user, isLoggedIn } = useUserStore();
+  const shouldSuppressViewTracking = user?.role === 'admin' && silentViewTracking;
   const queryClient = useQueryClient();
   const detectedMobile = useIsMobile();
   const mobileReaderRef = useRef(detectedMobile);
@@ -469,9 +471,9 @@ const ChapterReader = () => {
   const fallbackMangaThumb = String(rawItem.thumb_url || rawItem.thumb || rawItem.cover_url || '').trim();
   const fallbackChapterNumber = parseChapterNumber(rawItem.chapter_name);
   const fallbackChapterTitle = rawItem.chapter_title || '';
-  const mangaSlug = cleanSlug(chapterState.mangaSlug || persistedMeta.mangaSlug || fallbackMangaSlug);
-  const safeMangaSlug = isInvalidMangaSlug(mangaSlug) ? '' : mangaSlug;
   const rawMangaDetailId = String(chapterState.mangaId || persistedMeta.mangaId || '').trim();
+  const mangaSlug = cleanSlug(chapterState.mangaSlug || persistedMeta.mangaSlug || fallbackMangaSlug || rawMangaDetailId);
+  const safeMangaSlug = isInvalidMangaSlug(mangaSlug) ? '' : mangaSlug;
   const mangaDetailId = rawMangaDetailId || safeMangaSlug;
   const mangaDetailPath = mangaDetailId ? getMangaDetailPath(mangaDetailId) : '/manga';
   const mangaTitle = chapterState.mangaTitle || persistedMeta.mangaTitle || fallbackMangaTitle;
@@ -709,6 +711,7 @@ const ChapterReader = () => {
 
   // ─── Start a server-side read session before a view can be counted ───
   useEffect(() => {
+    if (shouldSuppressViewTracking) return;
     if (!id || !safeMangaSlug || viewSessionStartedRef.current) return;
     if (!readSessionIdRef.current) {
       readSessionIdRef.current = createReadSessionId();
@@ -719,18 +722,20 @@ const ChapterReader = () => {
       chapterId: id,
       readSessionId: readSessionIdRef.current,
     }).catch(() => {});
-  }, [id, safeMangaSlug]);
+  }, [id, safeMangaSlug, shouldSuppressViewTracking]);
 
   useEffect(() => {
+    if (shouldSuppressViewTracking) return;
     if (!id || !safeMangaSlug || viewTrackedRef.current) return;
     const timer = window.setInterval(() => {
       setViewEligibilityTick((tick) => tick + 1);
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [id, safeMangaSlug]);
+  }, [id, safeMangaSlug, shouldSuppressViewTracking]);
 
   // ─── Count view only after real reading signals are present ───
   useEffect(() => {
+    if (shouldSuppressViewTracking) return;
     if (!id || !safeMangaSlug || viewTrackedRef.current) return;
     if (!readSessionIdRef.current || !readSessionStartedAtRef.current) return;
     if (totalPages <= 0) return;
@@ -770,6 +775,7 @@ const ChapterReader = () => {
     store.mode,
     scrollProgress,
     viewEligibilityTick,
+    shouldSuppressViewTracking,
   ]);
 
   const prefetchChapterData = useCallback(async (chapterId: string) => {
@@ -988,7 +994,6 @@ const ChapterReader = () => {
     const preloadUrls = (urls: string[], highPriorityCount = 0) => {
       urls.forEach((url, index) => {
         preloadImageUrl(url, index < highPriorityCount ? 'high' : 'low');
-        preloadImageUrl(getChapterPageFallback(url), 'low');
       });
     };
 
@@ -1017,7 +1022,6 @@ const ChapterReader = () => {
     for (let i = start; i < end; i++) {
       const url = pages[i];
       preloadImageUrl(url, i <= visiblePage + HIGH_PRIORITY_AHEAD ? 'high' : 'low');
-      preloadImageUrl(getChapterPageFallback(url), 'low');
     }
   }, [visiblePage, pages, imageLoadingMode]);
 
@@ -1042,13 +1046,6 @@ const ChapterReader = () => {
             const img = new Image();
             img.fetchPriority = priority;
             img.src = url;
-          }
-          const fallbackUrl = getChapterPageFallback(url);
-          if (fallbackUrl && !preloadedRef.current.has(fallbackUrl)) {
-            preloadedRef.current.add(fallbackUrl);
-            const fallbackImg = new Image();
-            fallbackImg.fetchPriority = 'low';
-            fallbackImg.src = fallbackUrl;
           }
         });
         return prefetched;

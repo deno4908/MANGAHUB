@@ -34,6 +34,7 @@ const defaultSettings: UserSettings = {
     showFollowedManga: true,
     showComments: true,
     showMatureContent: false,
+    silentViewTracking: false,
   },
 };
 
@@ -84,6 +85,7 @@ function debouncedSync(settings: UserSettings) {
         show_followed_manga: settings.privacy.showFollowedManga,
         show_comments: settings.privacy.showComments,
         show_mature_content: settings.privacy.showMatureContent,
+        silent_view_tracking: Boolean(settings.privacy.silentViewTracking),
       });
     } catch { /* local update still applies */ }
   }, 1500);
@@ -139,6 +141,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
             showFollowedManga: toBoolean(s.show_followed_manga, current.privacy.showFollowedManga),
             showComments: toBoolean(s.show_comments, current.privacy.showComments),
             showMatureContent: toBoolean(s.show_mature_content, current.privacy.showMatureContent),
+            silentViewTracking: toBoolean(s.silent_view_tracking, false),
           },
         };
 

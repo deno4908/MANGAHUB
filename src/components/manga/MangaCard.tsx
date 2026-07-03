@@ -232,9 +232,9 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
     ? (resolveMangaDexCurrentCover(manga.id) || mangaDexCatalogCover)
     : manga.cover;
   const coverFallbackSrc = isMangaDexItem ? mangaDexCatalogCover : safeCoverFallback;
-  const coverFallbackDelayMs = isMangaDexItem ? 12000 : undefined;
-  const coverPriority = index < (variant === 'default' ? 12 : 8);
-  const coverMaxRetries = isMangaDexItem ? 5 : 2;
+  const coverFallbackDelayMs = isMangaDexItem ? 3500 : undefined;
+  const coverPriority = variant === 'horizontal' ? index < 3 : index < 4;
+  const coverMaxRetries = isMangaDexItem ? 2 : 1;
   const detailLinkState = { previewManga: manga };
   const detailPath = getMangaDetailPath(manga.id);
   const ratingLabel = Number(manga.rating).toFixed(1);

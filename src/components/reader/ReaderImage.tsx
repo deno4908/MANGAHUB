@@ -73,6 +73,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
   }, []);
 
   const fallbackSource = fallbackSrc || getMangaDexImageFallback(src);
+  const hasExplicitFallback = Boolean(fallbackSrc);
   const activeSrc = useFallbackSource && fallbackSource ? fallbackSource : src;
   const imgSrc = retryCount > 0 ? `${activeSrc}${activeSrc.includes('?') ? '&' : '?'}retry=${retryCount}` : activeSrc;
 
@@ -89,9 +90,17 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
         return;
       }
       setError(true);
-    }, useFallbackSource ? 18_000 : visible ? 5_000 : priority ? 6_500 : 8_000);
+    }, useFallbackSource
+      ? 18_000
+      : hasExplicitFallback
+        ? (visible || priority ? 2_500 : 4_500)
+        : visible
+          ? 5_000
+          : priority
+            ? 6_500
+            : 8_000);
     return () => window.clearTimeout(timeout);
-  }, [inView, visible, loaded, error, useFallbackSource, fallbackSource, retryCount, priority]);
+  }, [inView, visible, loaded, error, useFallbackSource, fallbackSource, retryCount, priority, hasExplicitFallback]);
 
   const placeholderStyle: React.CSSProperties = naturalSize
     ? { aspectRatio: `${naturalSize.w}/${naturalSize.h}` }
@@ -127,6 +136,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
           loading="eager"
           decoding="async"
           fetchPriority={visible || priority ? 'high' : 'auto'}
+          referrerPolicy="no-referrer"
           draggable={false}
           onLoad={handleLoad}
           onError={() => {
