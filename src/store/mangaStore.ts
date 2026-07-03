@@ -8,6 +8,7 @@ interface MangaFilters {
   minRating: number;
   sort: SortOption;
   search: string;
+  translatedLanguage: string;
 }
 
 interface MangaStore {
@@ -23,6 +24,7 @@ const defaultFilters: MangaFilters = {
   minRating: 0,
   sort: 'popular',
   search: '',
+  translatedLanguage: 'vi',
 };
 
 export const useMangaStore = create<MangaStore>((set) => ({

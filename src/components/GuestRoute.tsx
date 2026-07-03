@@ -1,4 +1,5 @@
 import { Navigate } from 'react-router-dom';
+import { useEffect } from 'react';
 import { useUserStore } from '@/store/userStore';
 
 /**
@@ -11,8 +12,15 @@ const GuestRoute = ({ children }: { children: React.ReactNode }) => {
   const hasCheckedSession = useUserStore(s => s.hasCheckedSession);
   const isRestoringSession = useUserStore(s => s.isRestoringSession);
   const user = useUserStore(s => s.user);
+  const loadUser = useUserStore(s => s.loadUser);
 
-  if (!hasCheckedSession || isLoading || (isLoggedIn && !user && isRestoringSession)) {
+  useEffect(() => {
+    if (!hasCheckedSession && !isLoading) {
+      loadUser();
+    }
+  }, [hasCheckedSession, isLoading, loadUser]);
+
+  if (!hasCheckedSession || isLoading || isRestoringSession || (isLoggedIn && !user && isRestoringSession)) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />

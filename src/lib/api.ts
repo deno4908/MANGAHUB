@@ -665,17 +665,16 @@ function mutationDedupeKey(url: string, options: ApiRequestInit): string | null 
   return `${method} ${url} ${bodyKey}`;
 }
 
-function shouldRestoreSessionBeforeRequest(url: string, method = "GET"): boolean {
-  if (!hasSessionHint() || accessToken) return false;
-  const upperMethod = method.toUpperCase();
-  if (upperMethod !== "GET" && upperMethod !== "HEAD") return true;
-
+function isKnownSessionRequest(url: string): boolean {
   try {
     const parsed = new URL(url, window.location.origin);
     const path = parsed.pathname;
     return (
       path === "/auth/me" ||
       path === "/auth/logout" ||
+      path === "/auth/ping" ||
+      path === "/auth/change-password" ||
+      path === "/auth/reset-password" ||
       path.startsWith("/api/admin/") ||
       path.startsWith("/api/users/") ||
       path.startsWith("/api/bookmarks/") ||
@@ -694,6 +693,13 @@ function shouldRestoreSessionBeforeRequest(url: string, method = "GET"): boolean
   }
 }
 
+function shouldRestoreSessionBeforeRequest(url: string, method = "GET"): boolean {
+  if (accessToken) return false;
+  const upperMethod = method.toUpperCase();
+  if (hasSessionHint() && upperMethod !== "GET" && upperMethod !== "HEAD") return true;
+  return isKnownSessionRequest(url);
+}
+
 async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Promise<Response> {
   const {
     timeoutMs,
@@ -705,6 +711,8 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
     typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
       ? timeoutMs
       : DEFAULT_TIMEOUT_MS;
+  const requestMethod = String(requestOptions.method || "GET");
+  const sessionAwareRequest = isKnownSessionRequest(url);
 
   const isRefreshRequest = /\/auth\/refresh(?:\?|$)/.test(url);
   if (
@@ -719,7 +727,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
     !isRefreshRequest &&
     !skipAuth &&
     !accessToken &&
-    shouldRestoreSessionBeforeRequest(url, String(requestOptions.method || "GET"))
+    shouldRestoreSessionBeforeRequest(url, requestMethod)
   ) {
     await refreshAccessToken();
   }
@@ -759,7 +767,12 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
     throw new Error(body.error || body.detail || "Dịch vụ đang tạm thời gián đoạn");
   }
 
-  if (res.status === 401 && !isRefreshRequest && !skipAuth && (accessToken || hasSessionHint())) {
+  if (
+    res.status === 401 &&
+    !isRefreshRequest &&
+    !skipAuth &&
+    (accessToken || hasSessionHint() || sessionAwareRequest)
+  ) {
     const refreshed = await refreshAccessToken();
     if (refreshed) {
       headers["Authorization"] = `Bearer ${accessToken}`;
@@ -923,6 +936,93 @@ function authRawResponse(path: string, options: ApiRequestInit = {}) {
 }
 
 // ─── Manga API (proxy OTruyenAPI) ───
+type AuthRefreshOptions = {
+  force?: boolean;
+};
+
+type AuthRefreshResult = {
+  ok: boolean;
+  data?: any;
+};
+
+async function performAuthRefresh(options: AuthRefreshOptions = {}): Promise<AuthRefreshResult> {
+  const force = Boolean(options.force);
+  if (!force && !accessToken && await waitForPeerAccessToken()) {
+    return { ok: true };
+  }
+  if (!force && refreshBlockedUntil > Date.now()) {
+    return { ok: await waitForPeerAccessToken(1_000) };
+  }
+  return withRefreshLock(async () => {
+    try {
+      if (!force && accessToken && !shouldRefreshBeforeRequest(accessToken)) {
+        return { ok: true };
+      }
+      if (!force && !accessToken && await waitForPeerAccessToken(800)) {
+        return { ok: true };
+      }
+
+      for (let attempt = 0; attempt < REFRESH_RETRYABLE_ATTEMPTS; attempt += 1) {
+        const response = await authRawResponse("/auth/refresh", {
+          method: "POST",
+          body: JSON.stringify({ access_token: accessToken || "" }),
+          timeoutMs: 20_000,
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok) {
+          if (data.session) {
+            setTokens(data.session.access_token);
+            return { ok: true, data };
+          }
+          markRefreshFailure("refresh failed", false);
+          setRefreshBackoff("refresh failed");
+          return { ok: false, data };
+        }
+
+        const message = String(
+          data?.error ||
+          data?.detail ||
+          `refresh failed: ${response.status}`,
+        );
+        if (response.status === 409 || data?.requires_retry) {
+          markRefreshFailure(message, false);
+          if (await waitForPeerAccessToken(1_000)) {
+            markRefreshFailure("", false);
+            refreshBlockedUntil = 0;
+            return { ok: true };
+          }
+          if (attempt < REFRESH_RETRYABLE_ATTEMPTS - 1) {
+            await sleep(REFRESH_RETRYABLE_DELAY_MS * (attempt + 1));
+            continue;
+          }
+          setRefreshRetryableBackoff();
+          return { ok: false, data };
+        }
+
+        const hardFailure = Boolean(data?.requires_relogin) || isHardRefreshFailure(message);
+        markRefreshFailure(message, hardFailure);
+        setRefreshBackoff(message);
+        return { ok: false, data };
+      }
+
+      markRefreshFailure("refresh retry exhausted", false);
+      setRefreshRetryableBackoff();
+      return { ok: false };
+    } catch (e: any) {
+      const message = String(e?.message || "refresh error");
+      const hardFailure = isHardRefreshFailure(message);
+      markRefreshFailure(message, hardFailure);
+      if (hardFailure && await waitForPeerAccessToken(1_000)) {
+        markRefreshFailure("", false);
+        refreshBlockedUntil = 0;
+        return { ok: true };
+      }
+      setRefreshBackoff(message);
+      return { ok: false };
+    }
+  });
+}
+
 export const systemApi = {
   getMaintenance: () => api<any>("/api/maintenance", { skipAuth: true, timeoutMs: 6_000 }),
 };
@@ -1279,82 +1379,11 @@ export const authApi = {
       }),
     });
   },
-  refresh: async () => {
-    if (!accessToken && await waitForPeerAccessToken()) {
-      return true;
-    }
-    if (refreshBlockedUntil > Date.now()) {
-      return waitForPeerAccessToken(1_000);
-    }
-    return withRefreshLock(async () => {
-      try {
-        if (accessToken && !shouldRefreshBeforeRequest(accessToken)) {
-          return true;
-        }
-        if (!accessToken && await waitForPeerAccessToken(800)) {
-          return true;
-        }
-
-        for (let attempt = 0; attempt < REFRESH_RETRYABLE_ATTEMPTS; attempt += 1) {
-          const response = await authRawResponse("/auth/refresh", {
-            method: "POST",
-            body: JSON.stringify({ access_token: accessToken || "" }),
-            timeoutMs: 20_000,
-          });
-          const data = await response.json().catch(() => ({}));
-          if (response.ok) {
-            if (data.session) {
-              setTokens(data.session.access_token);
-              return true;
-            }
-            markRefreshFailure("refresh failed", false);
-            setRefreshBackoff("refresh failed");
-            return false;
-          }
-
-          const message = String(
-            data?.error ||
-            data?.detail ||
-            `refresh failed: ${response.status}`,
-          );
-          if (response.status === 409 || data?.requires_retry) {
-            markRefreshFailure(message, false);
-            if (await waitForPeerAccessToken(1_000)) {
-              markRefreshFailure("", false);
-              refreshBlockedUntil = 0;
-              return true;
-            }
-            if (attempt < REFRESH_RETRYABLE_ATTEMPTS - 1) {
-              await sleep(REFRESH_RETRYABLE_DELAY_MS * (attempt + 1));
-              continue;
-            }
-            setRefreshRetryableBackoff();
-            return false;
-          }
-
-          const hardFailure = Boolean(data?.requires_relogin) || isHardRefreshFailure(message);
-          markRefreshFailure(message, hardFailure);
-          setRefreshBackoff(message);
-          return false;
-        }
-
-        markRefreshFailure("refresh retry exhausted", false);
-        setRefreshRetryableBackoff();
-        return false;
-      } catch (e: any) {
-        const message = String(e?.message || "refresh error");
-        const hardFailure = isHardRefreshFailure(message);
-        markRefreshFailure(message, hardFailure);
-        if (hardFailure && await waitForPeerAccessToken(1_000)) {
-          markRefreshFailure("", false);
-          refreshBlockedUntil = 0;
-          return true;
-        }
-        setRefreshBackoff(message);
-        return false;
-      }
-    });
+  refresh: async (options: AuthRefreshOptions = {}) => {
+    const result = await performAuthRefresh(options);
+    return result.ok;
   },
+  refreshDetailed: (options: AuthRefreshOptions = {}) => performAuthRefresh(options),
   googleLogin: async () => {
     const data = await auth<any>("/auth/google", { method: "POST" });
     return data;

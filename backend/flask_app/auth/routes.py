@@ -592,6 +592,57 @@ def _fetch_session_profile(user_id: str) -> dict:
         return {}
 
 
+def _fetch_profile_and_settings(user_id: str) -> tuple[dict, dict]:
+    sb = _get_sb_admin()
+    profile_data = None
+    settings_data = None
+
+    try:
+        profile = (
+            sb.table("profiles")
+            .select("*")
+            .eq("id", user_id)
+            .single()
+            .execute()
+        )
+        profile_data = profile.data if profile and profile.data else None
+    except Exception:
+        profile_data = None
+
+    try:
+        settings = (
+            sb.table("user_settings")
+            .select("*")
+            .eq("user_id", user_id)
+            .maybe_single()
+            .execute()
+        )
+        settings_data = settings.data if settings and settings.data else None
+    except Exception:
+        settings_data = None
+
+    if settings_data is None:
+        try:
+            sb.table("user_settings").insert({"user_id": user_id}).execute()
+            settings = (
+                sb.table("user_settings")
+                .select("*")
+                .eq("user_id", user_id)
+                .maybe_single()
+                .execute()
+            )
+            settings_data = settings.data if settings and settings.data else None
+        except Exception:
+            settings_data = None
+
+    if profile_data is None:
+        profile_data = _build_fallback_profile(user_id)
+    if settings_data is None:
+        settings_data = _build_default_settings(user_id)
+
+    return profile_data, settings_data
+
+
 def _load_logout_auth_from_bearer() -> bool:
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -1287,11 +1338,15 @@ def refresh_token():
             if _is_access_token_revoked(refreshed_access_token, profile):
                 return jsonify({"error": "Phiên đăng nhập cần xác thực lại"}), 401
 
+            profile_payload, settings_payload = _fetch_profile_and_settings(refreshed_user_id)
             return _json({
                 "session": {
                     "access_token": refreshed_access_token,
                     "expires_at": refreshed_session.get("expires_at"),
-                }
+                },
+                "profile": profile_payload,
+                "settings": settings_payload,
+                "auth_email": str(refreshed_payload.get("email") or profile_payload.get("email") or ""),
             }, 200, refresh_token=refreshed_session.get("refresh_token") or "")
         else:
             return jsonify({"error": "Refresh thất bại"}), 401
@@ -1317,11 +1372,15 @@ def refresh_token():
                     if _is_access_token_revoked(cached_access_token, cached_profile):
                         return jsonify({"error": "Phiên đăng nhập cần xác thực lại"}), 401
 
+                    profile_payload, settings_payload = _fetch_profile_and_settings(cached_user_id)
                     return _json({
                         "session": {
                             "access_token": cached_access_token,
                             "expires_at": cached_session.get("expires_at"),
-                        }
+                        },
+                        "profile": profile_payload,
+                        "settings": settings_payload,
+                        "auth_email": str(cached_payload.get("email") or profile_payload.get("email") or ""),
                     }, 200, refresh_token=cached_session.get("refresh_token") or "")
             except Exception:
                 pass

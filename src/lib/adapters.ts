@@ -72,6 +72,8 @@ function normalizeLooseText(value: unknown): string {
   return String(value || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\u0110/g, "D")
+    .replace(/\u0111/g, "d")
     .replace(/Đ/g, "D")
     .replace(/đ/g, "d")
     .toLowerCase()
@@ -333,7 +335,46 @@ export function thumbFallbackUrl(thumb: string, slug: string): string {
 
 /** Map OTruyen status → frontend status */
 function mapStatus(status: string): Manga["status"] {
-  const s = (status || "").toLowerCase().trim();
+  const s = normalizeLooseText(repairMojibakeText(status))
+    .replace(/-/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const compact = s.replace(/\s+/g, "");
+  if (
+    s.includes("completed") ||
+    s.includes("complete") ||
+    s.includes("hoan thanh") ||
+    compact === "hoanthanh"
+  ) {
+    return "completed";
+  }
+  if (s.includes("cancel") || s.includes("huy")) {
+    return "cancelled";
+  }
+  if (
+    s.includes("hiatus") ||
+    s.includes("coming soon") ||
+    s.includes("sap ra mat") ||
+    compact === "sapramat" ||
+    s.includes("tam") ||
+    s.includes("ngung") ||
+    s.includes("on hold") ||
+    s.includes("paused")
+  ) {
+    return "hiatus";
+  }
+  if (
+    s.includes("ongoing") ||
+    s.includes("publishing") ||
+    s.includes("dang ra") ||
+    s.includes("dang phat hanh") ||
+    compact === "dangphathanh" ||
+    s.includes("tien hanh") ||
+    s.includes("cap nhat") ||
+    s.includes("phat hanh")
+  ) {
+    return "ongoing";
+  }
   // Completed
   if (s.includes("hoàn") || s.includes("completed") || s === "hoan-thanh")
     return "completed";

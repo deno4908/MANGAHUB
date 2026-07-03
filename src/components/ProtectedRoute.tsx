@@ -99,8 +99,22 @@ const ProtectedRoute = ({ children, requireAuth = true, allowedRoles }: Protecte
     }
   }, [requireAuth, hasCheckedSession, isLoggedIn, user, isLoading, isRestoringSession, loadUser]);
 
-  if (!hasCheckedSession || isLoading) {
-    return <LoadingGate />;
+  if (!hasCheckedSession || isLoading || (requireAuth && isRestoringSession)) {
+    return (
+      <LoadingGate
+        message={
+          requireAuth && isRestoringSession
+            ? 'Äang khÃ´i phá»¥c phiÃªn Ä‘Äƒng nháº­p...'
+            : 'Äang táº£i...'
+        }
+        showRecovery={requireAuth && isRestoringSession}
+        onRetry={() => loadUser({ force: true })}
+        onRelogin={() => {
+          logout('local', { server: false });
+          window.location.href = '/login';
+        }}
+      />
+    );
   }
 
   if (requireAuth && !isLoggedIn) {

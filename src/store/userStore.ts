@@ -173,14 +173,16 @@ export const useUserStore = create<UserStore>((set, get) => ({
     }
 
     const run = (async () => {
+    let restoredSessionData: any = null;
     set({
       isLoading: true,
-      isRestoringSession: !getAccessToken() && hasSessionHint(),
+      isRestoringSession: !getAccessToken(),
       lastAuthRestoreError: null,
     });
     try {
       if (!getAccessToken()) {
-        const refreshed = await authApi.refresh();
+        const refreshResult = await authApi.refreshDetailed({ force: true });
+        const refreshed = Boolean(refreshResult?.ok);
         if (!refreshed) {
           if (!shouldRetryRefreshRestore()) {
             clearRestoreRetry();
@@ -203,9 +205,12 @@ export const useUserStore = create<UserStore>((set, get) => ({
           scheduleRestoreRetry(() => get().loadUser({ force: true }), 3_000);
           return;
         }
+        if (refreshResult?.data?.profile) {
+          restoredSessionData = refreshResult.data;
+        }
       }
 
-      const data = await authApi.getMe();
+      const data = restoredSessionData || await authApi.getMe();
       if (data.profile) {
         clearRestoreRetry();
         const user = mapProfile(data.profile);

@@ -8,6 +8,7 @@ import { historyApi, mangaApi } from '@/lib/api';
 import { adaptChapterPages, adaptMangaDetail } from '@/lib/adapters';
 import { getMangaDetailPath, normalizeMangaDexId } from '@/lib/mangaLinks';
 import { getLocalMangaDexChapterPages, getMangaDexImageFallback } from '@/lib/mangaDexImages';
+import { incrementMangaViewsInQueryCache, invalidateMangaRealtimeQueries } from '@/lib/querySync';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import ReaderImage from '@/components/reader/ReaderImage';
@@ -406,6 +407,7 @@ const ChapterReader = () => {
   const store = useReaderStore();
   const imageLoadingMode = useSettingsStore((s) => s.settings.reader.imageLoading || 'preload');
   const { user, isLoggedIn } = useUserStore();
+  const queryClient = useQueryClient();
   const detectedMobile = useIsMobile();
   const mobileReaderRef = useRef(detectedMobile);
   if (detectedMobile) mobileReaderRef.current = true;
@@ -750,12 +752,18 @@ const ChapterReader = () => {
       progress,
       pageSeen,
       totalPages,
+    }).then((result) => {
+      if (!result?.counted) return;
+      incrementMangaViewsInQueryCache(queryClient, [safeMangaSlug, mangaDetailId], 1);
+      invalidateMangaRealtimeQueries(queryClient);
     }).catch(() => {
       viewTrackedRef.current = false;
     });
   }, [
     id,
     safeMangaSlug,
+    mangaDetailId,
+    queryClient,
     totalPages,
     visiblePage,
     store.currentPage,
@@ -763,8 +771,6 @@ const ChapterReader = () => {
     scrollProgress,
     viewEligibilityTick,
   ]);
-
-  const queryClient = useQueryClient();
 
   const prefetchChapterData = useCallback(async (chapterId: string) => {
     const normalizedId = normalizeMangaDexId(chapterId) || chapterId;

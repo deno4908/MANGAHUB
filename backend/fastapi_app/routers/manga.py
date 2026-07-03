@@ -3963,7 +3963,7 @@ async def mangadex_search(
     page: int = Query(1, ge=1),
     limit: int = Query(24, ge=1, le=100),
     genre_slugs: str = Query(""),
-    translated_language: str = Query("all"),
+    translated_language: str = Query("vi"),
     original_language: str = Query(""),
     status: str = Query(""),
     sort: str = Query("latest"),
@@ -3993,7 +3993,9 @@ async def mangadex_search(
         if show_mature
         else ["safe", "suggestive"]
     )
-    effective_translated_language = "vi" if genre_values else translated_language
+    effective_translated_language = (
+        str(translated_language or "vi").strip().lower() or "vi"
+    )
     hidden: dict[str, str] = {}
     if filter_hidden:
         hidden = await _get_hidden_slugs(db)

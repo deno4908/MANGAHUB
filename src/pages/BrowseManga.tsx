@@ -218,15 +218,21 @@ type BrowsePageMemoryFilters = {
   minRating: number;
   sort: SortOption;
   search: string;
+  translatedLanguage: string;
 };
 
 const buildBrowsePageMemoryKey = (source: BrowseSourceTab, filters: BrowsePageMemoryFilters): string => {
   const genres = [...(filters.genres || [])].map((genre) => String(genre).trim().toLowerCase()).sort().join(',');
   const search = String(filters.search || '').trim().toLowerCase();
+  const translatedLanguage =
+    source === 'mangadex'
+      ? String(filters.translatedLanguage || 'vi').trim().toLowerCase() || 'vi'
+      : 'vi';
   return [
     source,
     filters.sort || 'popular',
     search,
+    translatedLanguage,
     genres,
     filters.status || '',
     filters.year || '',
@@ -1530,6 +1536,8 @@ const BrowseManga = () => {
   const queryClient = useQueryClient();
   const normalizedSearch = String(filters.search || '').trim();
   const hasSearch = normalizedSearch.length > 0;
+  const mangaDexTranslatedLanguage = String(filters.translatedLanguage || 'vi').trim().toLowerCase() || 'vi';
+  const mangaDexHasTranslationFilter = mangaDexTranslatedLanguage !== 'vi';
   const lastNonEmptyMangaDexRef = useRef<Record<string, MangaDexCatalogItem[]>>({});
   const lastNonEmptyTrendingRowsRef = useRef<TrendingMangaItem[]>([]);
   const warmMangaDexCatalogLimitsRef = useRef<Set<number | 'all'>>(new Set());
@@ -1550,7 +1558,16 @@ const BrowseManga = () => {
   const isMangaDexSourceTab = activeSource === 'mangadex';
   const browsePageMemoryKey = useMemo(
     () => buildBrowsePageMemoryKey(activeSource, filters),
-    [activeSource, filters.genres, filters.minRating, filters.search, filters.sort, filters.status, filters.year],
+    [
+      activeSource,
+      filters.genres,
+      filters.minRating,
+      filters.search,
+      filters.sort,
+      filters.status,
+      filters.translatedLanguage,
+      filters.year,
+    ],
   );
   const lastBrowsePageStateRef = useRef<{ key: string; page: number }>({ key: browsePageMemoryKey, page });
   const mangaDexCatalogMode = isMangaDexSourceTab && filters.sort === 'latest' ? 'latest' : 'default';
@@ -1658,6 +1675,7 @@ const BrowseManga = () => {
   const useMangaDexLatestFeedMode =
     isMangaDexSourceTab &&
     filters.sort === 'latest' &&
+    mangaDexTranslatedLanguage === 'vi' &&
     !hasSearch &&
     !hasLocalClientFilters &&
     !filters.status &&
@@ -1665,7 +1683,8 @@ const BrowseManga = () => {
   const mangaDexHasServerQueryableFilters =
     hasSearch ||
     filters.genres.length > 0 ||
-    Boolean(filters.status);
+    Boolean(filters.status) ||
+    mangaDexHasTranslationFilter;
   const useMangaDexServerRatingMode =
     isMangaDexSourceTab &&
     filters.sort === 'rating' &&
@@ -1702,6 +1721,7 @@ const BrowseManga = () => {
       'mangadex',
       'server-search',
       normalizedSearch,
+      mangaDexTranslatedLanguage,
       mangaDexServerSearchGenreSlugs,
       filters.status,
       mangaDexServerSearchSort,
@@ -1710,6 +1730,7 @@ const BrowseManga = () => {
     ] as const,
     [
       normalizedSearch,
+      mangaDexTranslatedLanguage,
       mangaDexServerSearchGenreSlugs,
       filters.status,
       mangaDexServerSearchSort,
@@ -1723,6 +1744,7 @@ const BrowseManga = () => {
         page: targetPage,
         limit: BROWSE_PAGE_SIZE,
         genreSlugs: mangaDexServerSearchGenreSlugs,
+        translatedLanguage: mangaDexTranslatedLanguage,
         status: filters.status || '',
         sort: mangaDexServerSearchSort,
         showMature: showMatureContent,
@@ -1734,6 +1756,7 @@ const BrowseManga = () => {
     },
     [
       normalizedSearch,
+      mangaDexTranslatedLanguage,
       mangaDexServerSearchGenreSlugs,
       filters.status,
       mangaDexServerSearchSort,
@@ -1986,6 +2009,7 @@ const BrowseManga = () => {
     filters.genres,
     filters.status,
     filters.sort,
+    filters.translatedLanguage,
     filters.year,
     filters.minRating,
   ]);
@@ -2658,8 +2682,9 @@ const BrowseManga = () => {
     if (!showMatureContent) {
       items = items.filter((m) => !isMatureManga(m));
     }
-    // Status filter (client-side only when using list API without status)
-    if (filters.status && listType === 'truyen-moi') {
+    // Keep this guard even when the endpoint is status-specific; OTruyen can
+    // occasionally return mixed rows or localized statuses.
+    if (filters.status) {
       items = items.filter(m => m.status === filters.status);
     }
     // Genre filter: apply when NOT using an OTruyen category API (category API already filters server-side)
@@ -2712,6 +2737,9 @@ const BrowseManga = () => {
       let serverItems = [...mangaDexServerItems];
       if (!showMatureContent) {
         serverItems = serverItems.filter((m) => !isMatureManga(m));
+      }
+      if (filters.status) {
+        serverItems = serverItems.filter((m) => m.status === filters.status);
       }
       return serverItems;
     }
@@ -3451,6 +3479,9 @@ const BrowseManga = () => {
 
       const existing = knownLookup.get(slug);
       if (existing) {
+        if (filters.status && existing.status !== filters.status) {
+          continue;
+        }
         const nextGenres = (existing.genres && existing.genres.length) ? existing.genres : rowGenres;
         const nextTags = (existing.tags && existing.tags.length) ? existing.tags : rowTags;
         if (!matchesGenreFilter(nextGenres, nextTags)) {
@@ -3492,6 +3523,10 @@ const BrowseManga = () => {
               new Date().toISOString(),
           ),
         });
+        continue;
+      }
+
+      if (filters.status) {
         continue;
       }
 
@@ -3567,6 +3602,7 @@ const BrowseManga = () => {
     mangaDexItems,
     filtered,
     mangaDexFiltered,
+    filters.status,
     filters.year,
     selectedGenreAliasGroups,
   ]);
@@ -3873,7 +3909,27 @@ const BrowseManga = () => {
     : isClientPaginationMode
       ? estimatedClientTotalPages
       : otruyenServerPages;
-  const currentPage = Math.min(page, totalPages);
+  const hasResolvedTotalPages = useGlobalTopRatedMode
+    ? !isLoading
+    : useMangaDexServerSearchMode
+      ? mangaDexServerSearchQuery.isSuccess && !mangaDexServerSearchQuery.isPlaceholderData
+    : useMangaDexLatestFeedMode
+      ? mangaDexLatestFeedQuery.isSuccess && !mangaDexLatestFeedQuery.isPlaceholderData
+    : isClientPaginationMode
+      ? (
+          !isLoading &&
+          (
+            !isMangaDexSourceTab ||
+            activeMangaDexSuccess ||
+            stableMergedFiltered.length > 0
+          )
+        )
+    : useCombinedList
+      ? combinedListQuery.isSuccess
+    : useOTruyenCategory
+      ? categoryQuery.isSuccess
+      : listQuery.isSuccess;
+  const currentPage = hasResolvedTotalPages ? Math.min(page, totalPages) : page;
   const canExpandMangaDexDemand = canExpandMangaDexCatalog;
   const isAtMangaDexLoadedLimit =
     canExpandMangaDexDemand &&
@@ -4790,9 +4846,10 @@ const BrowseManga = () => {
   }, [displayItems]);
 
   useEffect(() => {
+    if (!hasResolvedTotalPages) return;
     if (isNearMangaDexLoadedLimit) return;
     if (page > totalPages) setPage(totalPages);
-  }, [page, totalPages, isNearMangaDexLoadedLimit]);
+  }, [page, totalPages, hasResolvedTotalPages, isNearMangaDexLoadedLimit]);
 
   // Prefetch adjacent MangaDex search pages so pagination feels instant.
   useEffect(() => {

@@ -26,6 +26,7 @@ import {
 } from "@/lib/adapters";
 import { MANGADEX_ID_RE, normalizeMangaDexId } from "@/lib/mangaLinks";
 import { getLocalMangaDexChapterPages } from "@/lib/mangaDexImages";
+import { invalidateMangaRealtimeQueries } from "@/lib/querySync";
 import type { Manga } from "@/types/manga";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -879,6 +880,7 @@ export function useToggleBookmark() {
       qc.invalidateQueries({ queryKey: ["bookmarks"], refetchType: "active" });
       qc.invalidateQueries({ queryKey: ["bookmark", "check", vars.slug], refetchType: "active" });
       qc.invalidateQueries({ queryKey: ["public-profile"], refetchType: "active" });
+      invalidateMangaRealtimeQueries(qc);
     },
   });
 }
@@ -983,6 +985,7 @@ export function useToggleFollow() {
       qc.invalidateQueries({ queryKey: ["follows"], refetchType: "active" });
       qc.invalidateQueries({ queryKey: ["follow", "check", vars.slug], refetchType: "active" });
       qc.invalidateQueries({ queryKey: ["public-profile"], refetchType: "active" });
+      invalidateMangaRealtimeQueries(qc);
     },
   });
 }
@@ -1070,7 +1073,10 @@ export function useSaveHistory() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: historyApi.add,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["history"], refetchType: "active" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["history"], refetchType: "active" });
+      invalidateMangaRealtimeQueries(qc);
+    },
   });
 }
 
@@ -1094,6 +1100,8 @@ export function useCreateComment() {
     onSuccess: (_data, vars: any) => {
       // Invalidate the comment list so it re-fetches fresh data from server
       qc.invalidateQueries({ queryKey: ["comments", vars?.manga_slug] });
+      qc.invalidateQueries({ queryKey: ["public-profile"], refetchType: "active" });
+      qc.invalidateQueries({ queryKey: ["notifications"], refetchType: "active" });
     },
   });
 }
@@ -1156,6 +1164,7 @@ export function useRateManga() {
       qc.invalidateQueries({ queryKey: ["manga", "homepage"] });
       qc.invalidateQueries({ queryKey: ["manga", "mangadex", "vi-catalog"] });
       qc.invalidateQueries({ queryKey: ["manga", "mangadex-catalog"] });
+      invalidateMangaRealtimeQueries(qc);
     },
   });
 }
