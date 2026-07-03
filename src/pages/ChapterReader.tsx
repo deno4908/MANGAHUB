@@ -5,7 +5,7 @@ import { useReaderStore } from '@/store/readerStore';
 import { useSettingsStore } from '@/store/settingsStore';
 import { useUserStore } from '@/store/userStore';
 import { historyApi, mangaApi } from '@/lib/api';
-import { adaptChapterPages, adaptMangaDetail } from '@/lib/adapters';
+import { adaptChapterPages, adaptMangaDetail, getChapterPageFallback } from '@/lib/adapters';
 import { getMangaDetailPath, normalizeMangaDexId } from '@/lib/mangaLinks';
 import { getLocalMangaDexChapterPages, getMangaDexImageFallback } from '@/lib/mangaDexImages';
 import { incrementMangaViewsInQueryCache, invalidateMangaRealtimeQueries } from '@/lib/querySync';
@@ -698,7 +698,7 @@ const ChapterReader = () => {
   useEffect(() => {
     if (store.mode !== 'horizontal' || horizontalLoaded || horizontalUseFallback) return;
     const page = pages[store.currentPage] || '';
-    const fallback = getMangaDexImageFallback(page);
+    const fallback = getChapterPageFallback(page) || getMangaDexImageFallback(page);
     if (!fallback) return;
     const timeout = window.setTimeout(() => {
       setHorizontalUseFallback(true);
@@ -977,14 +977,18 @@ const ChapterReader = () => {
     if (!pages.length) return;
     const mode = imageLoadingMode;
 
+    const preloadImageUrl = (url: string, priority: 'high' | 'low') => {
+      if (!url || preloadedRef.current.has(url)) return;
+      preloadedRef.current.add(url);
+      const img = new Image();
+      img.fetchPriority = priority;
+      img.src = url;
+    };
+
     const preloadUrls = (urls: string[], highPriorityCount = 0) => {
       urls.forEach((url, index) => {
-        if (url && !preloadedRef.current.has(url)) {
-          preloadedRef.current.add(url);
-          const img = new Image();
-          img.fetchPriority = index < highPriorityCount ? 'high' : 'low';
-          img.src = url;
-        }
+        preloadImageUrl(url, index < highPriorityCount ? 'high' : 'low');
+        preloadImageUrl(getChapterPageFallback(url), 'low');
       });
     };
 
@@ -1003,14 +1007,17 @@ const ChapterReader = () => {
     const HIGH_PRIORITY_AHEAD = mode === 'aggressive' ? 6 : 4;
     const start = visiblePage + 1;
     const end = Math.min(visiblePage + AHEAD + 1, pages.length);
+    const preloadImageUrl = (url: string, priority: 'high' | 'low') => {
+      if (!url || preloadedRef.current.has(url)) return;
+      preloadedRef.current.add(url);
+      const img = new Image();
+      img.fetchPriority = priority;
+      img.src = url;
+    };
     for (let i = start; i < end; i++) {
       const url = pages[i];
-      if (url && !preloadedRef.current.has(url)) {
-        preloadedRef.current.add(url);
-        const img = new Image();
-        img.fetchPriority = i <= visiblePage + HIGH_PRIORITY_AHEAD ? 'high' : 'low';
-        img.src = url;
-      }
+      preloadImageUrl(url, i <= visiblePage + HIGH_PRIORITY_AHEAD ? 'high' : 'low');
+      preloadImageUrl(getChapterPageFallback(url), 'low');
     }
   }, [visiblePage, pages, imageLoadingMode]);
 
@@ -1028,11 +1035,21 @@ const ChapterReader = () => {
         const pages = prefetched.pages;
         const eagerPages = pages.slice(0, imageLoadingMode === 'aggressive' ? 10 : 5);
         eagerPages.forEach((url, index) => {
-          if (!url || preloadedRef.current.has(url)) return;
-          preloadedRef.current.add(url);
-          const img = new Image();
-          img.fetchPriority = index <= (imageLoadingMode === 'aggressive' ? 3 : 1) ? 'high' : 'low';
-          img.src = url;
+          if (!url) return;
+          const priority = index <= (imageLoadingMode === 'aggressive' ? 3 : 1) ? 'high' : 'low';
+          if (!preloadedRef.current.has(url)) {
+            preloadedRef.current.add(url);
+            const img = new Image();
+            img.fetchPriority = priority;
+            img.src = url;
+          }
+          const fallbackUrl = getChapterPageFallback(url);
+          if (fallbackUrl && !preloadedRef.current.has(fallbackUrl)) {
+            preloadedRef.current.add(fallbackUrl);
+            const fallbackImg = new Image();
+            fallbackImg.fetchPriority = 'low';
+            fallbackImg.src = fallbackUrl;
+          }
         });
         return prefetched;
       },
@@ -1161,7 +1178,7 @@ const ChapterReader = () => {
   const progress = store.mode === 'horizontal' ? ((store.currentPage + 1) / totalPages) * 100 : scrollProgress;
   const displayPage = store.mode === 'horizontal' ? store.currentPage + 1 : visiblePage + 1;
   const currentHorizontalPage = pages[store.currentPage] || '';
-  const horizontalFallbackPage = getMangaDexImageFallback(currentHorizontalPage);
+  const horizontalFallbackPage = getChapterPageFallback(currentHorizontalPage) || getMangaDexImageFallback(currentHorizontalPage);
   const activeHorizontalPage =
     horizontalUseFallback && horizontalFallbackPage
       ? horizontalFallbackPage
@@ -1352,7 +1369,17 @@ const ChapterReader = () => {
         ) : (
           <div className={`${store.mode === 'webtoon' ? 'max-w-2xl' : 'max-w-4xl'} mx-auto`}>
             {pages.map((page, i) => (
-              <ReaderImage key={`${id}-${i}`} src={page} alt={`Trang ${i + 1}`} index={i} imageFit={store.imageFit} pageGap={store.pageGap} onVisible={handlePageVisible} priority={i < 8} />
+              <ReaderImage
+                key={`${id}-${i}`}
+                src={page}
+                fallbackSrc={getChapterPageFallback(page)}
+                alt={`Trang ${i + 1}`}
+                index={i}
+                imageFit={store.imageFit}
+                pageGap={store.pageGap}
+                onVisible={handlePageVisible}
+                priority={i < 8}
+              />
             ))}
             {/* End of chapter + comments */}
             <div className="text-center py-16 space-y-6" onClick={e => e.stopPropagation()}>

@@ -254,15 +254,7 @@ export function wasLastRefreshFailureMissingToken() {
 }
 
 export function shouldStopRestoringSession() {
-  if (!lastRefreshFailureHard) return false;
-  if (wasLastRefreshFailureMissingToken()) {
-    if (hardRefreshFailureCount < MISSING_REFRESH_TOKEN_MIN_COUNT) return false;
-    if (!firstHardRefreshFailureAt) return false;
-    return Date.now() - firstHardRefreshFailureAt >= MISSING_REFRESH_TOKEN_GRACE_MS;
-  }
-  if (hardRefreshFailureCount < HARD_REFRESH_FAILURE_MIN_COUNT) return false;
-  if (!firstHardRefreshFailureAt) return false;
-  return Date.now() - firstHardRefreshFailureAt >= HARD_REFRESH_FAILURE_GRACE_MS;
+  return lastRefreshFailureHard;
 }
 
 function markRefreshFailure(message: string, hard: boolean) {
@@ -592,6 +584,9 @@ function isHardRefreshFailure(message: string): boolean {
   return (
     msg.includes("refresh token khong hop le") ||
     msg.includes("refresh token khong khop") ||
+    msg.includes("refresh token la bat buoc") ||
+    msg.includes("refresh token is required") ||
+    msg.includes("missing refresh token") ||
     msg.includes("invalid refresh") ||
     msg.includes("session not found") ||
     msg.includes("can xac thuc lai") ||
@@ -1381,6 +1376,10 @@ export const authApi = {
   },
   refresh: async (options: AuthRefreshOptions = {}) => {
     const result = await performAuthRefresh(options);
+    if (!result.ok && shouldStopRestoringSession()) {
+      clearTokens();
+      emitForceLogout("session-expired");
+    }
     return result.ok;
   },
   refreshDetailed: (options: AuthRefreshOptions = {}) => performAuthRefresh(options),

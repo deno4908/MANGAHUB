@@ -86,6 +86,8 @@ const POPULAR_TRENDING_FALLBACK_LIMIT = 80;
 const POPULAR_TRENDING_FALLBACK_TIMEOUT_MS = 4_500;
 const GLOBAL_SORT_FETCH_CHUNK = 24;
 const GLOBAL_SORT_FETCH_MAX_PAGES = 3000;
+const OTRUYEN_STATUS_FILL_PAGE_BUFFER = 8;
+const OTRUYEN_STATUS_FILL_MAX_PAGES = 48;
 const MANGADEX_CATALOG_LIMIT_LIGHT_DEFAULT = 500;
 const MANGADEX_CATALOG_LIMIT_LIGHT_WITH_MATURE = 800;
 const MANGADEX_DEMAND_INITIAL_PAGES = 16;
@@ -1840,6 +1842,12 @@ const BrowseManga = () => {
   // Combined endpoint is heavier and can hurt tab responsiveness on large datasets.
   // Keep browse tabs on lightweight list + cached MangaDex catalog flow.
   const useCombinedList = false;
+  const useOTruyenStatusFillMode =
+    isOTruyenSourceTab &&
+    !isClientPaginationMode &&
+    Boolean(filters.status) &&
+    !useCombinedList &&
+    !useGlobalClientSortMode;
 
   const combinedListQuery = useQuery({
     queryKey: ['manga', 'list-combined', listType, serverPage, mangadexCatalogLimit],
@@ -2070,6 +2078,100 @@ const BrowseManga = () => {
     refetchOnMount: false,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
+  });
+
+  const otruyenStatusFillQuery = useQuery({
+    queryKey: [
+      'manga',
+      'status-fill',
+      useOTruyenCategory ? 'category' : 'list',
+      useOTruyenCategory ? activeCategorySlug : listType,
+      page,
+      filters.status,
+      showMatureContent,
+    ],
+    queryFn: async () => {
+      const safeTargetPage = Math.max(1, Number(page) || 1);
+      const targetVisibleItems = safeTargetPage * BROWSE_PAGE_SIZE;
+      const collected: Manga[] = [];
+      const seenPages = new Set<number>();
+      let visibleCount = 0;
+      let totalPages = 1;
+
+      const isVisibleStatusItem = (item: Manga) => {
+        if (!item) return false;
+        if (!showMatureContent && isMatureManga(item)) return false;
+        if (filters.status && item.status !== filters.status) return false;
+        return true;
+      };
+
+      const appendPage = (payload: OTruyenListData) => {
+        for (const item of payload.items || []) {
+          collected.push(item);
+          if (isVisibleStatusItem(item)) {
+            visibleCount += 1;
+          }
+        }
+      };
+
+      const fetchPage = async (targetPage: number): Promise<OTruyenListData> => {
+        if (useOTruyenCategory) {
+          const pageQueryKey = ['manga', 'category', activeCategorySlug, targetPage] as const;
+          const cached = queryClient.getQueryData(pageQueryKey) as OTruyenListData | undefined;
+          if (cached?.items?.length) return cached;
+
+          const payload = await mangaApi.getCategoryManga(activeCategorySlug, targetPage);
+          assertOTruyenPayload(payload);
+          const adapted = adaptListData(payload);
+          queryClient.setQueryData(pageQueryKey, adapted);
+          return adapted;
+        }
+
+        const pageQueryKey = ['manga', 'list', listType, targetPage] as const;
+        const cached = queryClient.getQueryData(pageQueryKey) as OTruyenListData | undefined;
+        if (cached?.items?.length) return cached;
+
+        const payload = await mangaApi.getList(listType, targetPage);
+        assertOTruyenPayload(payload);
+        const adapted = adaptListData(payload);
+        queryClient.setQueryData(pageQueryKey, adapted);
+        return adapted;
+      };
+
+      const firstPage = await fetchPage(1);
+      seenPages.add(1);
+      totalPages = Math.max(1, Number(firstPage.totalPages || 1));
+      appendPage(firstPage);
+
+      const maxPageToInspect = Math.min(
+        totalPages,
+        OTRUYEN_STATUS_FILL_MAX_PAGES,
+        Math.max(safeTargetPage + OTRUYEN_STATUS_FILL_PAGE_BUFFER, safeTargetPage * 2),
+      );
+
+      for (let targetPage = 2; targetPage <= maxPageToInspect; targetPage += 1) {
+        if (visibleCount >= targetVisibleItems) break;
+        if (seenPages.has(targetPage)) continue;
+        const payload = await fetchPage(targetPage);
+        seenPages.add(targetPage);
+        totalPages = Math.max(totalPages, Number(payload.totalPages || totalPages || 1));
+        appendPage(payload);
+      }
+
+      return {
+        items: dedupeMangaById(collected),
+        totalPages,
+        fetchedPages: seenPages.size,
+        hasEnoughForPage: visibleCount >= targetVisibleItems,
+      };
+    },
+    enabled: useOTruyenStatusFillMode && (!useOTruyenCategory || Boolean(activeCategorySlug)),
+    staleTime: 10 * 60 * 1000,
+    gcTime: 8 * 60 * 1000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: 1,
   });
 
   const globalSortedListQuery = useQuery({
@@ -2373,6 +2475,10 @@ const BrowseManga = () => {
     ? combinedListQuery.data?.listData
     : (useOTruyenCategory ? categoryQuery.data : listQuery.data);
   const stableListData = data;
+  const otruyenStatusFillItems = useMemo(
+    () => (useOTruyenStatusFillMode ? (otruyenStatusFillQuery.data?.items || []) : []),
+    [useOTruyenStatusFillMode, otruyenStatusFillQuery.data?.items],
+  );
 
   const globalSortedItems = useMemo(() => {
     if (!useGlobalClientSortMode) return [] as Manga[];
@@ -2387,7 +2493,12 @@ const BrowseManga = () => {
       return new Map<string, Set<string>>();
     }
 
-    const sourceItems = useGlobalClientSortMode ? globalSortedItems : (stableListData?.items || []);
+    const sourceItems =
+      useOTruyenStatusFillMode && otruyenStatusFillItems.length
+        ? otruyenStatusFillItems
+        : useGlobalClientSortMode
+          ? globalSortedItems
+          : (stableListData?.items || []);
     const map = new Map<string, Set<string>>();
 
     for (const item of sourceItems) {
@@ -2400,10 +2511,17 @@ const BrowseManga = () => {
   }, [
     useOTruyenCategory,
     selectedGenreAliasGroups,
+    useOTruyenStatusFillMode,
+    otruyenStatusFillItems,
     useGlobalClientSortMode,
     globalSortedItems,
     stableListData?.items,
   ]);
+
+  const isOTruyenStatusFillLoading =
+    useOTruyenStatusFillMode &&
+    otruyenStatusFillQuery.isLoading &&
+    otruyenStatusFillItems.length === 0;
 
   const isLoading =
     (useMangaDexServerSearchMode
@@ -2413,6 +2531,7 @@ const BrowseManga = () => {
       : useCombinedList
         ? combinedListQuery.isLoading
         : (useOTruyenCategory ? categoryQuery.isLoading : listQuery.isLoading)) ||
+    isOTruyenStatusFillLoading ||
     (useGlobalClientSortMode && globalSortedListQuery.isLoading);
   const isFetching =
     (useMangaDexServerSearchMode
@@ -2422,6 +2541,7 @@ const BrowseManga = () => {
       : useCombinedList
         ? combinedListQuery.isFetching
         : (useOTruyenCategory ? categoryQuery.isFetching : listQuery.isFetching)) ||
+    (useOTruyenStatusFillMode && otruyenStatusFillQuery.isFetching) ||
     (useGlobalClientSortMode && (globalSortedListQuery.isFetching || isGlobalSortBackgroundFetching));
   const isMangaDexServerPageTransition =
     (
@@ -2482,10 +2602,12 @@ const BrowseManga = () => {
       ? (mangaDexServerSearchQuery.isLoading && !mangaDexServerSearchQuery.data)
     : useMangaDexLatestFeedMode
       ? (mangaDexLatestFeedQuery.isLoading && !mangaDexLatestFeedQuery.data)
-    : useGlobalClientSortMode
-      ? (globalSortedListQuery.isLoading && globalSortedItemsLength === 0)
+      : useGlobalClientSortMode
+        ? (globalSortedListQuery.isLoading && globalSortedItemsLength === 0)
       : useTrendingPopularMode
         ? (listQuery.isLoading && !stableListData?.items?.length)
+      : useOTruyenStatusFillMode
+        ? (isOTruyenStatusFillLoading && otruyenStatusFillItems.length === 0)
         : (useOTruyenCategory ? (isLoading && !data) : (listQuery.isLoading && !stableListData?.items?.length));
 
   const mangaDexItems = useMemo<Manga[]>(() => {
@@ -2676,7 +2798,12 @@ const BrowseManga = () => {
 
   // Client-side filter on loaded data
   const filtered = useMemo(() => {
-    const sourceItems = useGlobalClientSortMode ? globalSortedItems : (stableListData?.items || []);
+    const sourceItems =
+      useOTruyenStatusFillMode && otruyenStatusFillItems.length
+        ? otruyenStatusFillItems
+        : useGlobalClientSortMode
+          ? globalSortedItems
+          : (stableListData?.items || []);
     if (!sourceItems.length) return [];
     let items = [...sourceItems];
     if (!showMatureContent) {
@@ -2721,6 +2848,8 @@ const BrowseManga = () => {
   }, [
     useGlobalClientSortMode,
     globalSortedItems,
+    useOTruyenStatusFillMode,
+    otruyenStatusFillItems,
     stableListData?.items,
     showMatureContent,
     filters,
@@ -3836,7 +3965,9 @@ const BrowseManga = () => {
   // Smaller page size keeps initial render and image loading lighter.
   const pageSize = BROWSE_PAGE_SIZE;
 
-  const otruyenServerPages = isClientPaginationMode ? 0 : (data?.totalPages || 1);
+  const otruyenServerPages = isClientPaginationMode
+    ? 0
+    : (otruyenStatusFillQuery.data?.totalPages || data?.totalPages || 1);
   const canExpandMangaDexCatalog =
     isMangaDexSourceTab &&
     !useMangaDexServerSearchMode &&
@@ -3887,9 +4018,23 @@ const BrowseManga = () => {
     pageSize,
   ]);
 
+  const globalTopRatedPagedSource = useMemo(() => {
+    if (!useGlobalTopRatedMode) return [] as Manga[];
+    const source =
+      useOTruyenStatusFillMode && filtered.length > 0
+        ? dedupeMangaById([...guestTopRatedFilteredBySource, ...filtered])
+        : guestTopRatedFilteredBySource;
+    return [...source].sort(compareByRating);
+  }, [
+    useGlobalTopRatedMode,
+    useOTruyenStatusFillMode,
+    guestTopRatedFilteredBySource,
+    filtered,
+  ]);
+
   const guestTopRatedTotalPages = useMemo(
-    () => Math.max(1, Math.ceil(guestTopRatedFilteredBySource.length / pageSize)),
-    [guestTopRatedFilteredBySource.length, pageSize],
+    () => Math.max(1, Math.ceil(globalTopRatedPagedSource.length / pageSize)),
+    [globalTopRatedPagedSource.length, pageSize],
   );
   const mangaDexServerTotalPages = Math.max(
     1,
@@ -4106,7 +4251,7 @@ const BrowseManga = () => {
 
   const pagedItems = useMemo(() => {
     if (useGlobalTopRatedMode) {
-      return guestTopRatedFilteredBySource.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+      return globalTopRatedPagedSource.slice((currentPage - 1) * pageSize, currentPage * pageSize);
     }
 
     if (useMangaDexServerSearchMode || useMangaDexLatestFeedMode) {
@@ -4155,6 +4300,9 @@ const BrowseManga = () => {
         sortable = sortAlphabeticalItems(sortable);
         break;
     }
+    if (useOTruyenStatusFillMode && otruyenStatusFillItems.length > 0) {
+      return sortable.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+    }
     return filters.sort === 'popular' && isOTruyenSourceTab
       ? sortable.slice(0, pageSize)
       : sortable;
@@ -4167,6 +4315,8 @@ const BrowseManga = () => {
     pageSize,
     filters.sort,
     filtered,
+    useOTruyenStatusFillMode,
+    otruyenStatusFillItems.length,
     myRatedOverlayItemsForSource,
     isOTruyenSourceTab,
     popularTrendingItemsForServerPage,
@@ -4176,7 +4326,7 @@ const BrowseManga = () => {
     ratingSortMyScores,
     popularTrendingOrderMap,
     useGlobalTopRatedMode,
-    guestTopRatedFilteredBySource,
+    globalTopRatedPagedSource,
   ]);
 
   const shouldRunVisibleRatingHydrate =

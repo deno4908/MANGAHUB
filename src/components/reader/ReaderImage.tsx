@@ -10,9 +10,10 @@ interface ReaderImageProps {
   pageGap: number;
   onVisible?: (index: number) => void;
   priority?: boolean;
+  fallbackSrc?: string;
 }
 
-const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, priority = false }: ReaderImageProps) => {
+const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, priority = false, fallbackSrc }: ReaderImageProps) => {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
@@ -71,7 +72,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
     setLoaded(true);
   }, []);
 
-  const fallbackSource = getMangaDexImageFallback(src);
+  const fallbackSource = fallbackSrc || getMangaDexImageFallback(src);
   const activeSrc = useFallbackSource && fallbackSource ? fallbackSource : src;
   const imgSrc = retryCount > 0 ? `${activeSrc}${activeSrc.includes('?') ? '&' : '?'}retry=${retryCount}` : activeSrc;
 
@@ -83,8 +84,12 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
         setRetryCount(0);
         return;
       }
+      if (retryCount < 2) {
+        setRetryCount((count) => count + 1);
+        return;
+      }
       setError(true);
-    }, useFallbackSource ? 15_000 : visible ? 2_200 : priority ? 4_500 : 6_000);
+    }, useFallbackSource ? 18_000 : visible ? 5_000 : priority ? 6_500 : 8_000);
     return () => window.clearTimeout(timeout);
   }, [inView, visible, loaded, error, useFallbackSource, fallbackSource, retryCount, priority]);
 

@@ -442,11 +442,11 @@ export function adaptMangaItem(item: any): Manga {
   const coverRaw = String(item.cover_url || item.cover || "").trim();
   const thumbRaw = coverRaw || String(item.thumb_url || "").trim();
   const coverDirect = thumbRaw ? thumbUrl(thumbRaw, slug) : thumbUrl("", slug);
-  const cover = isOTruyenImageUrl(coverDirect) ? toProxyImageUrl(coverDirect) : coverDirect;
+  const cover = coverDirect;
   const coverProxy =
     thumbFallbackUrl(thumbRaw, slug) ||
     (isMangaDexImageUrl(coverDirect) ? toProxyImageUrl(coverDirect) : "") ||
-    (isOTruyenImageUrl(coverDirect) ? coverDirect : "");
+    (isOTruyenImageUrl(coverDirect) ? toProxyImageUrl(coverDirect) : "");
   const categories = item.category || [];
   const ratingRaw = item.rating_average ?? item.average_rating ?? item.rating;
   const rating = Number.isFinite(Number(ratingRaw)) ? Number(ratingRaw) : 0;
@@ -664,11 +664,11 @@ export function adaptMangaDetail(data: any): Manga {
   const coverRaw = String(item.cover_url || item.cover || "").trim();
   const thumbRaw = coverRaw || String(item.thumb_url || "").trim();
   const coverDirect = thumbRaw ? thumbUrl(thumbRaw, slug) : thumbUrl("", slug);
-  const cover = isOTruyenImageUrl(coverDirect) ? toProxyImageUrl(coverDirect) : coverDirect;
+  const cover = coverDirect;
   const coverProxy =
     thumbFallbackUrl(thumbRaw, slug) ||
     (isMangaDexImageUrl(coverDirect) ? toProxyImageUrl(coverDirect) : "") ||
-    (isOTruyenImageUrl(coverDirect) ? coverDirect : "");
+    (isOTruyenImageUrl(coverDirect) ? toProxyImageUrl(coverDirect) : "");
   const categories = item.category || [];
 
   // Build chapters from server_data
@@ -781,14 +781,24 @@ export function adaptChapterPages(data: any): string[] {
   const items = data?.data?.item?.chapter_image || [];
   const domain = data?.data?.domain_cdn || "https://sv1.otruyencdn.com";
   const chapterPath = data?.data?.item?.chapter_path || "";
-  const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
   return items.map((img: any) => {
     const filename = img.image_file || "";
-    const cdnUrl = `${domain}/${chapterPath}/${filename}`;
-    // Route through backend proxy for caching
-    return `${API_BASE}/api/images/img?url=${encodeURIComponent(cdnUrl)}`;
-  });
+    return `${domain}/${chapterPath}/${filename}`;
+  }).filter(Boolean);
+}
+
+export function toImageProxyUrl(url: string): string {
+  const raw = String(url || "").trim();
+  if (!/^https?:\/\//i.test(raw)) return raw;
+  const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+  return `${API_BASE}/api/images/img?url=${encodeURIComponent(raw)}`;
+}
+
+export function getChapterPageFallback(url: string): string {
+  const raw = String(url || "").trim();
+  if (!raw || !isOTruyenImageUrl(raw)) return "";
+  return toImageProxyUrl(raw);
 }
 
 /** Adapt OTruyen home response → Manga[] */

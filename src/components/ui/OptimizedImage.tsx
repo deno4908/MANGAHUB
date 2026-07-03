@@ -77,7 +77,7 @@ const OptimizedImage = memo(({
   const fallbackSwitchDelayMs =
     typeof fallbackDelayMs === 'number'
       ? Math.max(0, fallbackDelayMs)
-      : (isRemoteUrl(normalizedSrc) && isRemoteUrl(normalizedFallbackSrc) ? 1200 : 0);
+      : (isRemoteUrl(normalizedSrc) && isRemoteUrl(normalizedFallbackSrc) ? 2500 : 0);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const loadedRef = useRef(alreadyCached);
@@ -285,6 +285,7 @@ const OptimizedImage = memo(({
           className={cn('w-full h-full', className)}
           loading={priority ? 'eager' : 'lazy'}
           decoding="async"
+          fetchPriority={priority ? 'high' : 'auto'}
           draggable={draggable}
           onLoad={handleLoad}
           onError={handleError}
