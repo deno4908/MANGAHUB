@@ -104,8 +104,8 @@ const ProtectedRoute = ({ children, requireAuth = true, allowedRoles }: Protecte
       <LoadingGate
         message={
           requireAuth && isRestoringSession
-            ? 'Äang khÃ´i phá»¥c phiÃªn Ä‘Äƒng nháº­p...'
-            : 'Äang táº£i...'
+            ? 'Đang khôi phục phiên đăng nhập...'
+            : 'Đang tải...'
         }
         showRecovery={requireAuth && isRestoringSession}
         onRetry={() => loadUser({ force: true })}

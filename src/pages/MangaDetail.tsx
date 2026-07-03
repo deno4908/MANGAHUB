@@ -105,7 +105,7 @@ function formatMangaDexLanguageLabel(language: string): string {
 function normalizeMangaDexChapterTitle(chapter: Manga['chapters'][number]): string {
   const title = String(chapter.title || '').trim();
   if (!title) return '';
-  if (/^Ch(?:apter|Æ°Æ¡ng)\s+/i.test(title) && String(chapter.scanlationGroup || '').trim()) {
+  if (/^Ch(?:apter|ương)\s+/i.test(title) && String(chapter.scanlationGroup || '').trim()) {
     return '';
   }
   return title;
@@ -426,7 +426,7 @@ const MangaDetail = () => {
         id: `upload-${up.id}`,
         mangaId: up.manga_slug || detailReadySlug,
         number: up.chapter_number ?? 0,
-        title: up.chapter_title || `ChÆ°Æ¡ng ${up.chapter_number}`,
+        title: up.chapter_title || `Chương ${up.chapter_number}`,
         pages: up.pages || [],
         uploadDate: up.published_at || up.created_at || '',
         scanlationGroup: up.profiles?.display_name || up.profiles?.username || 'User Upload',
