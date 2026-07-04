@@ -2073,7 +2073,7 @@ const Index = () => {
         </Section>
 
         <Section title="Mới thêm gần đây" link="/manga">
-          {isHomeSynchronizedLoading ? <SkeletonGrid /> : <MangaGrid manga={ongoingMergedRated.slice(0, 6)} lazyBatch initialBatchSize={4} batchStep={2} batchDelayMs={220} />}
+          {isHomeSynchronizedLoading ? <SkeletonGrid /> : <MangaGrid manga={latestHomeDisplay.slice(0, 6)} lazyBatch initialBatchSize={4} batchStep={2} batchDelayMs={220} />}
         </Section>
 
         <section>
