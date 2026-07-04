@@ -332,7 +332,7 @@ const RATING_BATCH_CHUNK_SIZE = 30;
 const RATING_BATCH_WAVE_SIZE = 2;
 const RATING_BATCH_TIMEOUT_MS = 4_500;
 const ANNOUNCEMENT_DISMISS_KEY_PREFIX = 'mb:home-announcement-dismissed:';
-const HOME_MANGADEX_SYNC_GRACE_MS = 1200;
+const HOME_SOURCE_SYNC_GRACE_MS = 3_000;
 // Proxy URL = primary (local disk cache after startup warmup = instant)
 const toMangaDexCoverProxy = (coverUrl?: string, mangaId?: string) => {
   const raw = String(coverUrl || '').trim();
@@ -1051,8 +1051,17 @@ const Index = () => {
     refetch: refetchHomepageCombined,
   } = useHomepageCombined(120);
   const isHomepageCoreReady = !isInitialMergedLoading;
-  const { data: deferredMangaDexMangas = [] } = useMangaDexViCatalog(120, isHomepageCoreReady);
-  const { data: homeBannerData, isLoading: isHomeBannerLoading } = useQuery({
+  const {
+    data: deferredMangaDexMangas = [],
+    isLoading: isMangaDexCatalogLoading,
+    isFetching: isMangaDexCatalogFetching,
+    isError: isMangaDexCatalogError,
+  } = useMangaDexViCatalog(120, true);
+  const {
+    data: homeBannerData,
+    isLoading: isHomeBannerLoading,
+    isError: isHomeBannerError,
+  } = useQuery({
     queryKey: ['manga', 'home', 'banner', 'mangadex', showMatureContent],
     queryFn: async () => {
       const payload = await mangaApi.getMangaDexHomeBanner({
@@ -1092,10 +1101,13 @@ const Index = () => {
   const featured = data?.featured?.items || [];
   const latest = data?.latest?.items || [];
   const ongoing = data?.ongoing?.items || [];
+  const hasOTruyenHomeItems = latest.length > 0 || ongoing.length > 0 || featured.length > 0;
   const mangaDexMangasCandidate = useMemo(
     () => deferredMangaDexMangas.length ? deferredMangaDexMangas : (data?.mangaDexMangas || []),
     [data?.mangaDexMangas, deferredMangaDexMangas],
   );
+  const isMangaDexCatalogSettled =
+    isMangaDexCatalogError || (!isMangaDexCatalogLoading && !isMangaDexCatalogFetching);
   const [homeSyncReady, setHomeSyncReady] = useState(false);
   const [syncedMangaDexMangas, setSyncedMangaDexMangas] = useState<MangaDexCatalogItem[]>([]);
 
@@ -1114,13 +1126,27 @@ const Index = () => {
       return;
     }
 
+    if (isMangaDexCatalogSettled) {
+      setSyncedMangaDexMangas([]);
+      setHomeSyncReady(true);
+      return;
+    }
+
+    if (!hasOTruyenHomeItems) return;
+
     const timer = window.setTimeout(() => {
       setSyncedMangaDexMangas([]);
       setHomeSyncReady(true);
-    }, HOME_MANGADEX_SYNC_GRACE_MS);
+    }, HOME_SOURCE_SYNC_GRACE_MS);
 
     return () => window.clearTimeout(timer);
-  }, [isInitialMergedLoading, homeSyncReady, mangaDexMangasCandidate]);
+  }, [
+    hasOTruyenHomeItems,
+    homeSyncReady,
+    isInitialMergedLoading,
+    isMangaDexCatalogSettled,
+    mangaDexMangasCandidate,
+  ]);
 
   const mangaDexMangas = syncedMangaDexMangas;
   const mangaDexItems = useMemo<Manga[]>(() => {
@@ -1228,31 +1254,41 @@ const Index = () => {
 
     if (homeBannerSnapshotReady) return;
 
-    if (homeBannerItemsCandidate.length > 0 || !isHomeBannerLoading) {
+    if (homeBannerItemsCandidate.length > 0 || isHomeBannerError || !isHomeBannerLoading) {
       setSyncedHomeBannerItems(homeBannerItemsCandidate);
       setHomeBannerSnapshotReady(true);
       return;
     }
 
+    if (!hasOTruyenHomeItems && visibleMangaDexItems.length === 0) return;
+
     const timer = window.setTimeout(() => {
       setSyncedHomeBannerItems([]);
       setHomeBannerSnapshotReady(true);
-    }, HOME_MANGADEX_SYNC_GRACE_MS);
+    }, HOME_SOURCE_SYNC_GRACE_MS);
 
     return () => window.clearTimeout(timer);
-  }, [homeBannerItemsCandidate, homeBannerSnapshotReady, isHomeBannerLoading, isInitialMergedLoading]);
+  }, [
+    hasOTruyenHomeItems,
+    homeBannerItemsCandidate,
+    homeBannerSnapshotReady,
+    isHomeBannerError,
+    isHomeBannerLoading,
+    isInitialMergedLoading,
+    visibleMangaDexItems.length,
+  ]);
 
   const homeBannerItems = syncedHomeBannerItems;
 
   const latestMerged = useMemo(() => {
-    const merged = [...visibleLatest, ...visibleMangaDexItems];
+    const merged = [...visibleLatest, ...visibleMangaDexItems, ...homeBannerItems];
     const seen = new Set<string>();
     return merged.filter((m) => {
       if (seen.has(m.id)) return false;
       seen.add(m.id);
       return true;
     }).sort((a, b) => chapterRecencyTime(b) - chapterRecencyTime(a));
-  }, [visibleLatest, visibleMangaDexItems]);
+  }, [visibleLatest, visibleMangaDexItems, homeBannerItems]);
 
   const ongoingMerged = useMemo(() => {
     const merged = [...visibleOngoing, ...visibleMangaDexItems];
@@ -1770,6 +1806,13 @@ const Index = () => {
     });
   }, [featuredRated, homeBannerItems, latestMergedRated, ongoingMergedRated, showMatureContent]);
 
+  const latestHomeDisplay = useMemo(() => {
+    const heroMangaDexItems = heroBannerItems.slice(0, 5).filter((item) => {
+      return Boolean(toMangaDexDetailId(String(item.id || '')));
+    });
+    return dedupeById([...heroMangaDexItems, ...latestMergedRated]).slice(0, 10);
+  }, [heroBannerItems, latestMergedRated]);
+
   const { data: trendingPayload, isLoading: isTrendingLoading } = useQuery({
     queryKey: ['manga', 'home', 'trending-popular-v3', HOME_POPULAR_TRENDING_FETCH_LIMIT],
     queryFn: async () => {
@@ -1985,7 +2028,7 @@ const Index = () => {
     };
   }, [homeCoverWarmupUrls]);
 
-  const isHeroBannerLoading = !heroBannerItems.length && (isInitialMergedLoading || !homeBannerSnapshotReady);
+  const isHeroBannerLoading = isHomeSynchronizedLoading || !homeBannerSnapshotReady;
 
   return (
     <div className="min-h-screen">
@@ -2011,8 +2054,8 @@ const Index = () => {
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4">
-              <MangaGrid manga={latestMergedRated.slice(0, 5)} variant="horizontal" />
-              <MangaGrid manga={latestMergedRated.slice(5, 10)} variant="horizontal" />
+              <MangaGrid manga={latestHomeDisplay.slice(0, 5)} variant="horizontal" />
+              <MangaGrid manga={latestHomeDisplay.slice(5, 10)} variant="horizontal" />
             </div>
           )}
         </Section>

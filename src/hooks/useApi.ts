@@ -30,6 +30,7 @@ import { invalidateMangaRealtimeQueries } from "@/lib/querySync";
 import type { Manga } from "@/types/manga";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const HOMEPAGE_CORE_TIMEOUT_MS = 7_000;
 const MANGADEX_CATALOG_TIMEOUT_MS = 15_000;
 const HOMEPAGE_MANGADEX_FALLBACK_TIMEOUT_MS = 6_000;
 const LOCAL_COVER_FALLBACK = "/no-cover.svg";
@@ -55,7 +56,7 @@ function assertOTruyenPayload(data: any) {
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(() => {
-      reject(new Error("MangaDex request timeout"));
+      reject(new Error("Request timeout"));
     }, timeoutMs);
 
     promise
@@ -311,8 +312,14 @@ export function useHomepageCombined(maxChapters = 120) {
         ? (cachedCatalogRaw as HomepageMangaDexItem[])
         : [];
 
-      const homepagePromise = mangaApi.getHomepage();
-      const featuredPromise = mangaApi.getFeatured(12);
+      const homepagePromise = withTimeout(
+        mangaApi.getHomepage(),
+        HOMEPAGE_CORE_TIMEOUT_MS,
+      );
+      const featuredPromise = withTimeout(
+        mangaApi.getFeatured(12),
+        HOMEPAGE_CORE_TIMEOUT_MS,
+      );
 
       const [homepageResult, featuredResult] = await Promise.allSettled([
         homepagePromise,
