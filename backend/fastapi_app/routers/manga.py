@@ -73,8 +73,9 @@ _trending_memory_cache: dict[str, tuple[list[dict], float]] = {}
 _combined_refresh_tasks: dict[str, asyncio.Task] = {}
 _startup_warmup_task: asyncio.Task | None = None
 OTRUYEN_IMG_CDN = "https://img.otruyenapi.com/uploads/comics/"
-SITEMAP_CACHE_VERSION = "v3"
+SITEMAP_CACHE_VERSION = "v4"
 SITEMAP_CACHE_TTL_SECONDS = _env_int("SITEMAP_CACHE_TTL_SECONDS", 1800, minimum=300)
+SITEMAP_LOCAL_ACTIVITY_LIMIT = _env_int("SITEMAP_LOCAL_ACTIVITY_LIMIT", 3000, minimum=100)
 SITEMAP_OTRUYEN_PAGE_LIMIT = _env_int("SITEMAP_OTRUYEN_PAGE_LIMIT", 30, minimum=3)
 SITEMAP_OTRUYEN_BATCH_SIZE = _env_int("SITEMAP_OTRUYEN_BATCH_SIZE", 10, minimum=2)
 SITEMAP_OTRUYEN_TIMEOUT_SECONDS = _env_float("SITEMAP_OTRUYEN_TIMEOUT_SECONDS", 24.0, minimum=6.0)
@@ -3200,6 +3201,70 @@ async def _collect_uploaded_sitemap_entries(
         )
 
 
+async def _collect_local_activity_sitemap_entries(
+    request: Request,
+    db: Any,
+    hidden: dict[str, str],
+    entries: list[dict[str, str]],
+    seen: set[str],
+    limit: int,
+) -> None:
+    if limit <= 0:
+        return
+
+    base = _public_site_base(request)
+    local_seen: set[str] = set()
+    table_specs: tuple[tuple[str, str, str, str, str], ...] = (
+        ("manga_views", "manga_slug,updated_at", "views", "updated_at", "0.86"),
+        ("reading_history", "manga_slug,read_at", "read_at", "read_at", "0.84"),
+        ("bookmarks", "manga_slug,created_at", "created_at", "created_at", "0.82"),
+        ("follows", "manga_slug,created_at", "created_at", "created_at", "0.82"),
+        ("ratings", "manga_slug,updated_at,created_at", "updated_at", "updated_at", "0.8"),
+        ("comments", "manga_slug,updated_at,created_at", "updated_at", "updated_at", "0.78"),
+    )
+
+    for table, select_expr, order_col, lastmod_col, priority in table_specs:
+        remaining = limit - len(local_seen)
+        if remaining <= 0:
+            break
+        try:
+            result = await asyncio.to_thread(
+                lambda table=table, select_expr=select_expr, order_col=order_col, remaining=remaining: (
+                    db.table(table)
+                    .select(select_expr)
+                    .order(order_col, desc=True)
+                    .limit(min(remaining, 1000))
+                    .execute()
+                )
+            )
+            rows = getattr(result, "data", None) or []
+        except Exception:
+            rows = []
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            slug = _clean_slug(row.get("manga_slug"))
+            if (
+                not slug
+                or slug in local_seen
+                or _is_invalid_manga_slug(slug)
+                or _hidden_reason_for_slug(hidden, slug)
+            ):
+                continue
+            local_seen.add(slug)
+            _add_sitemap_entry(
+                entries,
+                seen,
+                loc=f"{base}/manga/{quote(slug, safe='')}",
+                lastmod=_sitemap_pick_lastmod({
+                    "updated_at": row.get(lastmod_col) or row.get("updated_at") or row.get("created_at"),
+                }),
+                changefreq="daily",
+                priority=priority,
+            )
+
+
 async def _load_sitemap_mangadex_payload() -> dict[str, Any] | None:
     cached_payload = _load_best_mangadex_catalog_cache(None, min_count=700)
     if _payload_manga_count(cached_payload) >= 700:
@@ -3382,7 +3447,7 @@ async def manga_seo_preview(
 @router.get("/sitemap-manga.xml")
 async def manga_sitemap_xml(
     request: Request,
-    limit: int = Query(8000, ge=1, le=20000),
+    limit: int = Query(15000, ge=1, le=50000),
     db=Depends(get_supabase_public),
 ):
     cache_key = f"manga:sitemap:{SITEMAP_CACHE_VERSION}:{limit}"
@@ -3409,6 +3474,17 @@ async def manga_sitemap_xml(
     )
     uploaded_count = len(entries)
 
+    local_activity_limit = max(0, min(SITEMAP_LOCAL_ACTIVITY_LIMIT, limit - len(entries)))
+    await _collect_local_activity_sitemap_entries(
+        request,
+        db,
+        hidden,
+        entries,
+        seen,
+        local_activity_limit,
+    )
+    local_activity_count = len(entries) - uploaded_count
+
     mangadex_limit = max(0, min(5000, limit - len(entries)))
     await _collect_mangadex_sitemap_entries(
         request,
@@ -3427,7 +3503,7 @@ async def manga_sitemap_xml(
         seen,
         otruyen_limit,
     )
-    otruyen_count = len(entries) - uploaded_count - mangadex_count
+    otruyen_count = len(entries) - uploaded_count - local_activity_count - mangadex_count
 
     xml = _render_sitemap_urlset(entries)
     cache.set(cache_key, xml, SITEMAP_CACHE_TTL_SECONDS)
@@ -3437,6 +3513,7 @@ async def manga_sitemap_xml(
         extra_headers={
             "X-MangaHub-Sitemap-Cache": "MISS",
             "X-MangaHub-Sitemap-Uploads": str(uploaded_count),
+            "X-MangaHub-Sitemap-Local-Activity": str(local_activity_count),
             "X-MangaHub-Sitemap-MangaDex": str(mangadex_count),
             "X-MangaHub-Sitemap-OTruyen": str(otruyen_count),
         },

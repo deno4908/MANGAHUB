@@ -14,3 +14,5 @@ User-agent: *
 Allow: /
 
 Sitemap: https://mangahub.art/sitemap.xml
+Sitemap: https://mangahub.art/sitemap-static.xml
+Sitemap: https://mangahub.art/api/manga/sitemap-manga.xml

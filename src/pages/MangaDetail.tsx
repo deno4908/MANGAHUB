@@ -50,6 +50,52 @@ function normalizeDescriptionText(value: string): string {
     .trim();
 }
 
+function collapseSeoText(value: unknown, maxLength = 160): string {
+  const text = normalizeDescriptionText(String(value || ''))
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+}
+
+function absoluteSeoUrl(value: string): string {
+  const raw = String(value || '').trim();
+  if (!raw) return window.location.origin;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return `${window.location.origin}${raw.startsWith('/') ? raw : `/${raw}`}`;
+}
+
+function upsertMeta(selector: string, attrs: Record<string, string>): () => void {
+  let element = document.head.querySelector<HTMLMetaElement>(selector);
+  const wasCreated = !element;
+  if (!element) {
+    element = document.createElement('meta');
+    document.head.appendChild(element);
+  }
+  const previousAttrs = Object.fromEntries(
+    Object.keys(attrs).map((key) => [key, element?.getAttribute(key)]),
+  ) as Record<string, string | null>;
+  Object.entries(attrs).forEach(([key, value]) => {
+    element?.setAttribute(key, value);
+  });
+  element.setAttribute('data-mangahub-runtime-seo', 'manga-detail');
+  return () => {
+    if (!element) return;
+    if (wasCreated) {
+      element.remove();
+      return;
+    }
+    Object.entries(previousAttrs).forEach(([key, value]) => {
+      if (value === null) {
+        element?.removeAttribute(key);
+      } else {
+        element?.setAttribute(key, value);
+      }
+    });
+    element.removeAttribute('data-mangahub-runtime-seo');
+  };
+}
+
 const MANGADEX_LANGUAGE_LABELS: Record<string, string> = {
   all: 'Tất cả ngôn ngữ',
   vi: 'Tiếng Việt',
@@ -81,6 +127,8 @@ const MANGADEX_ALL_GROUPS_VALUE = '__all_groups__';
 const TRANSLATION_SOURCE_ALL_VALUE = 'all';
 const TRANSLATION_SOURCE_MANGADEX_VALUE = 'mangadex';
 const TRANSLATION_SOURCE_LOCAL_VALUE = 'local';
+const DEFAULT_DOCUMENT_TITLE = 'MangaHub - Đọc Truyện Tranh Online Miễn Phí';
+const DEFAULT_DOCUMENT_DESCRIPTION = 'Đọc hàng ngàn bộ truyện tranh miễn phí trên MangaHub.';
 const LOCAL_TRANSLATION_SOURCE_LABEL = 'Bản dịch web';
 
 type TranslationSourceFilter =
@@ -318,6 +366,97 @@ const MangaDetail = () => {
     () => normalizeDescriptionText(String(rawDescription)),
     [rawDescription],
   );
+  useEffect(() => {
+    if (!manga) return;
+
+    const title = String(manga.title || '').trim() || 'MangaHub';
+    const seoTitle = `${title} - MangaHub`;
+    const seoDescription =
+      collapseSeoText(description) ||
+      (title === 'MangaHub'
+        ? DEFAULT_DOCUMENT_DESCRIPTION
+        : `Đọc ${title} miễn phí trên MangaHub.`);
+    const canonicalUrl = absoluteSeoUrl(mangaRoute.canonicalPath || location.pathname);
+    const imageUrl = absoluteSeoUrl(String(manga.cover || manga.coverProxy || '/no-cover.svg'));
+    const previousTitle = document.title;
+    const existingCanonicalLink = document.head.querySelector<HTMLLinkElement>('link[rel="canonical"]');
+    const canonicalLink = existingCanonicalLink || document.head.appendChild(document.createElement('link'));
+    const canonicalWasCreated = !existingCanonicalLink;
+    const previousCanonical = canonicalLink.getAttribute('href') || '';
+
+    canonicalLink.setAttribute('rel', 'canonical');
+    canonicalLink.setAttribute('href', canonicalUrl);
+    canonicalLink.setAttribute('data-mangahub-runtime-seo', 'manga-detail');
+    document.title = seoTitle;
+
+    const cleanupMeta = [
+      upsertMeta('meta[name="description"]', {
+        name: 'description',
+        content: seoDescription,
+      }),
+      upsertMeta('meta[name="robots"]', {
+        name: 'robots',
+        content: 'index, follow, max-image-preview:large',
+      }),
+      upsertMeta('meta[property="og:site_name"]', {
+        property: 'og:site_name',
+        content: 'MangaHub',
+      }),
+      upsertMeta('meta[property="og:type"]', {
+        property: 'og:type',
+        content: 'article',
+      }),
+      upsertMeta('meta[property="og:locale"]', {
+        property: 'og:locale',
+        content: 'vi_VN',
+      }),
+      upsertMeta('meta[property="og:title"]', {
+        property: 'og:title',
+        content: seoTitle,
+      }),
+      upsertMeta('meta[property="og:description"]', {
+        property: 'og:description',
+        content: seoDescription,
+      }),
+      upsertMeta('meta[property="og:url"]', {
+        property: 'og:url',
+        content: canonicalUrl,
+      }),
+      upsertMeta('meta[property="og:image"]', {
+        property: 'og:image',
+        content: imageUrl,
+      }),
+      upsertMeta('meta[name="twitter:card"]', {
+        name: 'twitter:card',
+        content: 'summary_large_image',
+      }),
+      upsertMeta('meta[name="twitter:title"]', {
+        name: 'twitter:title',
+        content: seoTitle,
+      }),
+      upsertMeta('meta[name="twitter:description"]', {
+        name: 'twitter:description',
+        content: seoDescription,
+      }),
+      upsertMeta('meta[name="twitter:image"]', {
+        name: 'twitter:image',
+        content: imageUrl,
+      }),
+    ];
+
+    return () => {
+      document.title = previousTitle || DEFAULT_DOCUMENT_TITLE;
+      if (canonicalWasCreated) {
+        canonicalLink.remove();
+      } else if (previousCanonical) {
+        canonicalLink.setAttribute('href', previousCanonical);
+      } else {
+        canonicalLink.setAttribute('href', window.location.origin);
+      }
+      canonicalLink.removeAttribute('data-mangahub-runtime-seo');
+      cleanupMeta.reverse().forEach((cleanup) => cleanup());
+    };
+  }, [description, location.pathname, manga, mangaRoute.canonicalPath]);
   const adminNote = useMemo(
     () => normalizeDescriptionText(String(manga?.adminNotes || '')),
     [manga?.adminNotes],
