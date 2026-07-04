@@ -332,6 +332,7 @@ const RATING_BATCH_CHUNK_SIZE = 30;
 const RATING_BATCH_WAVE_SIZE = 2;
 const RATING_BATCH_TIMEOUT_MS = 4_500;
 const ANNOUNCEMENT_DISMISS_KEY_PREFIX = 'mb:home-announcement-dismissed:';
+const HOME_MANGADEX_SYNC_GRACE_MS = 1200;
 // Proxy URL = primary (local disk cache after startup warmup = instant)
 const toMangaDexCoverProxy = (coverUrl?: string, mangaId?: string) => {
   const raw = String(coverUrl || '').trim();
@@ -1091,7 +1092,37 @@ const Index = () => {
   const featured = data?.featured?.items || [];
   const latest = data?.latest?.items || [];
   const ongoing = data?.ongoing?.items || [];
-  const mangaDexMangas = deferredMangaDexMangas.length ? deferredMangaDexMangas : (data?.mangaDexMangas || []);
+  const mangaDexMangasCandidate = useMemo(
+    () => deferredMangaDexMangas.length ? deferredMangaDexMangas : (data?.mangaDexMangas || []),
+    [data?.mangaDexMangas, deferredMangaDexMangas],
+  );
+  const [homeSyncReady, setHomeSyncReady] = useState(false);
+  const [syncedMangaDexMangas, setSyncedMangaDexMangas] = useState<MangaDexCatalogItem[]>([]);
+
+  useEffect(() => {
+    if (isInitialMergedLoading) {
+      setHomeSyncReady(false);
+      setSyncedMangaDexMangas([]);
+      return;
+    }
+
+    if (homeSyncReady) return;
+
+    if (mangaDexMangasCandidate.length > 0) {
+      setSyncedMangaDexMangas(mangaDexMangasCandidate as MangaDexCatalogItem[]);
+      setHomeSyncReady(true);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setSyncedMangaDexMangas([]);
+      setHomeSyncReady(true);
+    }, HOME_MANGADEX_SYNC_GRACE_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [isInitialMergedLoading, homeSyncReady, mangaDexMangasCandidate]);
+
+  const mangaDexMangas = syncedMangaDexMangas;
   const mangaDexItems = useMemo<Manga[]>(() => {
     return (mangaDexMangas || []).map((item: MangaDexCatalogItem) => {
       const chapter = pickLatestChapter(item);
@@ -1173,7 +1204,7 @@ const Index = () => {
     [featured, showMatureContent],
   );
 
-  const homeBannerItems = useMemo(
+  const homeBannerItemsCandidate = useMemo(
     () => {
       const items = homeBannerData?.items || [];
       const visible = showMatureContent ? items : items.filter((m) => !isMatureManga(m));
@@ -1185,6 +1216,33 @@ const Index = () => {
     },
     [homeBannerData?.items, showMatureContent],
   );
+  const [homeBannerSnapshotReady, setHomeBannerSnapshotReady] = useState(false);
+  const [syncedHomeBannerItems, setSyncedHomeBannerItems] = useState<Manga[]>([]);
+
+  useEffect(() => {
+    if (isInitialMergedLoading) {
+      setHomeBannerSnapshotReady(false);
+      setSyncedHomeBannerItems([]);
+      return;
+    }
+
+    if (homeBannerSnapshotReady) return;
+
+    if (homeBannerItemsCandidate.length > 0 || !isHomeBannerLoading) {
+      setSyncedHomeBannerItems(homeBannerItemsCandidate);
+      setHomeBannerSnapshotReady(true);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setSyncedHomeBannerItems([]);
+      setHomeBannerSnapshotReady(true);
+    }, HOME_MANGADEX_SYNC_GRACE_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [homeBannerItemsCandidate, homeBannerSnapshotReady, isHomeBannerLoading, isInitialMergedLoading]);
+
+  const homeBannerItems = syncedHomeBannerItems;
 
   const latestMerged = useMemo(() => {
     const merged = [...visibleLatest, ...visibleMangaDexItems];
@@ -1896,7 +1954,8 @@ const Index = () => {
     return syncMangaDexLatestChapters(topRated, topRatedMangaDexChapterMap as Record<string, MangaDexLatestChapterMeta>);
   }, [topRated, topRatedMangaDexChapterMap]);
 
-  const isTopRatedSectionLoading = isInitialMergedLoading;
+  const isHomeSynchronizedLoading = isInitialMergedLoading || !homeSyncReady;
+  const isTopRatedSectionLoading = isHomeSynchronizedLoading;
 
   const homeCoverWarmupUrls = useMemo(() => {
     return collectWarmupCoverUrls(
@@ -1926,7 +1985,7 @@ const Index = () => {
     };
   }, [homeCoverWarmupUrls]);
 
-  const isHeroBannerLoading = !heroBannerItems.length && (isHomeBannerLoading || isInitialMergedLoading);
+  const isHeroBannerLoading = !heroBannerItems.length && (isInitialMergedLoading || !homeBannerSnapshotReady);
 
   return (
     <div className="min-h-screen">
@@ -1945,7 +2004,7 @@ const Index = () => {
 
       <div className="container mx-auto px-4 mt-10 space-y-10 pb-16">
         <Section title="Mới cập nhật" link="/manga?sort=latest">
-          {isInitialMergedLoading ? (
+          {isHomeSynchronizedLoading ? (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4">
               <SkeletonHorizontal />
               <SkeletonHorizontal />
@@ -1959,7 +2018,7 @@ const Index = () => {
         </Section>
 
         <Section title="Phổ biến nhất" link="/manga?sort=popular">
-          {isInitialMergedLoading || (isTrendingLoading && !popularVisible.length)
+          {isHomeSynchronizedLoading || (isTrendingLoading && !popularVisible.length)
             ? <SkeletonGrid count={12} />
             : <MangaGrid manga={popularDisplay} lazyBatch initialBatchSize={6} batchStep={6} batchDelayMs={240} />}
         </Section>
@@ -1971,7 +2030,7 @@ const Index = () => {
         </Section>
 
         <Section title="Mới thêm gần đây" link="/manga">
-          {isInitialMergedLoading ? <SkeletonGrid /> : <MangaGrid manga={ongoingMergedRated.slice(0, 6)} lazyBatch initialBatchSize={4} batchStep={2} batchDelayMs={220} />}
+          {isHomeSynchronizedLoading ? <SkeletonGrid /> : <MangaGrid manga={ongoingMergedRated.slice(0, 6)} lazyBatch initialBatchSize={4} batchStep={2} batchDelayMs={220} />}
         </Section>
 
         <section>
