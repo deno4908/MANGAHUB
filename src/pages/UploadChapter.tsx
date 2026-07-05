@@ -4,6 +4,7 @@ import { motion, AnimatePresence, Reorder } from 'framer-motion';
 import { groupApi, mangaApi, uploadApi } from '@/lib/api';
 import { useCategories } from '@/hooks/useApi';
 import { adaptMangaDetail, adaptMangaItem } from '@/lib/adapters';
+import { getMangaDexImageFallback, isMangaDexImageUrl } from '@/lib/mangaDexImages';
 import OptimizedImage from '@/components/ui/OptimizedImage';
 import { toast } from 'sonner';
 import { LANGUAGES } from '@/types/upload';
@@ -356,6 +357,12 @@ const normalizeGroupName = (value: unknown): string =>
     .trim()
     .replace(/\s+/g, ' ')
     .toLowerCase();
+
+const toStableMangaDexPreviewUrl = (value: unknown): string => {
+  const raw = String(value || '').trim();
+  if (!raw || !isMangaDexImageUrl(raw)) return raw;
+  return getMangaDexImageFallback(raw) || raw;
+};
 
 const UploadChapter = () => {
   const { data: categories = [] } = useCategories();
@@ -891,14 +898,18 @@ const UploadChapter = () => {
               .filter(Boolean)
           : [];
 
-        const previewRows: UploadedImage[] = previewUrls.map((url, index) => ({
-          id: `mdx-preview-${selectedMangaDexChapterId}-${index}`,
-          file: null,
-          preview: url,
-          fallbackPreview: fallbackUrls[index] || undefined,
-          name: `Trang ${index + 1}`,
-          size: 0,
-        }));
+        const previewRows: UploadedImage[] = previewUrls.map((url, index) => {
+          const preview = toStableMangaDexPreviewUrl(url);
+          const fallbackPreview = toStableMangaDexPreviewUrl(fallbackUrls[index]);
+          return {
+            id: `mdx-preview-${selectedMangaDexChapterId}-${index}`,
+            file: null,
+            preview,
+            fallbackPreview: fallbackPreview && fallbackPreview !== preview ? fallbackPreview : undefined,
+            name: `Trang ${index + 1}`,
+            size: 0,
+          };
+        });
 
         setMangaDexChapterPreviewImages(previewRows);
         setPreviewMode(true);
@@ -949,6 +960,7 @@ const UploadChapter = () => {
         id: String(item?.id || `studio-${index}`),
         file: item?.file || null,
         preview: String(item?.preview || ''),
+        fallbackPreview: item?.fallbackPreview ? String(item.fallbackPreview) : undefined,
         name: String(item?.name || `Trang ${index + 1}`),
         size: Number(item?.size || item?.file?.size || 0),
       })),
@@ -1161,6 +1173,7 @@ const UploadChapter = () => {
         id: String(image?.id || `studio-${index}`),
         file: image?.file || null,
         preview: String(image?.preview || ''),
+        fallbackPreview: image?.fallbackPreview ? String(image.fallbackPreview) : undefined,
         name: String(image?.name || `Trang ${index + 1}`),
         size: Number(image?.size || image?.file?.size || 0),
       })),

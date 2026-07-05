@@ -29,6 +29,39 @@ type BatchScope = 'current' | 'all' | 'range';
 
 const toPercent = (value: number): string => `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
 
+const getPreviewSources = (image: TranslationStudioImage | null | undefined): string[] => {
+  const seen = new Set<string>();
+  const output: string[] = [];
+  for (const candidate of [image?.preview, image?.fallbackPreview]) {
+    const source = String(candidate || '').trim();
+    if (!source || seen.has(source)) continue;
+    seen.add(source);
+    output.push(source);
+  }
+  return output;
+};
+
+const runWithPreviewFallback = async <T,>(
+  image: TranslationStudioImage | null | undefined,
+  runner: (source: string) => Promise<T>,
+): Promise<T> => {
+  const sources = getPreviewSources(image);
+  if (!sources.length) {
+    throw new Error('Khong co anh de xu ly');
+  }
+
+  let lastError: unknown = null;
+  for (const source of sources) {
+    try {
+      return await runner(source);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error('Khong doc duoc anh');
+};
+
 const makeEditedImageFromDataUrl = async (
   image: TranslationStudioImage,
   pageIndex: number,
@@ -56,6 +89,7 @@ const makeEditedImageFromDataUrl = async (
     id: image.id,
     file,
     preview: URL.createObjectURL(file),
+    fallbackPreview: undefined,
     name: file.name,
     size: file.size,
   };
@@ -98,13 +132,13 @@ const UploadTranslationStudio = () => {
 
   useEffect(() => {
     let active = true;
-    if (!activeImage?.preview) {
+    if (!getPreviewSources(activeImage).length) {
       setMetrics(null);
       return;
     }
 
     setIsAnalyzing(true);
-    analyzeTranslationImage(activeImage.preview)
+    runWithPreviewFallback(activeImage, analyzeTranslationImage)
       .then((payload) => {
         if (!active) return;
         setMetrics(payload);
@@ -121,10 +155,15 @@ const UploadTranslationStudio = () => {
     return () => {
       active = false;
     };
-  }, [activeImage?.preview]);
+  }, [activeImage?.fallbackPreview, activeImage?.preview]);
 
   const editorImages = useMemo(
-    () => studioImages.map((item) => ({ id: item.id, preview: item.preview, name: item.name })),
+    () => studioImages.map((item) => ({
+      id: item.id,
+      preview: item.preview || item.fallbackPreview || '',
+      fallbackPreview: item.fallbackPreview,
+      name: item.name,
+    })),
     [studioImages],
   );
 
@@ -163,14 +202,16 @@ const UploadTranslationStudio = () => {
         const latestImages = useTranslationStudioStore.getState().images;
         const sourceImage = latestImages[pageIndex];
 
-        if (!sourceImage?.preview) {
+        if (!getPreviewSources(sourceImage).length) {
           failedCount += 1;
           setBatchProgress((i + 1) / targetIndexes.length);
           continue;
         }
 
         try {
-          const dataUrl = await runTranslationAlgorithmPreset(sourceImage.preview, preset);
+          const dataUrl = await runWithPreviewFallback(sourceImage, (source) =>
+            runTranslationAlgorithmPreset(source, preset),
+          );
           const nextImage = await makeEditedImageFromDataUrl(sourceImage, pageIndex, dataUrl, preset);
           updateImageAt(pageIndex, nextImage);
           successCount += 1;

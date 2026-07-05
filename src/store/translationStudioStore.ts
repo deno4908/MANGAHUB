@@ -4,6 +4,7 @@ export interface TranslationStudioImage {
   id: string;
   file: File | null;
   preview: string;
+  fallbackPreview?: string;
   name: string;
   size: number;
 }
@@ -28,6 +29,7 @@ const cloneImages = (images: TranslationStudioImage[]): TranslationStudioImage[]
     id: String(item.id || ''),
     file: item.file || null,
     preview: String(item.preview || ''),
+    fallbackPreview: item.fallbackPreview ? String(item.fallbackPreview) : undefined,
     name: String(item.name || ''),
     size: Number(item.size || 0),
   }));
@@ -65,6 +67,7 @@ export const useTranslationStudioStore = create<TranslationStudioState>((set) =>
         id: String(image.id || nextImages[index].id),
         file: image.file || null,
         preview: String(image.preview || nextImages[index].preview || ''),
+        fallbackPreview: image.fallbackPreview ? String(image.fallbackPreview) : undefined,
         name: String(image.name || nextImages[index].name || ''),
         size: Number(image.size || 0),
       };

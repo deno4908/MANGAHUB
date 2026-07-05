@@ -6,6 +6,7 @@ import { toast } from "sonner";
 interface EditorImageItem {
   id: string;
   preview: string;
+  fallbackPreview?: string;
   name: string;
 }
 
@@ -85,6 +86,18 @@ const normalizeDataUrlName = (name: string, index: number): string => {
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
   return `${base || `page-${index + 1}`}.png`;
+};
+
+const uniqueImageSources = (...candidates: Array<string | undefined | null>): string[] => {
+  const seen = new Set<string>();
+  const output: string[] = [];
+  for (const candidate of candidates) {
+    const source = String(candidate || "").trim();
+    if (!source || seen.has(source)) continue;
+    seen.add(source);
+    output.push(source);
+  }
+  return output;
 };
 
 const ImageEditorModal = ({
@@ -206,7 +219,8 @@ const ImageEditorModal = ({
       setCurrentIndex(safeIndex);
       return;
     }
-    resetEditorState(images[safeIndex]?.preview || "");
+    const nextImage = images[safeIndex];
+    resetEditorState(nextImage?.preview || nextImage?.fallbackPreview || "");
   }, [currentIndex, images, open]);
 
   useEffect(() => {
@@ -566,6 +580,29 @@ const ImageEditorModal = ({
   // addTextOverlay is now handled by drag-to-create in finishDrawing
 
   const getWorkingFile = async () => {
+    const sources = uniqueImageSources(workingImageUrl, currentImage?.fallbackPreview);
+    if (sources.length > 1) {
+      let lastError: unknown = null;
+      for (const source of sources) {
+        try {
+          const response = await fetch(source);
+          if (!response.ok) {
+            lastError = new Error(`HTTP ${response.status}`);
+            continue;
+          }
+          const blob = await response.blob();
+          const fileName = normalizeDataUrlName(currentImage?.name || "page", currentIndex);
+          if (source !== workingImageUrl && currentImage?.preview === workingImageUrl) {
+            setWorkingImageUrl(source);
+          }
+          return new File([blob], fileName, { type: blob.type || "image/png" });
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError || new Error("Khong doc duoc anh hien tai");
+    }
+
     if (!workingImageUrl) {
       throw new Error("Chưa có ảnh để chỉnh sửa");
     }
@@ -1451,6 +1488,12 @@ const ImageEditorModal = ({
                       width: Math.max(1, Math.round(rect.width)),
                       height: Math.max(1, Math.round(rect.height)),
                     });
+                  }}
+                  onError={() => {
+                    const fallback = currentImage?.fallbackPreview;
+                    if (fallback && workingImageUrl !== fallback && currentImage?.preview === workingImageUrl) {
+                      setWorkingImageUrl(fallback);
+                    }
                   }}
                   draggable={false}
                 />
