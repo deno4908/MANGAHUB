@@ -1910,6 +1910,82 @@ async def manga_list(
     return data
 
 
+def _parse_page_batch(raw_pages: str, *, max_pages: int = 40) -> list[int]:
+    seen: set[int] = set()
+    pages: list[int] = []
+    for raw in str(raw_pages or "").split(","):
+        try:
+            page = int(str(raw).strip())
+        except Exception:
+            continue
+        if page < 1 or page in seen:
+            continue
+        seen.add(page)
+        pages.append(page)
+        if len(pages) >= max_pages:
+            break
+    return pages
+
+
+async def _build_otruyen_page_batch(
+    pages: list[int],
+    fetch_page,
+    *,
+    hidden: dict[str, str],
+    db: Any,
+    user: Any,
+    attach_ratings: bool,
+) -> dict[str, Any]:
+    semaphore = asyncio.Semaphore(10)
+
+    async def load_one(page_number: int) -> tuple[int, dict[str, Any] | None, str | None]:
+        async with semaphore:
+            try:
+                payload = await fetch_page(page_number)
+                if hidden and isinstance(payload, dict):
+                    items = (payload.get("data") or {}).get("items") or []
+                    if isinstance(items, list):
+                        payload["data"]["items"] = _filter_hidden(items, hidden)
+                if attach_ratings:
+                    await _async_attach_ratings_to_items(payload, db, user)
+                return page_number, payload, None
+            except Exception as exc:
+                return page_number, None, str(exc)
+
+    results = await asyncio.gather(*(load_one(page) for page in pages))
+    payloads: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    for page_number, payload, error in sorted(results, key=lambda row: row[0]):
+        key = str(page_number)
+        if payload is not None:
+            payloads[key] = payload
+        if error:
+            errors[key] = error
+    return {"pages": payloads, "errors": errors}
+
+
+@router.get("/list/{list_type}/batch")
+async def manga_list_batch(
+    list_type: str = "truyen-moi",
+    pages: str = Query(..., min_length=1),
+    attach_ratings: bool = Query(False),
+    user=Depends(get_optional_user),
+    db=Depends(get_supabase_public),
+):
+    page_numbers = _parse_page_batch(pages)
+    if not page_numbers:
+        return {"pages": {}, "errors": {}}
+    hidden = await _get_hidden_slugs(db)
+    return await _build_otruyen_page_batch(
+        page_numbers,
+        lambda target_page: otruyen_service.get_list(list_type, target_page),
+        hidden=hidden,
+        db=db,
+        user=user,
+        attach_ratings=attach_ratings,
+    )
+
+
 @router.get("/list-combined/{list_type}")
 async def manga_list_combined(
     list_type: str = "truyen-moi",
@@ -1985,6 +2061,28 @@ async def category_manga(
             data["data"]["items"] = _filter_hidden(items, hidden)
     await _async_attach_ratings_to_items(data, db, user)
     return data
+
+
+@router.get("/category/{slug}/batch")
+async def category_manga_batch(
+    slug: str,
+    pages: str = Query(..., min_length=1),
+    attach_ratings: bool = Query(False),
+    user=Depends(get_optional_user),
+    db=Depends(get_supabase_public),
+):
+    page_numbers = _parse_page_batch(pages)
+    if not page_numbers:
+        return {"pages": {}, "errors": {}}
+    hidden = await _get_hidden_slugs(db)
+    return await _build_otruyen_page_batch(
+        page_numbers,
+        lambda target_page: otruyen_service.get_category_manga(slug, target_page),
+        hidden=hidden,
+        db=db,
+        user=user,
+        attach_ratings=attach_ratings,
+    )
 
 
 def _safe_query(fn):

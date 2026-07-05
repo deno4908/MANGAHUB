@@ -942,6 +942,10 @@ type AuthRefreshResult = {
 
 async function performAuthRefresh(options: AuthRefreshOptions = {}): Promise<AuthRefreshResult> {
   const force = Boolean(options.force);
+  if (!accessToken && !hasSessionHint()) {
+    markRefreshFailure("", false);
+    return { ok: false };
+  }
   if (!force && !accessToken && await waitForPeerAccessToken()) {
     return { ok: true };
   }
@@ -1196,11 +1200,31 @@ export const mangaApi = {
     ),
   getList: (type = "truyen-moi", page = 1) =>
     api<any>(`/api/manga/list/${type}?page=${page}`),
+  getListBatch: (type = "truyen-moi", pages: number[], attachRatings = false) => {
+    const pageParam = pages
+      .map((page) => Math.max(1, Math.floor(Number(page) || 1)))
+      .filter((page, index, values) => values.indexOf(page) === index)
+      .join(",");
+    return api<any>(
+      `/api/manga/list/${type}/batch?pages=${encodeURIComponent(pageParam)}&attach_ratings=${attachRatings ? "1" : "0"}`,
+      { timeoutMs: 20_000, skipAuth: true },
+    );
+  },
   getCombinedList: (type = "truyen-moi", page = 1, maxChapters = 120) =>
     api<any>(`/api/manga/list-combined/${type}?page=${page}&max_chapters=${maxChapters}`),
   getCategories: () => api<any>("/api/manga/categories"),
   getCategoryManga: (slug: string, page = 1) =>
     api<any>(`/api/manga/category/${slug}?page=${page}`),
+  getCategoryMangaBatch: (slug: string, pages: number[], attachRatings = false) => {
+    const pageParam = pages
+      .map((page) => Math.max(1, Math.floor(Number(page) || 1)))
+      .filter((page, index, values) => values.indexOf(page) === index)
+      .join(",");
+    return api<any>(
+      `/api/manga/category/${encodeURIComponent(slug)}/batch?pages=${encodeURIComponent(pageParam)}&attach_ratings=${attachRatings ? "1" : "0"}`,
+      { timeoutMs: 20_000, skipAuth: true },
+    );
+  },
   getDetail: (slug: string) => api<any>(`/api/manga/detail/${slug}`),
   startViewSession: (
     slug: string,

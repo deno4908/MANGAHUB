@@ -171,6 +171,20 @@ export const useUserStore = create<UserStore>((set, get) => ({
     if (!force && loadUserInFlight) {
       return loadUserInFlight;
     }
+    if (!getAccessToken() && !hasSessionHint()) {
+      clearRestoreRetry();
+      set({
+        user: null,
+        isLoggedIn: false,
+        notifications: [],
+        unreadCount: 0,
+        isLoading: false,
+        hasCheckedSession: true,
+        isRestoringSession: false,
+        lastAuthRestoreError: null,
+      });
+      return;
+    }
 
     const run = (async () => {
     let restoredSessionData: any = null;

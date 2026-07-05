@@ -86,7 +86,8 @@ const POPULAR_TRENDING_FALLBACK_TIMEOUT_MS = 4_500;
 const GLOBAL_SORT_FETCH_CHUNK = 24;
 const GLOBAL_SORT_FETCH_MAX_PAGES = 3000;
 const OTRUYEN_STATUS_FILL_PAGE_BUFFER = 8;
-const OTRUYEN_STATUS_FILL_MAX_PAGES = 48;
+const OTRUYEN_STATUS_FILL_FETCH_CHUNK = 10;
+const OTRUYEN_STATUS_FILL_MAX_PAGES = 400;
 const MANGADEX_CATALOG_LIMIT_LIGHT_DEFAULT = 500;
 const MANGADEX_CATALOG_LIMIT_LIGHT_WITH_MATURE = 800;
 const MANGADEX_DEMAND_INITIAL_PAGES = 16;
@@ -247,6 +248,21 @@ const normalizeTranslatedLanguageParam = (value: string | null): string => {
   return normalized || 'vi';
 };
 
+const parseBrowseGenreParams = (value: string | null): string[] => {
+  const seen = new Set<string>();
+  const genres: string[] = [];
+  String(value || '')
+    .split(',')
+    .map((part) => toSlug(part))
+    .filter(Boolean)
+    .forEach((slug) => {
+      if (seen.has(slug)) return;
+      seen.add(slug);
+      genres.push(slug);
+    });
+  return genres;
+};
+
 const BROWSE_PAGE_MEMORY_STORAGE_KEY = 'mb:browse-page-memory:v1';
 
 type BrowsePageMemoryFilters = {
@@ -283,12 +299,14 @@ const applyBrowseFiltersToSearchParams = (
   source: BrowseSourceTab,
   filters: BrowsePageMemoryFilters,
 ) => {
-  const primaryGenre = String(filters.genres?.[0] || '').trim().toLowerCase();
+  const genres = Array.from(
+    new Set((filters.genres || []).map((genre) => toSlug(String(genre || ''))).filter(Boolean)),
+  );
   params.delete('tag');
   params.delete('tags');
   params.delete('genres');
-  if (primaryGenre) {
-    params.set('genre', primaryGenre);
+  if (genres.length) {
+    params.set('genre', genres.join(','));
   } else {
     params.delete('genre');
   }
@@ -1733,6 +1751,9 @@ const BrowseManga = () => {
   const useOTruyenCategory =
     isOTruyenSourceTab && (useCategory || (isMangaDexGenre && !!otruyenEquivSlug));
   const activeCategorySlug = useCategory ? genreSlug : otruyenEquivSlug;
+  const shouldApplyOTruyenGenreFilter =
+    selectedGenreAliasGroups.length > 0 &&
+    (!useOTruyenCategory || selectedGenreAliasGroups.length > 1);
 
   const shouldFetchTrendingForPopular =
     isOTruyenSourceTab && filters.sort === 'popular' && !hasSearch;
@@ -2177,6 +2198,7 @@ const BrowseManga = () => {
       useOTruyenCategory ? 'category' : 'list',
       useOTruyenCategory ? activeCategorySlug : listType,
       page,
+      filters.genres,
       filters.status,
       showMatureContent,
     ],
@@ -2185,6 +2207,7 @@ const BrowseManga = () => {
       const targetVisibleItems = safeTargetPage * BROWSE_PAGE_SIZE;
       const collected: Manga[] = [];
       const seenPages = new Set<number>();
+      const seenItemKeys = new Set<string>();
       let visibleCount = 0;
       let totalPages = 1;
 
@@ -2192,11 +2215,18 @@ const BrowseManga = () => {
         if (!item) return false;
         if (!showMatureContent && isMatureManga(item)) return false;
         if (filters.status && item.status !== filters.status) return false;
+        if (shouldApplyOTruyenGenreFilter) {
+          const slugSet = toSlugSet([...(item.tags || []), ...(item.genres || [])]);
+          if (!matchesSelectedGenreAliasGroups(slugSet, selectedGenreAliasGroups)) return false;
+        }
         return true;
       };
 
       const appendPage = (payload: OTruyenListData) => {
         for (const item of payload.items || []) {
+          const itemKey = String(item?.id || item?.slug || item?.title || '').trim().toLowerCase();
+          if (itemKey && seenItemKeys.has(itemKey)) continue;
+          if (itemKey) seenItemKeys.add(itemKey);
           collected.push(item);
           if (isVisibleStatusItem(item)) {
             visibleCount += 1;
@@ -2228,6 +2258,68 @@ const BrowseManga = () => {
         return adapted;
       };
 
+      const fetchPages = async (targetPages: number[]): Promise<Array<{ targetPage: number; payload: OTruyenListData }>> => {
+        const uniquePages = Array.from(
+          new Set(
+            targetPages
+              .map((targetPage) => Math.max(1, Math.floor(Number(targetPage) || 1)))
+              .filter(Boolean),
+          ),
+        ).sort((a, b) => a - b);
+        const loaded = new Map<number, OTruyenListData>();
+        const missingPages: number[] = [];
+
+        for (const targetPage of uniquePages) {
+          const pageQueryKey = useOTruyenCategory
+            ? (['manga', 'category', activeCategorySlug, targetPage] as const)
+            : (['manga', 'list', listType, targetPage] as const);
+          const cached = queryClient.getQueryData(pageQueryKey) as OTruyenListData | undefined;
+          if (cached?.items?.length) {
+            loaded.set(targetPage, cached);
+          } else {
+            missingPages.push(targetPage);
+          }
+        }
+
+        if (missingPages.length > 0) {
+          try {
+            const batchPayload = useOTruyenCategory
+              ? await mangaApi.getCategoryMangaBatch(activeCategorySlug, missingPages, false)
+              : await mangaApi.getListBatch(listType, missingPages, false);
+            const pagePayloads = (batchPayload?.pages || {}) as Record<string, any>;
+            for (const targetPage of missingPages) {
+              const rawPayload = pagePayloads[String(targetPage)];
+              if (!rawPayload) continue;
+              assertOTruyenPayload(rawPayload);
+              const adapted = adaptListData(rawPayload);
+              const pageQueryKey = useOTruyenCategory
+                ? (['manga', 'category', activeCategorySlug, targetPage] as const)
+                : (['manga', 'list', listType, targetPage] as const);
+              queryClient.setQueryData(pageQueryKey, adapted);
+              loaded.set(targetPage, adapted);
+            }
+          } catch {
+            // Fall back to per-page fetch below for any page the batch could not provide.
+          }
+
+          await Promise.allSettled(
+            missingPages
+              .filter((targetPage) => !loaded.has(targetPage))
+              .map(async (targetPage) => {
+                const payload = await fetchPage(targetPage);
+                loaded.set(targetPage, payload);
+              }),
+          );
+        }
+
+        return uniquePages
+          .map((targetPage) => {
+            const payload = loaded.get(targetPage);
+            return payload ? { targetPage, payload } : null;
+          })
+          .filter((entry): entry is { targetPage: number; payload: OTruyenListData } => Boolean(entry));
+      };
+
       const firstPage = await fetchPage(1);
       seenPages.add(1);
       totalPages = Math.max(1, Number(firstPage.totalPages || 1));
@@ -2242,13 +2334,25 @@ const BrowseManga = () => {
         statusFillPageBudget,
       );
 
-      for (let targetPage = 2; targetPage <= maxPageToInspect; targetPage += 1) {
+      for (
+        let startPage = 2;
+        startPage <= maxPageToInspect && visibleCount < targetVisibleItems;
+        startPage += OTRUYEN_STATUS_FILL_FETCH_CHUNK
+      ) {
         if (visibleCount >= targetVisibleItems) break;
-        if (seenPages.has(targetPage)) continue;
-        const payload = await fetchPage(targetPage);
-        seenPages.add(targetPage);
-        totalPages = Math.max(totalPages, Number(payload.totalPages || totalPages || 1));
-        appendPage(payload);
+        const endPage = Math.min(maxPageToInspect, startPage + OTRUYEN_STATUS_FILL_FETCH_CHUNK - 1);
+        const targetPages = Array.from(
+          { length: endPage - startPage + 1 },
+          (_, index) => startPage + index,
+        ).filter((targetPage) => !seenPages.has(targetPage));
+        if (!targetPages.length) continue;
+
+        const pagePayloads = await fetchPages(targetPages);
+        for (const { targetPage, payload } of pagePayloads) {
+          seenPages.add(targetPage);
+          totalPages = Math.max(totalPages, Number(payload.totalPages || totalPages || 1));
+          appendPage(payload);
+        }
       }
 
       return {
@@ -2563,7 +2667,10 @@ const BrowseManga = () => {
     refetchActiveMangaDex,
   ]);
 
-  const categoryQuery = useCategoryManga(useOTruyenCategory ? activeCategorySlug : '', serverPage);
+  const categoryQuery = useCategoryManga(
+    useOTruyenCategory && !useOTruyenStatusFillMode ? activeCategorySlug : '',
+    serverPage,
+  );
   const data = useCombinedList
     ? combinedListQuery.data?.listData
     : (useOTruyenCategory ? categoryQuery.data : listQuery.data);
@@ -2582,7 +2689,7 @@ const BrowseManga = () => {
   }, [useGlobalClientSortMode, globalSortedListQuery.data?.items]);
 
   const sourceGenreSlugMap = useMemo(() => {
-    if (useOTruyenCategory || selectedGenreAliasGroups.length === 0) {
+    if (!shouldApplyOTruyenGenreFilter) {
       return new Map<string, Set<string>>();
     }
 
@@ -2602,7 +2709,7 @@ const BrowseManga = () => {
 
     return map;
   }, [
-    useOTruyenCategory,
+    shouldApplyOTruyenGenreFilter,
     selectedGenreAliasGroups,
     useOTruyenStatusFillMode,
     otruyenStatusFillItems,
@@ -2849,7 +2956,8 @@ const BrowseManga = () => {
   }, [sortParam, filters.sort, setFilter]);
 
   useEffect(() => {
-    const normalizedGenre = String(genreParam || tagParam || '').trim().toLowerCase();
+    const normalizedGenres = parseBrowseGenreParams(genreParam || tagParam || '');
+    const normalizedGenreKey = normalizedGenres.join(',');
     const normalizedSort = normalizeBrowseSortParam(sortParam);
     const normalizedStatus = normalizeBrowseStatusParam(statusParam);
     const normalizedYear = parseBrowseYearParam(yearParam);
@@ -2860,7 +2968,7 @@ const BrowseManga = () => {
     const nextSort = normalizedSort || 'popular';
     const urlStateKey = [
       activeSource,
-      normalizedGenre,
+      normalizedGenreKey,
       nextSort,
       normalizedStatus,
       normalizedYear || '',
@@ -2876,9 +2984,9 @@ const BrowseManga = () => {
     lastAppliedBrowseUrlStateRef.current = urlStateKey;
     pendingBrowseUrlStateRef.current = urlStateKey;
 
-    const nextGenres = normalizedGenre ? [normalizedGenre] : [];
-    if (filters.genres.length !== nextGenres.length || (filters.genres[0] || '') !== (nextGenres[0] || '')) {
-      setFilter('genres', nextGenres);
+    const currentGenreKey = (filters.genres || []).map((genre) => toSlug(String(genre || ''))).filter(Boolean).join(',');
+    if (currentGenreKey !== normalizedGenreKey) {
+      setFilter('genres', normalizedGenres);
     }
     if (filters.sort !== nextSort) {
       setFilter('sort', nextSort as SortOption);
@@ -2916,7 +3024,8 @@ const BrowseManga = () => {
   ]);
 
   useEffect(() => {
-    const currentGenre = String(genreParam || tagParam || '').trim().toLowerCase();
+    const currentGenres = parseBrowseGenreParams(genreParam || tagParam || '');
+    const currentGenreKey = currentGenres.join(',');
     const currentSort = normalizeBrowseSortParam(sortParam) || 'popular';
     const currentStatus = normalizeBrowseStatusParam(statusParam);
     const currentYear = parseBrowseYearParam(yearParam);
@@ -2926,7 +3035,7 @@ const BrowseManga = () => {
       : 'vi';
     const currentUrlStateKey = [
       activeSource,
-      currentGenre,
+      currentGenreKey,
       currentSort,
       currentStatus,
       currentYear || '',
@@ -2935,7 +3044,7 @@ const BrowseManga = () => {
     ].join('|');
     const filterStateKey = [
       activeSource,
-      String(filters.genres?.[0] || '').trim().toLowerCase(),
+      (filters.genres || []).map((genre) => toSlug(String(genre || ''))).filter(Boolean).join(','),
       filters.sort || 'popular',
       String(filters.status || '').trim().toLowerCase(),
       filters.year || '',
@@ -3019,7 +3128,7 @@ const BrowseManga = () => {
       items = items.filter(m => m.status === filters.status);
     }
     // Genre filter: apply when NOT using an OTruyen category API (category API already filters server-side)
-    if (!useOTruyenCategory && selectedGenreAliasGroups.length > 0) {
+    if (shouldApplyOTruyenGenreFilter) {
       items = items.filter((m) => {
         const key = String(m.id || '').trim().toLowerCase();
         const slugSet = sourceGenreSlugMap.get(key) || toSlugSet([...(m.tags || []), ...(m.genres || [])]);
@@ -3059,6 +3168,7 @@ const BrowseManga = () => {
     filters,
     listType,
     useOTruyenCategory,
+    shouldApplyOTruyenGenreFilter,
     selectedGenreAliasGroups,
     sourceGenreSlugMap,
     hasSearch,

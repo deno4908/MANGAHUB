@@ -530,11 +530,13 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
         return;
       }
       logout('local', { server: false });
-      navigate('/login', { replace: true });
+      if (isAuthRequiredPath(location.pathname)) {
+        navigate('/login', { replace: true });
+      }
     };
     window.addEventListener(FORCE_LOGOUT_EVENT, handleForceLogout);
     return () => window.removeEventListener(FORCE_LOGOUT_EVENT, handleForceLogout);
-  }, [logout, navigate]);
+  }, [location.pathname, logout, navigate]);
 
   useEffect(() => {
     const handleForceForbidden = (_e: Event) => {
@@ -606,6 +608,22 @@ const isOAuthPayloadOnRoot = (location: ReturnType<typeof useLocation>) => {
     location.hash.includes("access_token=") ||
     location.hash.includes("refresh_token=")
   );
+};
+
+const AUTH_REQUIRED_PATHS = [
+  "/admin",
+  "/bookmarks",
+  "/following",
+  "/history",
+  "/notifications",
+  "/report",
+  "/settings",
+  "/upload",
+];
+
+const isAuthRequiredPath = (pathname: string) => {
+  if (pathname === "/profile") return true;
+  return AUTH_REQUIRED_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`));
 };
 
 const AppContent = () => {
