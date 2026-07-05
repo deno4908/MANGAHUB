@@ -19,6 +19,7 @@ interface UploadedImage {
   id: string;
   file: File | null;
   preview: string;
+  fallbackPreview?: string;
   name: string;
   size: number;
 }
@@ -865,11 +866,27 @@ const UploadChapter = () => {
 
     const loadChapterPreviewImages = async () => {
       try {
-        const payload = await mangaApi.getMangaDexChapterPages(selectedMangaDexChapterId, 'saver');
+        let payload = await mangaApi.getMangaDexChapterPages(selectedMangaDexChapterId, 'saver', true, 20_000);
         if (requestSeq !== mangaDexChapterPreviewRequestSeqRef.current) return;
 
-        const previewUrls = Array.isArray(payload?.image_urls)
+        let previewUrls = Array.isArray(payload?.image_urls)
           ? payload.image_urls
+              .map((url: unknown) => String(url || '').trim())
+              .filter(Boolean)
+          : [];
+
+        if (!previewUrls.length) {
+          payload = await mangaApi.getMangaDexChapterPages(selectedMangaDexChapterId, 'data', true, 20_000);
+          if (requestSeq !== mangaDexChapterPreviewRequestSeqRef.current) return;
+          previewUrls = Array.isArray(payload?.image_urls)
+            ? payload.image_urls
+                .map((url: unknown) => String(url || '').trim())
+                .filter(Boolean)
+            : [];
+        }
+
+        const fallbackUrls = Array.isArray(payload?.fallback_image_urls)
+          ? payload.fallback_image_urls
               .map((url: unknown) => String(url || '').trim())
               .filter(Boolean)
           : [];
@@ -878,6 +895,7 @@ const UploadChapter = () => {
           id: `mdx-preview-${selectedMangaDexChapterId}-${index}`,
           file: null,
           preview: url,
+          fallbackPreview: fallbackUrls[index] || undefined,
           name: `Trang ${index + 1}`,
           size: 0,
         }));
@@ -1046,25 +1064,28 @@ const UploadChapter = () => {
         } else if (hasMangaDexPreview) {
           // MangaDex source — download images then upload to Supabase Storage
           setUploadProgress(5);
-          const previewUrls = mangaDexChapterPreviewImages
-            .map(img => img.preview)
-            .filter(Boolean);
+          const previewSources = mangaDexChapterPreviewImages
+            .map(img => [img.preview, img.fallbackPreview].filter(Boolean) as string[])
+            .filter(sources => sources.length > 0);
 
           // Download all preview images as blobs and convert to File objects
           const downloadedFiles: File[] = [];
-          for (let i = 0; i < previewUrls.length; i++) {
-            try {
-              const response = await fetch(previewUrls[i]);
-              if (!response.ok) continue;
-              const blob = await response.blob();
-              const ext = blob.type.includes('png') ? 'png' : blob.type.includes('webp') ? 'webp' : 'jpg';
-              const fileName = `${String(i + 1).padStart(3, '0')}.${ext}`;
-              downloadedFiles.push(new File([blob], fileName, { type: blob.type || 'image/jpeg' }));
-            } catch {
-              // Skip failed downloads
+          for (let i = 0; i < previewSources.length; i++) {
+            for (const sourceUrl of previewSources[i]) {
+              try {
+                const response = await fetch(sourceUrl);
+                if (!response.ok) continue;
+                const blob = await response.blob();
+                const ext = blob.type.includes('png') ? 'png' : blob.type.includes('webp') ? 'webp' : 'jpg';
+                const fileName = `${String(i + 1).padStart(3, '0')}.${ext}`;
+                downloadedFiles.push(new File([blob], fileName, { type: blob.type || 'image/jpeg' }));
+                break;
+              } catch {
+                // Try the next source for this page.
+              }
             }
             // Update progress as we download (5% - 40%)
-            setUploadProgress(5 + Math.round((i / previewUrls.length) * 35));
+            setUploadProgress(5 + Math.round((i / previewSources.length) * 35));
           }
 
           if (downloadedFiles.length === 0) {
@@ -1869,6 +1890,12 @@ const UploadChapter = () => {
                               src={img.preview}
                               alt={`Trang ${i + 1}`}
                               loading="lazy"
+                              onError={(event) => {
+                                const fallback = img.fallbackPreview;
+                                if (fallback && event.currentTarget.src !== fallback) {
+                                  event.currentTarget.src = fallback;
+                                }
+                              }}
                               className="w-full aspect-[3/4] object-cover transition-transform duration-200 group-hover:scale-[1.03]"
                             />
                             <div className="absolute top-1.5 left-1.5 bg-card/85 backdrop-blur-sm px-1.5 py-0.5 rounded text-[10px] font-bold">
@@ -1995,6 +2022,12 @@ const UploadChapter = () => {
                   <img
                     src={activePreviewImage.preview}
                     alt={activePreviewImage.name || `Trang ${lightboxIndex + 1}`}
+                    onError={(event) => {
+                      const fallback = activePreviewImage.fallbackPreview;
+                      if (fallback && event.currentTarget.src !== fallback) {
+                        event.currentTarget.src = fallback;
+                      }
+                    }}
                     className="max-h-[86vh] max-w-[88vw] object-contain rounded-lg shadow-2xl"
                   />
                   <div className="mt-2 text-center text-xs text-white/90 font-semibold">

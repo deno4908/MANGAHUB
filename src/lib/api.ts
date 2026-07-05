@@ -1191,8 +1191,8 @@ export const mangaApi = {
     timeoutMs = 12_000,
   ) =>
     api<any>(
-      `/api/manga/mangadex/chapter-pages/${chapterId}?mode=${mode}&refresh=${refresh ? "1" : "0"}`,
-      { timeoutMs },
+      `/api/manga/mangadex/chapter-pages/${encodeURIComponent(chapterId)}?mode=${mode}&refresh=${refresh ? "1" : "0"}`,
+      { timeoutMs, skipAuth: true },
     ),
   getList: (type = "truyen-moi", page = 1) =>
     api<any>(`/api/manga/list/${type}?page=${page}`),

@@ -737,6 +737,8 @@ export function useCategoryManga(slug: string, page = 1) {
 
 export function useBookmarks() {
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
+  const user = useUserStore((s) => s.user);
+  const isRestoringSession = useUserStore((s) => s.isRestoringSession);
   return useQuery({
     queryKey: ["bookmarks"],
     queryFn: async () => {
@@ -750,21 +752,23 @@ export function useBookmarks() {
         };
       });
     },
-    enabled: isLoggedIn,
+    enabled: isLoggedIn && !!user && !isRestoringSession,
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
 }
 
-export function useIsBookmarked(slug: string) {
+export function useIsBookmarked(slug: string, enabled = true) {
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
+  const user = useUserStore((s) => s.user);
+  const isRestoringSession = useUserStore((s) => s.isRestoringSession);
   return useQuery({
     queryKey: ["bookmark", "check", slug],
     queryFn: async () => {
       const data = await bookmarkApi.check(slug);
       return data.is_bookmarked;
     },
-    enabled: !!slug && isLoggedIn,
+    enabled: enabled && !!slug && isLoggedIn && !!user && !isRestoringSession,
     ...USER_DATA_QUERY_OPTIONS,
   });
 }
@@ -842,6 +846,8 @@ export function useToggleBookmark() {
 
 export function useFollows() {
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
+  const user = useUserStore((s) => s.user);
+  const isRestoringSession = useUserStore((s) => s.isRestoringSession);
   return useQuery({
     queryKey: ["follows"],
     queryFn: async () => {
@@ -855,21 +861,23 @@ export function useFollows() {
         };
       });
     },
-    enabled: isLoggedIn,
+    enabled: isLoggedIn && !!user && !isRestoringSession,
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
 }
 
-export function useIsFollowing(slug: string) {
+export function useIsFollowing(slug: string, enabled = true) {
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
+  const user = useUserStore((s) => s.user);
+  const isRestoringSession = useUserStore((s) => s.isRestoringSession);
   return useQuery({
     queryKey: ["follow", "check", slug],
     queryFn: async () => {
       const data = await followApi.check(slug);
       return data.is_following;
     },
-    enabled: !!slug && isLoggedIn,
+    enabled: enabled && !!slug && isLoggedIn && !!user && !isRestoringSession,
     ...USER_DATA_QUERY_OPTIONS,
   });
 }
@@ -952,7 +960,9 @@ type UseHistoryOptions = {
 
 export function useHistory(options: UseHistoryOptions = {}) {
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
-  const enabled = options.enabled ?? isLoggedIn;
+  const user = useUserStore((s) => s.user);
+  const isRestoringSession = useUserStore((s) => s.isRestoringSession);
+  const enabled = options.enabled ?? (isLoggedIn && !!user && !isRestoringSession);
   const enrichThumbs = options.enrichThumbs ?? true;
 
   return useQuery({

@@ -20,8 +20,7 @@ import MangaPagination from '@/components/manga/MangaPagination';
 import { MangaGridSkeleton } from '@/components/manga/Skeletons';
 import { SlidersHorizontal, X, BookOpen, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import type { Manga } from '@/types/manga';
-import type { SortOption } from '@/types/manga';
+import type { Manga, SortOption } from '@/types/manga';
 
 const normalizeTag = (value: string) =>
   (value || '')
@@ -211,6 +210,43 @@ const parseBrowsePageParam = (value: string | null): number => {
   return normalized >= 1 ? normalized : 1;
 };
 
+const BROWSE_SORT_OPTIONS = ['popular', 'latest', 'rating', 'alphabetical'] as const;
+const BROWSE_STATUS_OPTIONS = ['ongoing', 'completed', 'hiatus'] as const;
+
+type BrowseStatusOption = typeof BROWSE_STATUS_OPTIONS[number];
+
+const normalizeBrowseSortParam = (value: string | null): SortOption | '' => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return (BROWSE_SORT_OPTIONS as readonly string[]).includes(normalized)
+    ? (normalized as SortOption)
+    : '';
+};
+
+const normalizeBrowseStatusParam = (value: string | null): BrowseStatusOption | '' => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return (BROWSE_STATUS_OPTIONS as readonly string[]).includes(normalized)
+    ? (normalized as BrowseStatusOption)
+    : '';
+};
+
+const parseBrowseYearParam = (value: string | null): number | null => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  const year = Math.floor(parsed);
+  return year >= 1900 && year <= new Date().getFullYear() + 1 ? year : null;
+};
+
+const parseBrowseMinRatingParam = (value: string | null): number => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(0, Math.min(5, Math.round(parsed * 10) / 10));
+};
+
+const normalizeTranslatedLanguageParam = (value: string | null): string => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized || 'vi';
+};
+
 const BROWSE_PAGE_MEMORY_STORAGE_KEY = 'mb:browse-page-memory:v1';
 
 type BrowsePageMemoryFilters = {
@@ -240,6 +276,56 @@ const buildBrowsePageMemoryKey = (source: BrowseSourceTab, filters: BrowsePageMe
     filters.year || '',
     filters.minRating || 0,
   ].join('|');
+};
+
+const applyBrowseFiltersToSearchParams = (
+  params: URLSearchParams,
+  source: BrowseSourceTab,
+  filters: BrowsePageMemoryFilters,
+) => {
+  const primaryGenre = String(filters.genres?.[0] || '').trim().toLowerCase();
+  params.delete('tag');
+  params.delete('tags');
+  params.delete('genres');
+  if (primaryGenre) {
+    params.set('genre', primaryGenre);
+  } else {
+    params.delete('genre');
+  }
+
+  const sort = filters.sort || 'popular';
+  if (sort !== 'popular') {
+    params.set('sort', sort);
+  } else {
+    params.delete('sort');
+  }
+
+  const status = String(filters.status || '').trim().toLowerCase();
+  if ((BROWSE_STATUS_OPTIONS as readonly string[]).includes(status)) {
+    params.set('status', status);
+  } else {
+    params.delete('status');
+  }
+
+  if (filters.year) {
+    params.set('year', String(filters.year));
+  } else {
+    params.delete('year');
+  }
+
+  if (Number(filters.minRating || 0) > 0) {
+    params.set('minRating', String(filters.minRating));
+  } else {
+    params.delete('minRating');
+  }
+
+  params.delete('translatedLanguage');
+  const translatedLanguage = String(filters.translatedLanguage || 'vi').trim().toLowerCase() || 'vi';
+  if (source === 'mangadex' && translatedLanguage !== 'vi') {
+    params.set('lang', translatedLanguage);
+  } else {
+    params.delete('lang');
+  }
 };
 
 const readBrowsePageMemory = (): Record<string, number> => {
@@ -1502,6 +1588,9 @@ const getNextMangaDexDemandLimit = (
 const BrowseManga = () => {
   const { filters, setFilter } = useMangaStore();
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
+  const authUser = useUserStore((s) => s.user);
+  const isRestoringSession = useUserStore((s) => s.isRestoringSession);
+  const canUseUserRatings = isLoggedIn && !!authUser && !isRestoringSession;
   const ratingViewerKey = useUserStore((s) => {
     const raw = String(s.user?.id || s.user?.email || '').trim().toLowerCase();
     return raw || 'auth';
@@ -1512,14 +1601,14 @@ const BrowseManga = () => {
     () => parseBrowsePageParam(searchParams.get('page')),
     [searchParams],
   );
+  const sourceParam = searchParams.get('source');
+  const activeSource: BrowseSourceTab = sourceParam === 'mangadex' ? 'mangadex' : 'otruyen';
+  const isOTruyenSourceTab = activeSource === 'otruyen';
+  const isMangaDexSourceTab = activeSource === 'mangadex';
   const setPage = (nextPage: number) => {
     const safePage = Math.max(1, Math.floor(Number(nextPage) || 1));
     const nextParams = new URLSearchParams(searchParams);
-    if (filters.sort && filters.sort !== 'popular') {
-      nextParams.set('sort', filters.sort);
-    } else {
-      nextParams.delete('sort');
-    }
+    applyBrowseFiltersToSearchParams(nextParams, activeSource, filters);
     if (safePage <= 1) {
       nextParams.delete('page');
     } else {
@@ -1552,12 +1641,17 @@ const BrowseManga = () => {
   const globalSortBackgroundKeyRef = useRef('');
   const globalSortBackgroundTokenRef = useRef(0);
   const lastAppliedBrowseUrlStateRef = useRef<string>('');
+  const pendingBrowseUrlStateRef = useRef<string>('');
   const genreParam = searchParams.get('genre');
+  const tagParam = searchParams.get('tag') || searchParams.get('tags') || searchParams.get('genres');
   const sortParam = searchParams.get('sort');
-  const sourceParam = searchParams.get('source');
-  const activeSource: BrowseSourceTab = sourceParam === 'mangadex' ? 'mangadex' : 'otruyen';
-  const isOTruyenSourceTab = activeSource === 'otruyen';
-  const isMangaDexSourceTab = activeSource === 'mangadex';
+  const statusParam = searchParams.get('status');
+  const yearParam = searchParams.get('year');
+  const minRatingParam = searchParams.get('minRating') || searchParams.get('rating');
+  const translatedLanguageParam =
+    searchParams.get('lang') ||
+    searchParams.get('translatedLanguage') ||
+    searchParams.get('availableTranslatedLanguage');
   const browsePageMemoryKey = useMemo(
     () => buildBrowsePageMemoryKey(activeSource, filters),
     [
@@ -1589,11 +1683,7 @@ const BrowseManga = () => {
     } else {
       nextParams.set('source', nextSource);
     }
-    if (filters.sort && filters.sort !== 'popular') {
-      nextParams.set('sort', filters.sort);
-    } else {
-      nextParams.delete('sort');
-    }
+    applyBrowseFiltersToSearchParams(nextParams, nextSource, filters);
     const rememberedPage = getRememberedBrowsePage(buildBrowsePageMemoryKey(nextSource, filters));
     if (rememberedPage > 1) {
       nextParams.set('page', String(rememberedPage));
@@ -2143,10 +2233,13 @@ const BrowseManga = () => {
       totalPages = Math.max(1, Number(firstPage.totalPages || 1));
       appendPage(firstPage);
 
+      const statusFillPageBudget = useOTruyenCategory
+        ? OTRUYEN_STATUS_FILL_MAX_PAGES
+        : Math.max(safeTargetPage + OTRUYEN_STATUS_FILL_PAGE_BUFFER, safeTargetPage * 2);
       const maxPageToInspect = Math.min(
         totalPages,
         OTRUYEN_STATUS_FILL_MAX_PAGES,
-        Math.max(safeTargetPage + OTRUYEN_STATUS_FILL_PAGE_BUFFER, safeTargetPage * 2),
+        statusFillPageBudget,
       );
 
       for (let targetPage = 2; targetPage <= maxPageToInspect; targetPage += 1) {
@@ -2756,12 +2849,24 @@ const BrowseManga = () => {
   }, [sortParam, filters.sort, setFilter]);
 
   useEffect(() => {
-    const normalizedGenre = String(genreParam || '').trim().toLowerCase();
-    const normalizedSort =
-      sortParam && ['popular', 'latest', 'rating', 'alphabetical'].includes(sortParam)
-        ? String(sortParam)
-        : '';
-    const urlStateKey = `${normalizedGenre}|${normalizedSort}`;
+    const normalizedGenre = String(genreParam || tagParam || '').trim().toLowerCase();
+    const normalizedSort = normalizeBrowseSortParam(sortParam);
+    const normalizedStatus = normalizeBrowseStatusParam(statusParam);
+    const normalizedYear = parseBrowseYearParam(yearParam);
+    const normalizedMinRating = parseBrowseMinRatingParam(minRatingParam);
+    const normalizedTranslatedLanguage = isMangaDexSourceTab
+      ? normalizeTranslatedLanguageParam(translatedLanguageParam)
+      : 'vi';
+    const nextSort = normalizedSort || 'popular';
+    const urlStateKey = [
+      activeSource,
+      normalizedGenre,
+      nextSort,
+      normalizedStatus,
+      normalizedYear || '',
+      normalizedMinRating,
+      normalizedTranslatedLanguage,
+    ].join('|');
 
     // Only apply URL -> store sync when URL query state actually changes.
     // This prevents stale URL sort (e.g. ?sort=rating) from locking sort buttons.
@@ -2769,14 +2874,113 @@ const BrowseManga = () => {
       return;
     }
     lastAppliedBrowseUrlStateRef.current = urlStateKey;
+    pendingBrowseUrlStateRef.current = urlStateKey;
 
-    if (normalizedGenre && filters.genres[0] !== normalizedGenre) {
-      setFilter('genres', [normalizedGenre]);
+    const nextGenres = normalizedGenre ? [normalizedGenre] : [];
+    if (filters.genres.length !== nextGenres.length || (filters.genres[0] || '') !== (nextGenres[0] || '')) {
+      setFilter('genres', nextGenres);
     }
-    if (normalizedSort && filters.sort !== normalizedSort) {
-      setFilter('sort', normalizedSort as SortOption);
+    if (filters.sort !== nextSort) {
+      setFilter('sort', nextSort as SortOption);
     }
-  }, [genreParam, sortParam, filters.genres, filters.sort, setFilter]);
+    const nextStatus = normalizedStatus || null;
+    if ((filters.status || null) !== nextStatus) {
+      setFilter('status', nextStatus);
+    }
+    if ((filters.year || null) !== normalizedYear) {
+      setFilter('year', normalizedYear);
+    }
+    if (Number(filters.minRating || 0) !== normalizedMinRating) {
+      setFilter('minRating', normalizedMinRating);
+    }
+    if ((filters.translatedLanguage || 'vi') !== normalizedTranslatedLanguage) {
+      setFilter('translatedLanguage', normalizedTranslatedLanguage);
+    }
+  }, [
+    activeSource,
+    genreParam,
+    tagParam,
+    sortParam,
+    statusParam,
+    yearParam,
+    minRatingParam,
+    translatedLanguageParam,
+    isMangaDexSourceTab,
+    filters.genres,
+    filters.sort,
+    filters.status,
+    filters.year,
+    filters.minRating,
+    filters.translatedLanguage,
+    setFilter,
+  ]);
+
+  useEffect(() => {
+    const currentGenre = String(genreParam || tagParam || '').trim().toLowerCase();
+    const currentSort = normalizeBrowseSortParam(sortParam) || 'popular';
+    const currentStatus = normalizeBrowseStatusParam(statusParam);
+    const currentYear = parseBrowseYearParam(yearParam);
+    const currentMinRating = parseBrowseMinRatingParam(minRatingParam);
+    const currentTranslatedLanguage = isMangaDexSourceTab
+      ? normalizeTranslatedLanguageParam(translatedLanguageParam)
+      : 'vi';
+    const currentUrlStateKey = [
+      activeSource,
+      currentGenre,
+      currentSort,
+      currentStatus,
+      currentYear || '',
+      currentMinRating,
+      currentTranslatedLanguage,
+    ].join('|');
+    const filterStateKey = [
+      activeSource,
+      String(filters.genres?.[0] || '').trim().toLowerCase(),
+      filters.sort || 'popular',
+      String(filters.status || '').trim().toLowerCase(),
+      filters.year || '',
+      Number(filters.minRating || 0),
+      isMangaDexSourceTab ? String(filters.translatedLanguage || 'vi').trim().toLowerCase() || 'vi' : 'vi',
+    ].join('|');
+
+    if (
+      pendingBrowseUrlStateRef.current === currentUrlStateKey &&
+      filterStateKey !== currentUrlStateKey
+    ) {
+      return;
+    }
+    if (
+      pendingBrowseUrlStateRef.current === currentUrlStateKey &&
+      filterStateKey === currentUrlStateKey
+    ) {
+      pendingBrowseUrlStateRef.current = '';
+    }
+
+    const nextParams = new URLSearchParams(searchParams);
+    applyBrowseFiltersToSearchParams(nextParams, activeSource, filters);
+    if (nextParams.toString() === searchParams.toString()) {
+      return;
+    }
+    setSearchParams(nextParams, { replace: true });
+  }, [
+    activeSource,
+    filters.genres,
+    filters.sort,
+    filters.status,
+    filters.year,
+    filters.minRating,
+    filters.translatedLanguage,
+    genreParam,
+    tagParam,
+    sortParam,
+    statusParam,
+    yearParam,
+    minRatingParam,
+    translatedLanguageParam,
+    isMangaDexSourceTab,
+    searchParams,
+    setSearchParams,
+  ]);
 
   // Prefetch the 'latest' list in the background when page first loads with popular sort
   // so switching to 'Mới nhất' tab is instant
@@ -3257,7 +3461,7 @@ const BrowseManga = () => {
         return { items: [] };
       }
     },
-    enabled: isLoggedIn,
+    enabled: canUseUserRatings,
     staleTime: 5 * 60 * 1000,
     refetchOnMount: false,
     refetchOnWindowFocus: false,
@@ -4950,7 +5154,7 @@ const BrowseManga = () => {
     );
 
     const withMyRatings =
-      isLoggedIn && myRatedScoreMap.size > 0
+      canUseUserRatings && myRatedScoreMap.size > 0
         ? withVisibleRatings.map((item) => {
             const key = String(item.id || '').trim().toLowerCase();
             const score = myRatedScoreMap.get(key);
@@ -4960,7 +5164,7 @@ const BrowseManga = () => {
         : withVisibleRatings;
 
     const ratingModeItems =
-      filters.sort === 'rating' && isLoggedIn
+      filters.sort === 'rating' && canUseUserRatings
         ? withMyRatings.filter(hasTrustedRatingSignal)
         : withMyRatings;
 
@@ -4978,7 +5182,7 @@ const BrowseManga = () => {
     shouldEnrichVisibleMangaDex,
     showMatureContent,
     filters.sort,
-    isLoggedIn,
+    canUseUserRatings,
     myRatedScoreMap,
   ]);
 
@@ -4997,9 +5201,10 @@ const BrowseManga = () => {
 
   useEffect(() => {
     if (!hasResolvedTotalPages) return;
+    if (isLoading || isFetching) return;
     if (isNearMangaDexLoadedLimit) return;
     if (page > totalPages) setPage(totalPages);
-  }, [page, totalPages, hasResolvedTotalPages, isNearMangaDexLoadedLimit]);
+  }, [page, totalPages, hasResolvedTotalPages, isLoading, isFetching, isNearMangaDexLoadedLimit]);
 
   // Prefetch adjacent MangaDex search pages so pagination feels instant.
   useEffect(() => {

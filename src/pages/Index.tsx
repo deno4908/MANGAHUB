@@ -1041,6 +1041,9 @@ const syncMangaDexLatestChapters = (
 const Index = () => {
   const showMatureContent = useSettingsStore((s) => s.settings.privacy.showMatureContent);
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
+  const authUser = useUserStore((s) => s.user);
+  const isRestoringSession = useUserStore((s) => s.isRestoringSession);
+  const canUseUserRatings = isLoggedIn && !!authUser && !isRestoringSession;
   const ratingViewerKey = useUserStore((s) => {
     const raw = String(s.user?.id || s.user?.email || '').trim().toLowerCase();
     return raw || 'auth';
@@ -1309,7 +1312,7 @@ const Index = () => {
         return { items: [] };
       }
     },
-    enabled: isLoggedIn && isHomepageCoreReady,
+    enabled: canUseUserRatings && isHomepageCoreReady,
     staleTime: 2 * 60 * 1000,
     retry: 0,
     placeholderData: (previousData) => previousData,
@@ -1942,7 +1945,7 @@ const Index = () => {
     [popularVisible, popularMangaDexChapterMap],
   );
 
-  const topRatedBase = isLoggedIn
+  const topRatedBase = canUseUserRatings
     ? dedupeById([...ongoingMergedRated, ...latestMergedRated, ...myRatedOverlayRated])
     : dedupeById([...ongoingMergedRated, ...latestMergedRated]);
   const topRatedCandidates = topRatedBase
@@ -1966,7 +1969,7 @@ const Index = () => {
     (m) => {
       const aggregate = getTrustedAggregateFor(m);
       const myRating = Number(m.myRating || 0);
-      return aggregate.hasAggregate || (isLoggedIn && myRating > 0);
+      return aggregate.hasAggregate || (canUseUserRatings && myRating > 0);
     },
   );
   const topRated = dedupeById([...guestTopRatedVisible, ...topRatedWithScores]);

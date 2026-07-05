@@ -667,6 +667,9 @@ const mapMangaDexCatalogToManga = (item: MangaDexCatalogItem): Manga => {
 const RankingsPage = () => {
   const showMatureContent = useSettingsStore((s) => s.settings.privacy.showMatureContent);
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
+  const authUser = useUserStore((s) => s.user);
+  const isRestoringSession = useUserStore((s) => s.isRestoringSession);
+  const canUseUserRatings = isLoggedIn && !!authUser && !isRestoringSession;
   const ratingViewerKey = useUserStore((s) => {
     const raw = String(s.user?.id || s.user?.email || '').trim().toLowerCase();
     return raw || 'auth';
@@ -773,7 +776,7 @@ const RankingsPage = () => {
         return { items: [] };
       }
     },
-    enabled: isLoggedIn && activeTab === "rating",
+    enabled: canUseUserRatings && activeTab === "rating",
     staleTime: 2 * 60 * 1000,
     retry: 0,
     placeholderData: (previousData) => previousData,

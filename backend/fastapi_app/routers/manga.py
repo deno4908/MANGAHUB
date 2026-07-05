@@ -73,6 +73,7 @@ _trending_memory_cache: dict[str, tuple[list[dict], float]] = {}
 _combined_refresh_tasks: dict[str, asyncio.Task] = {}
 _startup_warmup_task: asyncio.Task | None = None
 OTRUYEN_IMG_CDN = "https://img.otruyenapi.com/uploads/comics/"
+DEFAULT_SHARE_IMAGE_PATH = "/og-logo.png"
 SITEMAP_CACHE_VERSION = "v4"
 SITEMAP_CACHE_TTL_SECONDS = _env_int("SITEMAP_CACHE_TTL_SECONDS", 1800, minimum=300)
 SITEMAP_LOCAL_ACTIVITY_LIMIT = _env_int("SITEMAP_LOCAL_ACTIVITY_LIMIT", 3000, minimum=100)
@@ -2784,7 +2785,7 @@ def _absolute_share_url(request: Request, value: str) -> str:
     base = _public_site_base(request)
     url = str(value or "").strip()
     if not url:
-        return f"{base}/no-cover.svg"
+        return f"{base}{DEFAULT_SHARE_IMAGE_PATH}"
     if url.startswith("//"):
         return f"https:{url}"
     if url.startswith(("http://", "https://")):
@@ -2794,21 +2795,67 @@ def _absolute_share_url(request: Request, value: str) -> str:
     return f"{base}{url}"
 
 
+def _default_share_image_url(request: Request) -> str:
+    return _absolute_share_url(request, DEFAULT_SHARE_IMAGE_PATH)
+
+
 def _share_image_url(request: Request, cover_url: str) -> str:
     base = _public_site_base(request)
     normalized = str(cover_url or "").strip()
     if not normalized:
-        return f"{base}/no-cover.svg"
+        return _default_share_image_url(request)
     if normalized.startswith("//"):
         normalized = f"https:{normalized}"
     if normalized.startswith(("http://", "https://")):
-        return f"{base}/api/images/img?url={quote(normalized, safe='')}"
+        return f"{base}/api/manga/og-image.jpg?url={quote(normalized, safe='')}"
     return _absolute_share_url(request, normalized)
 
 
 def _share_title(value: Any, fallback: str = "MangaHub") -> str:
     title = _collapse_share_text(value, max_length=90)
     return title or fallback
+
+
+def _chapter_share_label(chapter_number: Any, chapter_title: Any = "") -> str:
+    number = _collapse_share_text(chapter_number, max_length=40)
+    title = _collapse_share_text(chapter_title, max_length=90)
+    if number and title:
+        return f"Chương {number}: {title}"
+    if number:
+        return f"Chương {number}"
+    return title or "Chương mới"
+
+
+def _extract_otruyen_chapter_manga_slug(item: dict[str, Any]) -> str:
+    for key in ("comic_slug", "manga_slug", "slug"):
+        value = _clean_slug(item.get(key))
+        if value and not _is_invalid_manga_slug(value):
+            return value
+
+    chapter_path = str(item.get("chapter_path") or item.get("path") or "").strip()
+    parts = [part for part in chapter_path.split("/") if part.strip()]
+    reserved = {"uploads", "comics", "chapters", "chapter", "api", "img", "images", "v1", "data"}
+
+    def is_invalid_candidate(value: str) -> bool:
+        slug = _clean_slug(value)
+        if not slug or len(slug) < 3 or slug in reserved:
+            return True
+        if re.fullmatch(r"\d+", slug) or re.fullmatch(r"[0-9a-f]{20,}", slug):
+            return True
+        compact = re.sub(r"[-_\s.]+", "", slug)
+        return bool(re.match(r"^(c|ch|chap|chapter|chuong|tap|episode|ep)\d", compact))
+
+    for index, part in enumerate(parts):
+        if part.lower() == "comics" and index + 1 < len(parts):
+            candidate = _clean_slug(parts[index + 1])
+            if not is_invalid_candidate(candidate):
+                return candidate
+
+    for part in parts:
+        candidate = _clean_slug(part)
+        if "-" in candidate and not is_invalid_candidate(candidate):
+            return candidate
+    return ""
 
 
 async def _resolve_share_identifier(identifier: str) -> tuple[str, str]:
@@ -2937,12 +2984,140 @@ async def _build_manga_share_meta(
     }
 
 
+async def _build_chapter_share_meta(
+    request: Request,
+    *,
+    chapter_id: str,
+    db: Any,
+) -> dict[str, str]:
+    raw_chapter_id = str(chapter_id or "").strip()
+    if not raw_chapter_id:
+        raise HTTPException(status_code=404, detail="Chapter not found")
+
+    canonical_url = f"{_public_site_base(request)}/chapter/{quote(raw_chapter_id, safe='')}"
+
+    if raw_chapter_id.startswith("upload-"):
+        upload_id = raw_chapter_id[7:].strip()
+        result = await asyncio.to_thread(
+            lambda: _safe_query(
+                lambda: db.table("chapter_uploads")
+                .select("id,manga_slug,chapter_number,chapter_title,status,published_at,created_at")
+                .eq("id", upload_id)
+                .maybe_single()
+                .execute()
+            )
+        )
+        row = getattr(result, "data", None) if result is not None else None
+        if isinstance(row, dict) and row:
+            status = str(row.get("status") or "published").strip().lower()
+            if status and status != "published":
+                raise HTTPException(status_code=404, detail="Chapter not found")
+            manga_slug = _clean_slug(row.get("manga_slug"))
+            manga_meta = await _build_manga_share_meta(
+                request,
+                identifier=manga_slug,
+                source=None,
+                db=db,
+            )
+            chapter_label = _chapter_share_label(row.get("chapter_number"), row.get("chapter_title"))
+            manga_title = manga_meta.get("title") or "MangaHub"
+            return {
+                **manga_meta,
+                "title": f"{manga_title} - {chapter_label}",
+                "description": f"Đọc {chapter_label} của {manga_title} trên MangaHub.",
+                "canonical_url": canonical_url,
+                "source": "mangahub-chapter",
+            }
+
+    mangadex_chapter_id = _extract_mangadex_id(raw_chapter_id)
+    if mangadex_chapter_id:
+        try:
+            payload = await mangadex_service.get_chapter_metadata(mangadex_chapter_id)
+            chapter = (payload or {}).get("data") or {}
+            attributes = chapter.get("attributes") or {}
+            relationships = chapter.get("relationships") or []
+            manga_id = ""
+            if isinstance(relationships, list):
+                for rel in relationships:
+                    if isinstance(rel, dict) and rel.get("type") == "manga":
+                        manga_id = _extract_mangadex_id(rel.get("id")) or ""
+                        break
+            if manga_id:
+                manga_meta = await _build_manga_share_meta(
+                    request,
+                    identifier=manga_id,
+                    source="mangadex",
+                    db=db,
+                )
+                chapter_label = _chapter_share_label(
+                    attributes.get("chapter"),
+                    attributes.get("title"),
+                )
+                manga_title = manga_meta.get("title") or "MangaHub"
+                return {
+                    **manga_meta,
+                    "title": f"{manga_title} - {chapter_label}",
+                    "description": f"Đọc {chapter_label} của {manga_title} trên MangaHub.",
+                    "canonical_url": canonical_url,
+                    "source": "mangadex-chapter",
+                }
+        except Exception:
+            pass
+
+    try:
+        chapter_payload = await otruyen_service.get_chapter(raw_chapter_id)
+    except Exception:
+        chapter_payload = None
+    item = (chapter_payload or {}).get("data", {}).get("item") if isinstance(chapter_payload, dict) else None
+    if isinstance(item, dict):
+        manga_slug = _extract_otruyen_chapter_manga_slug(item)
+        chapter_label = _chapter_share_label(
+            item.get("chapter_name") or item.get("chapter"),
+            item.get("chapter_title") or item.get("name") or item.get("title"),
+        )
+        if manga_slug:
+            manga_meta = await _build_manga_share_meta(
+                request,
+                identifier=manga_slug,
+                source="otruyen",
+                db=db,
+            )
+            manga_title = manga_meta.get("title") or "MangaHub"
+            return {
+                **manga_meta,
+                "title": f"{manga_title} - {chapter_label}",
+                "description": f"Đọc {chapter_label} của {manga_title} trên MangaHub.",
+                "canonical_url": canonical_url,
+                "source": "otruyen-chapter",
+            }
+
+        return {
+            "title": f"MangaHub - {chapter_label}",
+            "description": f"Đọc {chapter_label} trên MangaHub.",
+            "image_url": _default_share_image_url(request),
+            "canonical_url": canonical_url,
+            "source": "chapter",
+        }
+
+    return {
+        "title": "MangaHub - Đọc truyện tranh online",
+        "description": "Đọc truyện tranh online trên MangaHub.",
+        "image_url": _default_share_image_url(request),
+        "canonical_url": canonical_url,
+        "source": "chapter",
+    }
+
+
 def _render_manga_share_html(meta: dict[str, str]) -> str:
     title = html_escape(meta.get("title") or "MangaHub", quote=True)
     description = html_escape(meta.get("description") or "Doc truyen tranh online tren MangaHub.", quote=True)
     image_url = html_escape(meta.get("image_url") or "", quote=True)
     canonical_url = html_escape(meta.get("canonical_url") or "", quote=True)
     source = html_escape(meta.get("source") or "mangahub", quote=True)
+    is_default_image = DEFAULT_SHARE_IMAGE_PATH in str(meta.get("image_url") or "")
+    image_width = "1200" if is_default_image else "512"
+    image_height = "630" if is_default_image else "768"
+    image_type_tag = '<meta property="og:image:type" content="image/png">' if is_default_image else ""
 
     return f"""<!doctype html>
 <html lang="vi">
@@ -2961,8 +3136,9 @@ def _render_manga_share_html(meta: dict[str, str]) -> str:
     <meta property="og:image" content="{image_url}">
     <meta property="og:image:secure_url" content="{image_url}">
     <meta property="og:image:alt" content="{title}">
-    <meta property="og:image:width" content="512">
-    <meta property="og:image:height" content="768">
+    {image_type_tag}
+    <meta property="og:image:width" content="{image_width}">
+    <meta property="og:image:height" content="{image_height}">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="{title}">
     <meta name="twitter:description" content="{description}">
@@ -2993,7 +3169,11 @@ def _render_manga_seo_html(meta: dict[str, str]) -> str:
     image_url = html_escape(raw_image_url, quote=True)
     canonical_url = html_escape(raw_canonical_url, quote=True)
     source = html_escape(meta.get("source") or "mangahub", quote=True)
-    image_html = f'<img src="{image_url}" alt="{title}" width="512" height="768">' if image_url else ""
+    is_default_image = DEFAULT_SHARE_IMAGE_PATH in raw_image_url
+    image_width = "1200" if is_default_image else "512"
+    image_height = "630" if is_default_image else "768"
+    image_type_tag = '<meta property="og:image:type" content="image/png">' if is_default_image else ""
+    image_html = f'<img src="{image_url}" alt="{title}" width="{image_width}" height="{image_height}">' if image_url else ""
     json_ld = json.dumps(
         {
             "@context": "https://schema.org",
@@ -3037,8 +3217,9 @@ def _render_manga_seo_html(meta: dict[str, str]) -> str:
     <meta property="og:image" content="{image_url}">
     <meta property="og:image:secure_url" content="{image_url}">
     <meta property="og:image:alt" content="{title}">
-    <meta property="og:image:width" content="512">
-    <meta property="og:image:height" content="768">
+    {image_type_tag}
+    <meta property="og:image:width" content="{image_width}">
+    <meta property="og:image:height" content="{image_height}">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="{title}">
     <meta name="twitter:description" content="{description}">
@@ -3395,6 +3576,89 @@ async def _collect_otruyen_sitemap_entries(
             )
             if len(seen) > before:
                 added += 1
+
+
+@router.get("/og-image.jpg")
+async def manga_og_image(url: str, request: Request, retry: int = 0):
+    """Stable .jpg-looking image proxy URL for OpenGraph crawlers."""
+    from fastapi_app.routers import images as image_proxy
+
+    validation_error = await image_proxy._validate_image_url(url)
+    if validation_error:
+        return RedirectResponse(_default_share_image_url(request), status_code=302)
+
+    key = image_proxy._cache_key(url)
+    cached_path = image_proxy.CACHE_DIR / key
+    force_refetch = retry > 0
+    if not force_refetch:
+        cached = image_proxy._cached_image_response(cached_path, request)
+        if cached is not None:
+            return cached
+
+    lock = image_proxy._cache_lock_for_key(key)
+    async with lock:
+        if not force_refetch:
+            cached = image_proxy._cached_image_response(cached_path, request)
+            if cached is not None:
+                return cached
+        data, fetch_info, content_type, transport = await image_proxy._fetch_image(url, retry_hint=retry)
+
+    if data is None:
+        stale = image_proxy._cached_image_response(cached_path, request, cache_status="STALE")
+        if stale is not None:
+            return stale
+        logger.warning("OG image fetch failed: %s - %s", url, fetch_info)
+        return RedirectResponse(_default_share_image_url(request), status_code=302)
+
+    try:
+        image_proxy._write_cache_atomic(cached_path, data)
+        image_proxy.schedule_image_cache_prune()
+    except Exception as exc:
+        logger.warning("OG image cache write failed: %s", exc)
+
+    return Response(
+        content=data,
+        media_type=content_type or image_proxy.EXT_CONTENT_TYPE.get(cached_path.suffix, "image/jpeg"),
+        headers={
+            **image_proxy.COMMON_HEADERS,
+            "X-Cache": "MISS",
+            "X-Upstream-Transport": transport or "unknown",
+        },
+    )
+
+
+@router.get("/share-chapter/{chapter_id:path}", response_class=HTMLResponse)
+async def chapter_share_preview(
+    request: Request,
+    chapter_id: str,
+    db=Depends(get_supabase_public),
+):
+    meta = await _build_chapter_share_meta(request, chapter_id=chapter_id, db=db)
+    return HTMLResponse(
+        content=_render_manga_share_html(meta),
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Cache-Control": "public, max-age=300, stale-while-revalidate=86400",
+            "X-Robots-Tag": "index, follow",
+        },
+    )
+
+
+@router.get("/seo-chapter/{chapter_id:path}", response_class=HTMLResponse)
+async def chapter_seo_preview(
+    request: Request,
+    chapter_id: str,
+    db=Depends(get_supabase_public),
+):
+    meta = await _build_chapter_share_meta(request, chapter_id=chapter_id, db=db)
+    return HTMLResponse(
+        content=_render_manga_seo_html(meta),
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Cache-Control": "public, max-age=600, stale-while-revalidate=86400",
+            "X-Robots-Tag": "index, follow, max-image-preview:large",
+        },
+    )
 
 
 @router.get("/share/{share_path:path}", response_class=HTMLResponse)

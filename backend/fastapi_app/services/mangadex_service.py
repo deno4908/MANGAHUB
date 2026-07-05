@@ -2909,7 +2909,16 @@ async def get_manga_detail(
 
 
 async def get_chapter_pages(chapter_id: str, mode: str = "data", refresh: bool = False) -> dict[str, Any]:
-    normalized_mode = "data-saver" if mode.lower() in {"saver", "data-saver"} else "data"
+    chapter_id = str(chapter_id or "").strip()
+    normalized_mode = "data-saver" if str(mode or "").lower() in {"saver", "data-saver"} else "data"
+    if not _MANGADEX_UUID_RE.fullmatch(chapter_id):
+        return {
+            "chapter_id": chapter_id,
+            "mode": normalized_mode,
+            "total_images": 0,
+            "image_urls": [],
+            "error": "Chapter MangaDex không hợp lệ.",
+        }
     cache_key = f"mangadex:chapter-pages:{chapter_id}:{normalized_mode}"
     if not refresh:
         cached = cache.get(cache_key)
@@ -2965,11 +2974,18 @@ async def get_chapter_pages(chapter_id: str, mode: str = "data", refresh: bool =
     base_url = str(payload.get("baseUrl") or "")
     chapter_hash = str(chapter.get("hash") or "")
     image_urls = [f"{base_url}/{used_mode}/{chapter_hash}/{name}" for name in image_names]
+    fallback_image_urls: list[str] = []
+    if used_mode == "data-saver":
+        fallback_image_urls = [
+            f"{base_url}/data/{chapter_hash}/{name}"
+            for name in (chapter.get("data") or [])
+        ]
     result = {
         "chapter_id": chapter_id,
         "mode": used_mode,
         "total_images": len(image_urls),
         "image_urls": image_urls,
+        "fallback_image_urls": fallback_image_urls,
     }
     cache.set(cache_key, json.dumps(result, ensure_ascii=False), ttl=CHAPTER_PAGES_TTL)
     if used_mode == "data":
@@ -2979,3 +2995,15 @@ async def get_chapter_pages(chapter_id: str, mode: str = "data", refresh: bool =
             ttl=CHAPTER_PAGES_TTL,
         )
     return result
+
+
+async def get_chapter_metadata(chapter_id: str) -> dict[str, Any]:
+    chapter_id = str(chapter_id or "").strip()
+    if not _MANGADEX_UUID_RE.fullmatch(chapter_id):
+        raise RuntimeError("Chapter MangaDex không hợp lệ.")
+    return await _request_json(
+        f"/chapter/{chapter_id}",
+        {
+            "includes[]": ["manga"],
+        },
+    )

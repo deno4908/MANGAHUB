@@ -324,11 +324,12 @@ const MangaDetail = () => {
   const isLoading = !manga && fastDetailQuery.isLoading;
   const error = fastDetailQuery.error && !fetchedManga ? fastDetailQuery.error : null;
   const isLoadingFullMangaDex = shouldLoadFullMangaDex && fullDetailQuery.isFetching && !fullDetailQuery.data;
-  const { isLoggedIn } = useUserStore();
+  const { isLoggedIn, user, isRestoringSession } = useUserStore();
   const showMatureContent = useSettingsStore((s) => s.settings.privacy.showMatureContent);
   const detailReadySlug = manga ? (manga.slug || manga.id || '') : '';
+  const canUseUserMangaState = isLoggedIn && !!user && !isRestoringSession && !!detailReadySlug;
   const { data: history = [] } = useHistory({
-    enabled: isLoggedIn && !!manga,
+    enabled: canUseUserMangaState && !!manga,
     enrichThumbs: false,
   });
 
@@ -340,8 +341,8 @@ const MangaDetail = () => {
     staleTime: 2 * 60 * 1000,
   });
 
-  const { data: isBookmarked = false } = useIsBookmarked(detailReadySlug);
-  const { data: isFollowed = false } = useIsFollowing(detailReadySlug);
+  const { data: isBookmarked = false } = useIsBookmarked(detailReadySlug, canUseUserMangaState);
+  const { data: isFollowed = false } = useIsFollowing(detailReadySlug, canUseUserMangaState);
   const toggleBookmark = useToggleBookmark();
   const toggleFollow = useToggleFollow();
   const descriptionRef = useRef<HTMLParagraphElement | null>(null);
@@ -355,7 +356,7 @@ const MangaDetail = () => {
   const { data: myRatingData } = useQuery({
     queryKey: ['rating', 'me', detailReadySlug],
     queryFn: () => ratingApi.getMyRating(detailReadySlug),
-    enabled: !!detailReadySlug && isLoggedIn && !!manga,
+    enabled: !!detailReadySlug && canUseUserMangaState && !!manga,
   });
   const qc = useQueryClient();
   const rateManga = useRateManga();
@@ -815,12 +816,12 @@ const MangaDetail = () => {
   );
 
   const handleToggleFollow = () => {
-    if (!isLoggedIn) { navigate('/login'); return; }
+    if (!canUseUserMangaState) { navigate('/login'); return; }
     toggleFollow.mutate({ slug: detailReadySlug, title: manga.title, thumb: manga.cover, isFollowing: isFollowed });
   };
 
   const handleToggleBookmark = () => {
-    if (!isLoggedIn) { navigate('/login'); return; }
+    if (!canUseUserMangaState) { navigate('/login'); return; }
     toggleBookmark.mutate({ slug: detailReadySlug, title: manga.title, thumb: manga.cover, isBookmarked });
   };
 
