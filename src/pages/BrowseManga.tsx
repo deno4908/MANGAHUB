@@ -27,7 +27,8 @@ const normalizeTag = (value: string) =>
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
-    .replace(/đ/g, 'd')
+    .replace(/\u0111/g, 'd')
+    .replace(/\u00c4\u2018/g, 'd')
     .trim();
 
 const toSlug = (value: string) => normalizeTag(value).replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
@@ -1751,6 +1752,22 @@ const BrowseManga = () => {
   const useOTruyenCategory =
     isOTruyenSourceTab && (useCategory || (isMangaDexGenre && !!otruyenEquivSlug));
   const activeCategorySlug = useCategory ? genreSlug : otruyenEquivSlug;
+  const directOTruyenFilterGenreSlugs = useMemo(() => {
+    if (!filters.genres.length || !categories.length) return [] as string[];
+    const otruyenCategorySlugs = new Set(
+      categories
+        .filter((category) => category.source !== 'mangadex')
+        .map((category) => toSlug(category.slug))
+        .filter(Boolean),
+    );
+    const slugs = filters.genres
+      .map((slug) => toSlug(String(slug || '')))
+      .filter(Boolean);
+    if (slugs.some((slug) => !otruyenCategorySlugs.has(slug))) {
+      return [] as string[];
+    }
+    return Array.from(new Set(slugs));
+  }, [filters.genres, categories]);
   const shouldApplyOTruyenGenreFilter =
     selectedGenreAliasGroups.length > 0 &&
     (!useOTruyenCategory || selectedGenreAliasGroups.length > 1);
@@ -1953,10 +1970,21 @@ const BrowseManga = () => {
   // Combined endpoint is heavier and can hurt tab responsiveness on large datasets.
   // Keep browse tabs on lightweight list + cached MangaDex catalog flow.
   const useCombinedList = false;
+  const useOTruyenFilteredServerMode =
+    isOTruyenSourceTab &&
+    !isClientPaginationMode &&
+    !hasSearch &&
+    !hasLocalClientFilters &&
+    Boolean(filters.status) &&
+    directOTruyenFilterGenreSlugs.length > 0 &&
+    directOTruyenFilterGenreSlugs.length === filters.genres.length &&
+    !useCombinedList &&
+    !useGlobalClientSortMode;
   const useOTruyenStatusFillMode =
     isOTruyenSourceTab &&
     !isClientPaginationMode &&
     Boolean(filters.status) &&
+    !useOTruyenFilteredServerMode &&
     !useCombinedList &&
     !useGlobalClientSortMode;
 
@@ -2183,12 +2211,46 @@ const BrowseManga = () => {
         throw listError;
       }
     },
-    enabled: isOTruyenSourceTab && !useOTruyenCategory && !useCombinedList && !useGlobalClientSortMode,
+    enabled: isOTruyenSourceTab && !useOTruyenCategory && !useCombinedList && !useGlobalClientSortMode && !useOTruyenFilteredServerMode,
     staleTime: 10 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
     refetchOnMount: false,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
+  });
+
+  const otruyenFilteredServerQuery = useQuery({
+    queryKey: [
+      'manga',
+      'otruyen-filtered',
+      directOTruyenFilterGenreSlugs,
+      filters.status,
+      filters.sort,
+      page,
+      showMatureContent,
+    ],
+    queryFn: async () => {
+      const payload = await mangaApi.getOTruyenFiltered({
+        genreSlugs: directOTruyenFilterGenreSlugs,
+        status: filters.status,
+        sort: filters.sort,
+        page,
+        limit: BROWSE_PAGE_SIZE,
+        showMature: showMatureContent,
+        baseSlug: directOTruyenFilterGenreSlugs[0] || activeCategorySlug,
+        attachRatings: filters.sort === 'rating',
+      });
+      assertOTruyenPayload(payload);
+      return adaptListData(payload);
+    },
+    enabled: useOTruyenFilteredServerMode,
+    staleTime: 10 * 60 * 1000,
+    gcTime: 8 * 60 * 1000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: 1,
+    placeholderData: (previousData) => previousData,
   });
 
   const otruyenStatusFillQuery = useQuery({
@@ -2668,11 +2730,13 @@ const BrowseManga = () => {
   ]);
 
   const categoryQuery = useCategoryManga(
-    useOTruyenCategory && !useOTruyenStatusFillMode ? activeCategorySlug : '',
+    useOTruyenCategory && !useOTruyenStatusFillMode && !useOTruyenFilteredServerMode ? activeCategorySlug : '',
     serverPage,
   );
   const data = useCombinedList
     ? combinedListQuery.data?.listData
+    : useOTruyenFilteredServerMode
+      ? otruyenFilteredServerQuery.data
     : (useOTruyenCategory ? categoryQuery.data : listQuery.data);
   const stableListData = data;
   const otruyenStatusFillItems = useMemo(
@@ -2730,6 +2794,8 @@ const BrowseManga = () => {
         ? mangaDexLatestFeedQuery.isLoading
       : useCombinedList
         ? combinedListQuery.isLoading
+      : useOTruyenFilteredServerMode
+        ? otruyenFilteredServerQuery.isLoading
         : (useOTruyenCategory ? categoryQuery.isLoading : listQuery.isLoading)) ||
     isOTruyenStatusFillLoading ||
     (useGlobalClientSortMode && globalSortedListQuery.isLoading);
@@ -2740,6 +2806,8 @@ const BrowseManga = () => {
         ? mangaDexLatestFeedQuery.isFetching
       : useCombinedList
         ? combinedListQuery.isFetching
+      : useOTruyenFilteredServerMode
+        ? otruyenFilteredServerQuery.isFetching
         : (useOTruyenCategory ? categoryQuery.isFetching : listQuery.isFetching)) ||
     (useOTruyenStatusFillMode && otruyenStatusFillQuery.isFetching) ||
     (useGlobalClientSortMode && (globalSortedListQuery.isFetching || isGlobalSortBackgroundFetching));
@@ -2806,6 +2874,8 @@ const BrowseManga = () => {
         ? (globalSortedListQuery.isLoading && globalSortedItemsLength === 0)
       : useTrendingPopularMode
         ? (listQuery.isLoading && !stableListData?.items?.length)
+      : useOTruyenFilteredServerMode
+        ? (otruyenFilteredServerQuery.isLoading && !stableListData?.items?.length)
       : useOTruyenStatusFillMode
         ? (isOTruyenStatusFillLoading && otruyenStatusFillItems.length === 0)
         : (useOTruyenCategory ? (isLoading && !data) : (listQuery.isLoading && !stableListData?.items?.length));
@@ -4335,13 +4405,14 @@ const BrowseManga = () => {
   const globalTopRatedPagedSource = useMemo(() => {
     if (!useGlobalTopRatedMode) return [] as Manga[];
     const source =
-      useOTruyenStatusFillMode && filtered.length > 0
+      (useOTruyenStatusFillMode || useOTruyenFilteredServerMode) && filtered.length > 0
         ? dedupeMangaById([...guestTopRatedFilteredBySource, ...filtered])
         : guestTopRatedFilteredBySource;
     return [...source].sort(compareByRating);
   }, [
     useGlobalTopRatedMode,
     useOTruyenStatusFillMode,
+    useOTruyenFilteredServerMode,
     guestTopRatedFilteredBySource,
     filtered,
   ]);
@@ -4385,6 +4456,8 @@ const BrowseManga = () => {
         )
     : useCombinedList
       ? combinedListQuery.isSuccess
+    : useOTruyenFilteredServerMode
+      ? otruyenFilteredServerQuery.isSuccess
     : useOTruyenCategory
       ? categoryQuery.isSuccess
       : listQuery.isSuccess;
@@ -5389,6 +5462,32 @@ const BrowseManga = () => {
       });
       return;
     }
+    if (useOTruyenFilteredServerMode) {
+      queryClient.prefetchQuery({
+        queryKey: [
+          'manga',
+          'otruyen-filtered',
+          directOTruyenFilterGenreSlugs,
+          filters.status,
+          filters.sort,
+          nextPage,
+          showMatureContent,
+        ],
+        queryFn: async () => adaptListData(await mangaApi.getOTruyenFiltered({
+          genreSlugs: directOTruyenFilterGenreSlugs,
+          status: filters.status,
+          sort: filters.sort,
+          page: nextPage,
+          limit: BROWSE_PAGE_SIZE,
+          showMature: showMatureContent,
+          baseSlug: directOTruyenFilterGenreSlugs[0] || activeCategorySlug,
+          attachRatings: filters.sort === 'rating',
+        })),
+        staleTime: 5 * 60 * 1000,
+        gcTime: 2 * 60 * 1000,
+      });
+      return;
+    }
     if (useOTruyenCategory) {
       queryClient.prefetchQuery({
         queryKey: ['manga', 'category', activeCategorySlug, nextPage],
@@ -5408,8 +5507,13 @@ const BrowseManga = () => {
     page,
     otruyenServerPages,
     useCombinedList,
+    useOTruyenFilteredServerMode,
     useOTruyenCategory,
     activeCategorySlug,
+    directOTruyenFilterGenreSlugs,
+    filters.status,
+    filters.sort,
+    showMatureContent,
     listType,
     mangadexCatalogLimit,
     queryClient,

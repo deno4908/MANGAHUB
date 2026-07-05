@@ -1225,6 +1225,38 @@ export const mangaApi = {
       { timeoutMs: 20_000, skipAuth: true },
     );
   },
+  getOTruyenFiltered: (options: {
+    genreSlugs?: string[];
+    status?: string;
+    sort?: string;
+    page?: number;
+    limit?: number;
+    showMature?: boolean;
+    baseSlug?: string;
+    attachRatings?: boolean;
+  }) => {
+    const query = new URLSearchParams({
+      page: String(Math.max(1, Math.floor(Number(options.page) || 1))),
+      limit: String(Math.max(1, Math.floor(Number(options.limit) || 24))),
+      sort: String(options.sort || "latest"),
+      status: String(options.status || ""),
+      show_mature: options.showMature ? "1" : "0",
+      attach_ratings: options.attachRatings ? "1" : "0",
+    });
+    const genreSlugs = (options.genreSlugs || [])
+      .map((slug) => String(slug || "").trim().toLowerCase())
+      .filter((slug, index, values) => Boolean(slug) && values.indexOf(slug) === index);
+    if (genreSlugs.length) {
+      query.set("genre_slugs", genreSlugs.join(","));
+    }
+    if (options.baseSlug) {
+      query.set("base_slug", String(options.baseSlug));
+    }
+    return api<any>(`/api/manga/otruyen-filtered?${query.toString()}`, {
+      timeoutMs: 20_000,
+      skipAuth: true,
+    });
+  },
   getDetail: (slug: string) => api<any>(`/api/manga/detail/${slug}`),
   startViewSession: (
     slug: string,

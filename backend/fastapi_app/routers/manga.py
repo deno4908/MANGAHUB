@@ -582,7 +582,7 @@ def _normalize_loose_text(value: Any) -> str:
         return ""
     text = unicodedata.normalize("NFD", text)
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
-    text = text.replace("đ", "d")
+    text = text.replace("\u0111", "d").replace("\u00c4\u2018", "d")
     text = re.sub(r"[^a-z0-9\s-]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
@@ -1964,6 +1964,355 @@ async def _build_otruyen_page_batch(
     return {"pages": payloads, "errors": errors}
 
 
+OTRUYEN_FILTERED_CACHE_TTL_SECONDS = 180
+OTRUYEN_FILTERED_FETCH_CHUNK = 12
+OTRUYEN_FILTERED_MAX_SCAN_PAGES = 500
+OTRUYEN_FILTERED_EXACT_SCAN_PAGE_CAP = 12
+
+
+def _otruyen_filtered_cache_key(
+    *,
+    page: int,
+    limit: int,
+    base_slug: str,
+    genre_values: list[str],
+    status_value: str,
+    sort: str,
+    show_mature: bool,
+) -> str:
+    genre_key = ",".join(sorted(_clean_slug(value) for value in genre_values if _clean_slug(value)))
+    return (
+        "manga:otruyen-filtered:"
+        f"p{page}:l{limit}:base={_clean_slug(base_slug)}:"
+        f"g={genre_key}:s={_clean_slug(status_value)}:sort={_clean_slug(sort)}:"
+        f"mature={1 if show_mature else 0}"
+    )
+
+
+def _cache_otruyen_filtered_payload(cache_key: str, payload: dict[str, Any]) -> None:
+    raw = json.dumps(payload, ensure_ascii=False)
+    cache.set(cache_key, raw, ttl=OTRUYEN_FILTERED_CACHE_TTL_SECONDS)
+    cache.set(f"{cache_key}:stale", raw, ttl=COMBINED_LIST_STALE_TTL_SECONDS)
+
+
+def _slugify_loose(value: Any) -> str:
+    normalized = _normalize_loose_text(value)
+    if not normalized:
+        return _clean_slug(value)
+    return re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+
+
+def _normalize_otruyen_status(value: Any) -> str:
+    normalized = _normalize_loose_text(value).replace("-", " ")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    compact = normalized.replace(" ", "")
+    if not normalized:
+        return ""
+    if (
+        "completed" in normalized
+        or "complete" in normalized
+        or "hoan thanh" in normalized
+        or compact == "hoanthanh"
+    ):
+        return "completed"
+    if "cancel" in normalized or "huy" in normalized:
+        return "cancelled"
+    if (
+        "hiatus" in normalized
+        or "coming soon" in normalized
+        or "sap ra mat" in normalized
+        or compact == "sapramat"
+        or "tam" in normalized
+        or "ngung" in normalized
+        or "on hold" in normalized
+        or "paused" in normalized
+    ):
+        return "hiatus"
+    if (
+        "ongoing" in normalized
+        or "publishing" in normalized
+        or "dang ra" in normalized
+        or "dang phat hanh" in normalized
+        or compact == "dangphathanh"
+        or "tien hanh" in normalized
+        or "cap nhat" in normalized
+        or "phat hanh" in normalized
+    ):
+        return "ongoing"
+    return normalized
+
+
+def _otruyen_list_type_for_status(status_value: str) -> str:
+    normalized = _normalize_otruyen_status(status_value)
+    if normalized == "completed":
+        return "hoan-thanh"
+    if normalized == "ongoing":
+        return "dang-phat-hanh"
+    if normalized == "hiatus":
+        return "sap-ra-mat"
+    return "truyen-moi"
+
+
+def _otruyen_item_identity_key(item: dict[str, Any]) -> str:
+    for key in ("slug", "_id", "id", "name"):
+        value = str((item or {}).get(key) or "").strip().lower()
+        if value:
+            return value
+    return ""
+
+
+def _otruyen_item_genre_slugs(item: dict[str, Any]) -> set[str]:
+    names, tags = _extract_item_categories(item)
+    slugs: set[str] = set()
+    for value in tags:
+        cleaned = _clean_slug(value)
+        if cleaned:
+            slugs.add(cleaned)
+    for value in names:
+        cleaned = _slugify_loose(value)
+        if cleaned:
+            slugs.add(cleaned)
+    return slugs
+
+
+def _otruyen_item_matches_filters(
+    item: dict[str, Any],
+    *,
+    required_genres: set[str],
+    status_value: str,
+    show_mature: bool,
+    hidden: dict[str, str],
+) -> bool:
+    if not isinstance(item, dict):
+        return False
+
+    if _hidden_reason_for_slug(hidden, item.get("slug") or item.get("_id") or item.get("id")):
+        return False
+
+    names, tags = _extract_item_categories(item)
+    if not show_mature and _is_mature_metadata(
+        item.get("content_rating") or item.get("contentRating"),
+        names,
+        tags,
+    ):
+        return False
+
+    normalized_status = _normalize_otruyen_status(item.get("status"))
+    required_status = _normalize_otruyen_status(status_value)
+    if required_status and normalized_status != required_status:
+        return False
+
+    if required_genres:
+        item_genres = _otruyen_item_genre_slugs(item)
+        if not required_genres.issubset(item_genres):
+            return False
+
+    return True
+
+
+def _otruyen_payload_items(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    items = (payload.get("data") or {}).get("items") or []
+    return items if isinstance(items, list) else []
+
+
+def _otruyen_payload_total_pages(payload: Any) -> int:
+    if not isinstance(payload, dict):
+        return 1
+    pagination = (((payload.get("data") or {}).get("params") or {}).get("pagination") or {})
+    total_items = _safe_int(pagination.get("totalItems"))
+    per_page = _safe_int(pagination.get("totalItemsPerPage")) or 24
+    if total_items > 0 and per_page > 0:
+        return max(1, math.ceil(total_items / per_page))
+    return 1
+
+
+def _otruyen_apply_local_views(item: dict[str, Any], views_lookup: dict[str, int]) -> None:
+    if not views_lookup or not isinstance(item, dict):
+        return
+    candidates = _hidden_slug_candidates(item.get("slug") or item.get("_id") or item.get("id"))
+    local_views = max((_safe_int(views_lookup.get(candidate)) for candidate in candidates), default=0)
+    current_views = _safe_int(item.get("local_view_count") or item.get("view_count") or item.get("views"))
+    item["local_view_count"] = local_views
+    item["view_count"] = max(current_views, local_views)
+    item["views"] = item["view_count"]
+
+
+def _sort_otruyen_filtered_items(
+    items: list[dict[str, Any]],
+    *,
+    sort: str,
+) -> list[dict[str, Any]]:
+    normalized_sort = _clean_slug(sort) or "latest"
+    decorated = list(enumerate(items))
+    if normalized_sort == "popular":
+        decorated.sort(
+            key=lambda entry: (
+                -_safe_int((entry[1] or {}).get("local_view_count")),
+                -_safe_int((entry[1] or {}).get("views") or (entry[1] or {}).get("view_count")),
+                -_parse_sort_timestamp(
+                    _pick_item_latest_chapter_updated_at(entry[1] or {}) or _pick_item_last_updated(entry[1] or {})
+                ),
+                entry[0],
+            )
+        )
+    elif normalized_sort == "rating":
+        decorated.sort(
+            key=lambda entry: (
+                -_safe_float((entry[1] or {}).get("rating_average") or (entry[1] or {}).get("average_rating")),
+                -_safe_int((entry[1] or {}).get("rating_count") or (entry[1] or {}).get("ratings_count")),
+                -_parse_sort_timestamp(
+                    _pick_item_latest_chapter_updated_at(entry[1] or {}) or _pick_item_last_updated(entry[1] or {})
+                ),
+                entry[0],
+            )
+        )
+    elif normalized_sort == "alphabetical":
+        decorated.sort(
+            key=lambda entry: (
+                _normalize_loose_text((entry[1] or {}).get("name") or (entry[1] or {}).get("title")),
+                entry[0],
+            )
+        )
+    else:
+        decorated.sort(
+            key=lambda entry: (
+                -_parse_sort_timestamp(
+                    _pick_item_latest_chapter_updated_at(entry[1] or {}) or _pick_item_last_updated(entry[1] or {})
+                ),
+                entry[0],
+            )
+        )
+    return [item for _, item in decorated]
+
+
+async def _build_otruyen_filtered_payload(
+    *,
+    genre_values: list[str],
+    status_value: str,
+    sort: str,
+    page: int,
+    limit: int,
+    show_mature: bool,
+    base_slug: str,
+    hidden: dict[str, str],
+    db: Any,
+    user: Any,
+    attach_ratings: bool,
+) -> dict[str, Any]:
+    safe_page = max(1, page)
+    safe_limit = max(1, min(limit, 96))
+    target_count = safe_page * safe_limit
+    required_genres = {
+        _clean_slug(value)
+        for value in genre_values
+        if _clean_slug(value)
+    }
+    selected_base_slug = _clean_slug(base_slug) or (next(iter(required_genres), ""))
+    use_category_source = bool(selected_base_slug)
+    list_type = _otruyen_list_type_for_status(status_value)
+
+    async def fetch_page(target_page: int) -> dict[str, Any]:
+        if use_category_source:
+            return await otruyen_service.get_category_manga(selected_base_slug, target_page)
+        return await otruyen_service.get_list(list_type, target_page)
+
+    first_payload = await fetch_page(1)
+    total_source_pages = min(_otruyen_payload_total_pages(first_payload), OTRUYEN_FILTERED_MAX_SCAN_PAGES)
+    exact_scan = total_source_pages <= OTRUYEN_FILTERED_EXACT_SCAN_PAGE_CAP
+    desired_buffer_count = target_count + safe_limit
+
+    collected: list[dict[str, Any]] = []
+    seen_items: set[str] = set()
+    scanned_pages: set[int] = set()
+    views_lookup = await asyncio.to_thread(_fetch_local_views_lookup, db)
+
+    def append_payload(payload: Any) -> None:
+        for raw_item in _otruyen_payload_items(payload):
+            if not isinstance(raw_item, dict):
+                continue
+            key = _otruyen_item_identity_key(raw_item)
+            if key and key in seen_items:
+                continue
+            if not _otruyen_item_matches_filters(
+                raw_item,
+                required_genres=required_genres,
+                status_value=status_value,
+                show_mature=show_mature,
+                hidden=hidden,
+            ):
+                continue
+            item = dict(raw_item)
+            _otruyen_apply_local_views(item, views_lookup)
+            if key:
+                seen_items.add(key)
+            collected.append(item)
+
+    append_payload(first_payload)
+    scanned_pages.add(1)
+
+    semaphore = asyncio.Semaphore(OTRUYEN_FILTERED_FETCH_CHUNK)
+
+    async def load_one(target_page: int) -> tuple[int, dict[str, Any] | None]:
+        async with semaphore:
+            try:
+                return target_page, await fetch_page(target_page)
+            except Exception:
+                return target_page, None
+
+    for start_page in range(2, total_source_pages + 1, OTRUYEN_FILTERED_FETCH_CHUNK):
+        if not exact_scan and len(collected) >= desired_buffer_count:
+            break
+        end_page = min(total_source_pages, start_page + OTRUYEN_FILTERED_FETCH_CHUNK - 1)
+        page_numbers = [target_page for target_page in range(start_page, end_page + 1) if target_page not in scanned_pages]
+        if not page_numbers:
+            continue
+        rows = await asyncio.gather(*(load_one(target_page) for target_page in page_numbers))
+        for target_page, payload in sorted(rows, key=lambda row: row[0]):
+            scanned_pages.add(target_page)
+            if payload is not None:
+                append_payload(payload)
+
+    sorted_items = _sort_otruyen_filtered_items(collected, sort=sort)
+    offset = (safe_page - 1) * safe_limit
+    page_items = sorted_items[offset: offset + safe_limit]
+
+    scanned_all = len(scanned_pages) >= total_source_pages
+    if scanned_all:
+        total_items = len(sorted_items)
+    else:
+        scanned_ratio = max(1, len(scanned_pages)) / max(1, total_source_pages)
+        estimated_total = math.ceil(len(sorted_items) / scanned_ratio)
+        total_items = max(len(sorted_items), target_count + 1, estimated_total)
+
+    payload = {
+        "status": "success",
+        "data": {
+            "items": page_items,
+            "params": {
+                "pagination": {
+                    "currentPage": safe_page,
+                    "totalItemsPerPage": safe_limit,
+                    "totalItems": total_items,
+                },
+                "filters": {
+                    "genre_slugs": sorted(required_genres),
+                    "status": _normalize_otruyen_status(status_value),
+                    "sort": _clean_slug(sort) or "latest",
+                    "source_pages_scanned": len(scanned_pages),
+                    "source_pages_total": total_source_pages,
+                    "source_scan_complete": scanned_all,
+                },
+            },
+        },
+    }
+    await _attach_overrides_to_otruyen_payload(payload, db)
+    if attach_ratings or _clean_slug(sort) == "rating":
+        await _async_attach_ratings_to_items(payload, db, user)
+    return payload
+
+
 @router.get("/list/{list_type}/batch")
 async def manga_list_batch(
     list_type: str = "truyen-moi",
@@ -2083,6 +2432,68 @@ async def category_manga_batch(
         user=user,
         attach_ratings=attach_ratings,
     )
+
+
+@router.get("/otruyen-filtered")
+async def otruyen_filtered_manga(
+    genre_slugs: str = Query(""),
+    status: str = Query(""),
+    sort: str = Query("latest"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(24, ge=1, le=96),
+    show_mature: bool = Query(False),
+    base_slug: str = Query(""),
+    attach_ratings: bool = Query(False),
+    user=Depends(get_optional_user),
+    db=Depends(get_supabase_public),
+):
+    genre_values = [
+        _clean_slug(part)
+        for part in str(genre_slugs or "").split(",")
+        if _clean_slug(part)
+    ]
+    normalized_status = _normalize_otruyen_status(status)
+    normalized_sort = _clean_slug(sort) or "latest"
+    normalized_base_slug = _clean_slug(base_slug) or (genre_values[0] if genre_values else "")
+
+    if not genre_values and not normalized_status:
+        raise HTTPException(status_code=400, detail="genre_slugs or status is required")
+
+    cache_key = _otruyen_filtered_cache_key(
+        page=page,
+        limit=limit,
+        base_slug=normalized_base_slug,
+        genre_values=genre_values,
+        status_value=normalized_status,
+        sort=normalized_sort,
+        show_mature=show_mature,
+    )
+    cached_payload = _load_json_cache(cache_key)
+    if cached_payload is not None:
+        return cached_payload
+
+    stale_payload = _load_json_cache(f"{cache_key}:stale")
+    hidden = await _get_hidden_slugs(db)
+    try:
+        payload = await _build_otruyen_filtered_payload(
+            genre_values=genre_values,
+            status_value=normalized_status,
+            sort=normalized_sort,
+            page=page,
+            limit=limit,
+            show_mature=show_mature,
+            base_slug=normalized_base_slug,
+            hidden=hidden,
+            db=db,
+            user=user,
+            attach_ratings=attach_ratings,
+        )
+        _cache_otruyen_filtered_payload(cache_key, payload)
+        return payload
+    except Exception as exc:
+        if stale_payload is not None:
+            return stale_payload
+        raise HTTPException(status_code=502, detail=f"OTruyen filtered catalog unavailable: {exc}") from exc
 
 
 def _safe_query(fn):
