@@ -3057,6 +3057,50 @@ async def _build_mangadex_popular_with_local_views(
     }
 
 
+async def _build_mangadex_popular_filtered_search(
+    *,
+    keyword: str,
+    page: int,
+    limit: int,
+    translated_language: str,
+    genre_values: list[str],
+    original_language_values: list[str],
+    status_values: list[str],
+    content_ratings: list[str],
+    db: Any,
+) -> dict[str, Any]:
+    """Use one official MangaDex /manga query, then prefer local-viewed rows.
+
+    Resolving every locally viewed MangaDex title against filters can fan out
+    into hundreds of /manga/{id} calls. For tag/status searches, keep upstream
+    traffic to the exact public /manga query shape and only reorder the returned
+    page after local views are attached.
+    """
+    data = await mangadex_service.search_manga(
+        keyword=keyword,
+        page=page,
+        limit=limit,
+        translated_language=translated_language,
+        attach_latest=True,
+        included_tag_slugs=genre_values,
+        included_tags_mode="AND",
+        original_languages=original_language_values,
+        statuses=status_values,
+        sort="latest",
+        content_ratings=content_ratings,
+    )
+    items = ((data.get("data") or {}).get("items") or [])
+    if not isinstance(items, list) or not items:
+        return data
+
+    payload = {"mangas": items}
+    await _async_attach_local_views_to_mangadex_payload(payload, db)
+    data.setdefault("data", {})["items"] = _sort_mangadex_items_by_local_views_first(
+        payload.get("mangas") or []
+    )
+    return data
+
+
 async def _build_mangadex_rating_search(
     *,
     keyword: str,
@@ -4852,7 +4896,25 @@ async def mangadex_search(
 
     normalized_sort = str(sort or "").strip().lower()
     uses_popular_builder = normalized_sort == "popular"
-    if uses_popular_builder:
+    has_precise_mangadex_filters = bool(
+        str(keyword or "").strip()
+        or genre_values
+        or original_language_values
+        or status_values
+    )
+    if uses_popular_builder and has_precise_mangadex_filters:
+        data = await _build_mangadex_popular_filtered_search(
+            keyword=keyword,
+            page=page,
+            limit=limit,
+            translated_language=effective_translated_language,
+            genre_values=genre_values,
+            original_language_values=original_language_values,
+            status_values=status_values,
+            content_ratings=content_ratings,
+            db=db,
+        )
+    elif uses_popular_builder:
         data = await _build_mangadex_popular_with_local_views(
             keyword=keyword,
             page=page,

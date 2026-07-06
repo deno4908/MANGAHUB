@@ -30,7 +30,7 @@ _MANGADEX_UUID_RE = re.compile(
 BASE_URL = "https://api.mangadex.org"
 REQUEST_HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "manga-bliss-backend/1.0",
+    "User-Agent": "MangaHub/1.0 (+https://mangahub.art)",
 }
 
 TRANSPORT_HTTPX = "httpx"
@@ -58,7 +58,7 @@ def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
         return default
 
 
-MANGADEX_TRANSPORT = str(os.getenv("MANGADEX_TRANSPORT", TRANSPORT_CURL_CFFI) or TRANSPORT_CURL_CFFI).strip().lower()
+MANGADEX_TRANSPORT = str(os.getenv("MANGADEX_TRANSPORT", TRANSPORT_HTTPX) or TRANSPORT_HTTPX).strip().lower()
 REQUEST_RETRIES = _env_int("MANGADEX_RETRIES", 3, minimum=1)
 REQUEST_TIMEOUT_SECONDS = _env_float("MANGADEX_TIMEOUT_SECONDS", 25.0, minimum=5.0)
 REQUEST_CONNECT_TIMEOUT_SECONDS = _env_float("MANGADEX_CONNECT_TIMEOUT_SECONDS", 10.0, minimum=1.0)

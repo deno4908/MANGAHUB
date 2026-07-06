@@ -105,7 +105,7 @@ const FilterPanel = () => {
     setFilter('genres', genres);
   };
 
-  const statuses = ['ongoing', 'completed', 'hiatus'] as const;
+  const statuses = ['ongoing', 'completed', 'hiatus', 'cancelled'] as const;
   const years = Array.from({ length: 10 }, (_, i) => new Date().getFullYear() - i);
   const sorts = [
     { value: 'popular' as const, label: 'Phổ biến', icon: TrendingUp },
@@ -207,7 +207,7 @@ const FilterPanel = () => {
                   : 'bg-secondary text-muted-foreground hover:text-foreground border border-border/50'
               }`}
             >
-              {statusVi[s]}
+              {statusVi[s] || (s === 'cancelled' ? 'Đã huỷ' : s)}
             </button>
           ))}
         </div>

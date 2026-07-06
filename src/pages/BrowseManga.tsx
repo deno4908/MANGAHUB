@@ -213,7 +213,7 @@ const parseBrowsePageParam = (value: string | null): number => {
 };
 
 const BROWSE_SORT_OPTIONS = ['popular', 'latest', 'rating', 'alphabetical'] as const;
-const BROWSE_STATUS_OPTIONS = ['ongoing', 'completed', 'hiatus'] as const;
+const BROWSE_STATUS_OPTIONS = ['ongoing', 'completed', 'hiatus', 'cancelled'] as const;
 
 type BrowseStatusOption = typeof BROWSE_STATUS_OPTIONS[number];
 
@@ -878,6 +878,7 @@ const getTrendingContentRating = (row: TrendingMangaItem): string =>
 const mapTrendingStatus = (value?: string): Manga['status'] => {
   const normalized = normalizeLooseText(repairMojibakeText(value || ''));
   if (!normalized) return 'ongoing';
+  if (normalized.includes('cancelled') || normalized.includes('canceled') || normalized.includes('huy')) return 'cancelled';
   if (normalized.includes('hoan thanh') || normalized.includes('completed')) return 'completed';
   if (normalized.includes('sap') || normalized.includes('tam') || normalized.includes('hiatus')) return 'hiatus';
   return 'ongoing';
@@ -2101,7 +2102,7 @@ const BrowseManga = () => {
     refetchOnMount: false,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
-    retry: 1,
+    retry: false,
     retryDelay: 1200,
   });
 
@@ -5392,6 +5393,7 @@ const BrowseManga = () => {
   // Prefetch adjacent MangaDex search pages so pagination feels instant.
   useEffect(() => {
     if (!useMangaDexServerSearchMode) return;
+    if (mangaDexHasServerQueryableFilters) return;
     const total = Math.max(1, mangaDexServerTotalPages);
     const targetPages = Array.from(new Set([page + 1, page - 1]))
       .filter((targetPage) => targetPage >= 1 && targetPage <= total);
@@ -5408,6 +5410,7 @@ const BrowseManga = () => {
     });
   }, [
     useMangaDexServerSearchMode,
+    mangaDexHasServerQueryableFilters,
     page,
     mangaDexServerTotalPages,
     queryClient,
