@@ -2584,6 +2584,41 @@ def _extract_gemini_cookie_values(raw: str | None) -> tuple[str, str]:
     return secure_1psid, secure_1psidts
 
 
+async def _download_curl_image_limited(
+    session,
+    url: str,
+    headers: dict | None = None,
+    timeout: float = 30,
+    max_bytes: int = 50 * 1024 * 1024,
+) -> tuple[bytes, str] | None:
+    """Download image from URL using curl_cffi session with size/type validation."""
+    try:
+        resp = await session.get(
+            url,
+            headers=headers or {},
+            timeout=timeout,
+            allow_redirects=True,
+        )
+        if resp.status_code >= 400:
+            return None
+
+        data = resp.content
+        if not data or len(data) < 100:
+            return None
+        if len(data) > max_bytes:
+            return None
+
+        content_type = _normalize_image_content_type(
+            resp.headers.get("content-type")
+        )
+        if not content_type:
+            content_type = _detect_image_content_type(data) or "image/png"
+
+        return data, content_type
+    except Exception:
+        return None
+
+
 async def _gemini_edit_manga_page(
     image_bytes: bytes,
     target_language: str,
@@ -2595,6 +2630,7 @@ async def _gemini_edit_manga_page(
 
     import hashlib
     import random
+    import uuid
     import urllib.parse
     import asyncio
     from curl_cffi.requests import AsyncSession
@@ -2640,10 +2676,12 @@ async def _gemini_edit_manga_page(
         "Origin": "https://gemini.google.com",
         "Referer": "https://gemini.google.com/",
         "X-Same-Domain": "1",
+        "x-goog-ext-73010989-jspb": "[0]",
+        "x-goog-ext-73010990-jspb": "[0,0,0]",
     }
 
-    async def _fetch_snlm0e_and_bl(session: AsyncSession) -> tuple[str, str]:
-        """Fetch SNlM0e token & bl (build label) from Gemini homepage."""
+    async def _fetch_snlm0e_and_bl(session: AsyncSession) -> tuple[str, str, str, str, str | None, str]:
+        """Fetch SNlM0e token, bl (build label), f.sid, source-path, and stream RPC ID from Gemini homepage."""
         resp = await session.get(
             "https://gemini.google.com/app",
             headers=gemini_headers,
@@ -2665,7 +2703,31 @@ async def _gemini_edit_manga_page(
         bl_match = re.search(r'"cfb2h":\s*"(.*?)"', body)
         bl_value = bl_match.group(1) if bl_match else "boq_assistant-bard-web-server_20260408.07_p0"
 
-        return at_token, bl_value
+        # Extract f.sid (FdrFJe session ID) for batchexecute
+        sid_match = re.search(r'"FdrFJe":\s*"(\d+)"', body)
+        f_sid = sid_match.group(1) if sid_match else ""
+
+        # Extract source-path from page content (conversation URL path)
+        source_path_match = re.search(r'"(/app/[a-f0-9]+)"', body)
+        source_path = source_path_match.group(1) if source_path_match else "/app"
+
+        # Try to find the RPC ID for StreamGenerate from page JS bundle
+        stream_rpc_match = re.search(
+            r'\["([A-Za-z0-9_]+)"[^\]]*"StreamGenerate"',
+            body,
+        )
+        stream_rpc_id = stream_rpc_match.group(1) if stream_rpc_match else None
+
+        # Extract page session ID (appears in WIZ data, used in x-goog-ext headers)
+        page_sid_match = re.search(r'"([a-f0-9]{16})"', body[body.find('"FdrFJe"'):body.find('"FdrFJe"') + 2000] if '"FdrFJe"' in body else '')
+        if not page_sid_match:
+            # Generate a random 16-char hex as fallback
+            import secrets
+            page_session_id = secrets.token_hex(8)
+        else:
+            page_session_id = page_sid_match.group(1)
+
+        return at_token, bl_value, f_sid, source_path, stream_rpc_id, page_session_id
 
     async def _upload_image(session: AsyncSession) -> tuple[str, str]:
         """Upload image via resumable protocol to push.clients6.google.com."""
@@ -2732,12 +2794,19 @@ async def _gemini_edit_manga_page(
         bl_value: str,
         image_ref: str,
         filename: str,
+        f_sid: str = "",
+        source_path: str = "/app",
+        stream_rpc_id: str | None = None,
+        page_session_id: str = "",
     ) -> bytes:
-        """Call StreamGenerate and parse the streaming response for generated images."""
+        """Call Gemini API (StreamGenerate or batchexecute) and parse the streaming response for generated images."""
         reqid = random.randint(100000, 9999999)
 
+        # Generate a unique request UUID
+        request_uuid = str(uuid.uuid4()).upper()
+
         inner_payload = json.dumps([
-            [
+            [                                  # [0] message
                 prompt,
                 0,
                 None,
@@ -2751,111 +2820,160 @@ async def _gemini_edit_manga_page(
                 None,
                 0,
             ],
-            ["vi"],
-            ["", "", "", None, None, None, None, None, None, ""],
-            None,
-            None,
-            None,
-            [1],
-            1,
-            None,
-            None,
-            1,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            [[0]],
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            1,
-            None,
-            None,
-            [4],
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            [1],
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            14,
-            None,
-            None,
-            None,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            [],
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            2,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            1,
+            ["vi"],                             # [1] language
+            ["", "", "", None, None, None, None, None, None, ""],  # [2] session info
+            None,                              # [3] conversation token (null for new)
+            None,                              # [4] response ID hash (null for new)
+            None,                              # [5]
+            [1],                               # [6] configuration
+            1,                                 # [7]
+            None,                              # [8]
+            None,                              # [9]
+            1,                                 # [10]
+            0,                                 # [11]
+            None,                              # [12]
+            None,                              # [13]
+            None,                              # [14]
+            None,                              # [15]
+            None,                              # [16]
+            [[0]],                             # [17]
+            0,                                 # [18]
+            None,                              # [19]
+            None,                              # [20]
+            None,                              # [21]
+            None,                              # [22]
+            None,                              # [23]
+            None,                              # [24]
+            None,                              # [25]
+            None,                              # [26]
+            1,                                 # [27]
+            None,                              # [28]
+            None,                              # [29]
+            [4],                               # [30]
+            None,                              # [31]
+            None,                              # [32]
+            None,                              # [33]
+            None,                              # [34]
+            None,                              # [35]
+            None,                              # [36]
+            None,                              # [37]
+            None,                              # [38]
+            None,                              # [39]
+            None,                              # [40]
+            [1],                               # [41]
+            None,                              # [42]
+            None,                              # [43]
+            None,                              # [44]
+            None,                              # [45]
+            None,                              # [46]
+            None,                              # [47]
+            None,                              # [48]
+            14,                                # [49]
+            None,                              # [50]
+            None,                              # [51]
+            None,                              # [52]
+            0,                                 # [53]
+            None,                              # [54]
+            None,                              # [55]
+            None,                              # [56]
+            None,                              # [57]
+            None,                              # [58]
+            request_uuid,                      # [59] unique request UUID
+            None,                              # [60]
+            [],                                # [61]
+            None,                              # [62]
+            None,                              # [63]
+            None,                              # [64]
+            None,                              # [65]
+            None,                              # [66]
+            0,                                 # [67]
+            2,                                 # [68]
+            None,                              # [69]
+            None,                              # [70]
+            None,                              # [71]
+            None,                              # [72]
+            None,                              # [73]
+            None,                              # [74]
+            None,                              # [75]
+            None,                              # [76]
+            None,                              # [77]
+            None,                              # [78]
+            1,                                 # [79]
+            1,                                 # [80]
+            None,                              # [81]
+            None,                              # [82]
+            None,                              # [83]
+            None,                              # [84]
+            None,                              # [85]
+            None,                              # [86]
+            None,                              # [87]
+            None,                              # [88]
+            None,                              # [89]
+            None,                              # [90]
+            0,                                 # [91]
         ])
 
-        encoded_payload = urllib.parse.quote(json.dumps([None, inner_payload]))
-        post_data = f"f.req={encoded_payload}&at={urllib.parse.quote(at_token)}&"
+        request_headers = {
+            **gemini_headers,
+            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+            "X-Same-Domain": "1",
+            "x-goog-ext-525001261-jspb": json.dumps(
+                [1, None, None, None, page_session_id, None, None, 0,
+                 [4, 5, 6, 8], None, None, 2, None, None, 1, 1, request_uuid]
+            ),
+            "x-goog-ext-525005358-jspb": json.dumps([request_uuid, 1]),
+        }
 
-        url = (
+        # Build common URL query params
+        sid_param = f"&f.sid={urllib.parse.quote(f_sid)}" if f_sid else ""
+
+        resp = None
+
+        # Strategy 1: Try StreamGenerate direct endpoint first
+        stream_url = (
             f"https://gemini.google.com/_/BardChatUi/data/"
             f"assistant.lamda.BardFrontendService/StreamGenerate"
             f"?bl={urllib.parse.quote(bl_value)}"
+            f"{sid_param}"
             f"&hl=vi&_reqid={reqid}&rt=c"
         )
+        stream_data = f"f.req={urllib.parse.quote(json.dumps([None, inner_payload]))}&at={urllib.parse.quote(at_token)}&"
 
-        resp = await session.post(
-            url,
-            headers={
-                **gemini_headers,
-                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-                "X-Same-Domain": "1",
-            },
-            data=post_data,
-            timeout=gemini_request_timeout,
-        )
+        try:
+            resp = await session.post(
+                stream_url,
+                headers=request_headers,
+                data=stream_data,
+                timeout=gemini_request_timeout,
+            )
+            if resp.status_code in (404, 405, 501):
+                resp = None  # Endpoint not available, try batchexecute
+        except Exception:
+            resp = None
+
+        # Strategy 2: Fallback to batchexecute RPC wrapper
+        if resp is None or resp.status_code >= 400:
+            rpc_id = stream_rpc_id or "StreamGenerate"
+            batch_payload = json.dumps([[[rpc_id, inner_payload, None, "generic"]]])
+            batch_data = f"f.req={urllib.parse.quote(batch_payload)}&at={urllib.parse.quote(at_token)}&"
+            batch_url = (
+                f"https://gemini.google.com/_/BardChatUi/data/batchexecute"
+                f"?rpcids={urllib.parse.quote(rpc_id)}"
+                f"&source-path={urllib.parse.quote(source_path)}"
+                f"&bl={urllib.parse.quote(bl_value)}"
+                f"{sid_param}"
+                f"&hl=vi&_reqid={reqid}&rt=c"
+            )
+            resp = await session.post(
+                batch_url,
+                headers=request_headers,
+                data=batch_data,
+                timeout=gemini_request_timeout,
+            )
 
         if resp.status_code >= 400:
             raise EditorProcessingError(
-                f"Gemini StreamGenerate thất bại ({resp.status_code}): {resp.text[:300]}"
+                f"Gemini API thất bại ({resp.status_code}): {resp.text[:300]}"
             )
 
         response_text = resp.text
@@ -2927,14 +3045,127 @@ async def _gemini_edit_manga_page(
         if not unique_entries:
             
             snippet = response_text[:500].replace("\n", " ")
-            logger.warning(f"No image URLs found. Response snippet: {snippet}")
+            logger.warning(f"No image URLs in initial response. Response snippet: {snippet}")
             if "SNlM0e" in response_text or "login" in response_text.lower():
                 raise EditorProcessingError(
                     "Gemini yêu cầu đăng nhập lại. Cookie có thể đã hết hạn."
                 )
-            raise EditorProcessingError(
-                "Gemini không trả ảnh kết quả. Hãy kiểm tra cookie còn hạn hoặc thử lại."
-            )
+
+            # ----- Polling: StreamGenerate returned only status, poll for image -----
+            # Extract conv_id and resp_id from the initial response
+            poll_conv = re.search(r'"(c_[a-f0-9]{12,})"', response_text)
+            poll_resp = re.search(r'"(r_[a-f0-9]{12,})"', response_text)
+
+            if not poll_conv or not poll_resp:
+                raise EditorProcessingError(
+                    "Gemini không trả ảnh kết quả và không có conversation ID để poll. Hãy kiểm tra cookie."
+                )
+
+            poll_conv_id = poll_conv.group(1)
+            poll_resp_id = poll_resp.group(1)
+            poll_source_path = f"/app/{poll_conv_id[2:]}"  # strip "c_" prefix
+
+            logger.info(f"Image generation async: conv={poll_conv_id}, resp={poll_resp_id}. Starting poll...")
+
+            import time as _time
+            poll_start = _time.monotonic()
+            poll_max_seconds = min(gemini_request_timeout - 30, 150)  # leave 30s margin
+            poll_interval = 3  # seconds between polls
+            poll_reqid = reqid + 200000
+
+            while _time.monotonic() - poll_start < poll_max_seconds:
+                await asyncio.sleep(poll_interval)
+                poll_reqid += 100000
+
+                # Poll with PCck7e (check if response is ready)
+                pcck7e_inner = json.dumps([poll_resp_id])
+                pcck7e_batch = json.dumps([[["PCck7e", pcck7e_inner, None, "generic"]]])
+                pcck7e_data = f"f.req={urllib.parse.quote(pcck7e_batch)}&at={urllib.parse.quote(at_token)}&"
+                pcck7e_url = (
+                    f"https://gemini.google.com/_/BardChatUi/data/batchexecute"
+                    f"?rpcids=PCck7e"
+                    f"&source-path={urllib.parse.quote(poll_source_path)}"
+                    f"&bl={urllib.parse.quote(bl_value)}"
+                    f"{sid_param}"
+                    f"&hl=vi&_reqid={poll_reqid}&rt=c"
+                )
+                try:
+                    pcck_resp = await session.post(
+                        pcck7e_url,
+                        headers=request_headers,
+                        data=pcck7e_data,
+                        timeout=30,
+                    )
+                    pcck_text = pcck_resp.text
+                    # Check if image URLs or generation content appeared
+                    if "lh3.googleusercontent.com" in pcck_text or "image_generation_content" in pcck_text:
+                        response_text = pcck_text
+                        logger.info("Got image data from PCck7e poll")
+                        break
+                except Exception as poll_err:
+                    logger.debug(f"PCck7e poll error: {poll_err}")
+
+                # Also try VxUbXb (conversation update subscription)
+                poll_reqid += 100000
+                vxubxb_inner = json.dumps([])
+                vxubxb_batch = json.dumps([[["VxUbXb", vxubxb_inner, None, "generic"]]])
+                vxubxb_data = f"f.req={urllib.parse.quote(vxubxb_batch)}&at={urllib.parse.quote(at_token)}&"
+                vxubxb_url = (
+                    f"https://gemini.google.com/_/BardChatUi/data/batchexecute"
+                    f"?rpcids=VxUbXb"
+                    f"&source-path={urllib.parse.quote(poll_source_path)}"
+                    f"&bl={urllib.parse.quote(bl_value)}"
+                    f"{sid_param}"
+                    f"&hl=vi&_reqid={poll_reqid}&rt=c"
+                )
+                try:
+                    vx_resp = await session.post(
+                        vxubxb_url,
+                        headers=request_headers,
+                        data=vxubxb_data,
+                        timeout=30,
+                    )
+                    vx_text = vx_resp.text
+                    if "lh3.googleusercontent.com" in vx_text or "image_generation_content" in vx_text:
+                        response_text = vx_text
+                        logger.info("Got image data from VxUbXb poll")
+                        break
+                except Exception as poll_err:
+                    logger.debug(f"VxUbXb poll error: {poll_err}")
+
+                elapsed = int(_time.monotonic() - poll_start)
+                logger.info(f"Polling for image... {elapsed}s elapsed")
+
+            # Re-parse after polling
+            for m in entry_pattern.finditer(response_text):
+                fname, url, mime = m.group(1), m.group(2), m.group(3)
+                unique_entries.append((url, mime, fname))
+
+            if not unique_entries:
+                all_lh3_urls = re.findall(
+                    r'https://lh3\.googleusercontent\.com/[A-Za-z0-9_\-/+=.?&%]+',
+                    response_text,
+                )
+                for url in all_lh3_urls:
+                    url = url.rstrip('\\').rstrip('"').rstrip("'")
+                    if len(url) > 60:
+                        unique_entries.append((url, "image/png", "polled"))
+
+            # Also check for escaped URLs in batchexecute double-serialized responses
+            if not unique_entries:
+                escaped_urls = re.findall(
+                    r'https://lh3\\.googleusercontent\\.com/[A-Za-z0-9_\-/+=.?&%]+',
+                    response_text,
+                )
+                for url in escaped_urls:
+                    clean = url.replace('\\', '')
+                    if len(clean) > 60:
+                        unique_entries.append((clean, "image/png", "polled_escaped"))
+
+            if not unique_entries:
+                raise EditorProcessingError(
+                    "Gemini không trả ảnh kết quả. Hãy kiểm tra cookie còn hạn hoặc thử lại."
+                )
 
        
         full_quality_url: str | None = None
@@ -3009,8 +3240,8 @@ async def _gemini_edit_manga_page(
         # Helper: ensure URL requests max resolution
         def _full_res_url(url: str) -> str:
             """Append =s0 to Google image URL for original/full resolution."""
-            # Don't append if URL already has size params or query strings
-            if "?" in url or url.endswith("=s0"):
+            # Don't append for /gg-dl/ signed URLs or URLs with existing params
+            if "?" in url or url.endswith("=s0") or "/gg-dl/" in url:
                 return url
             return url + "=s0"
 
@@ -3024,13 +3255,18 @@ async def _gemini_edit_manga_page(
             download_urls.append((img_url, mime, fname + "_raw"))
 
         # Download images – try full quality first, then PNG
+        # Use simple headers for image CDN (Origin/Referer from Gemini may be rejected)
+        img_download_headers = {
+            "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+        }
         downloaded: list[tuple[bytes, str]] = []
-        for img_url, mime, _fname in download_urls[:4]:  # Max 4 URLs to avoid wasting time
+        for img_url, mime, _fname in download_urls[:6]:  # Try up to 6 URLs
             try:
+                logger.info(f"Downloading image: {img_url[:100]}... tag={_fname}")
                 downloaded_image = await _download_curl_image_limited(
                     session,
                     img_url,
-                    headers=gemini_headers,
+                    headers=img_download_headers,
                     timeout=30,
                 )
                 if downloaded_image:
@@ -3040,7 +3276,10 @@ async def _gemini_edit_manga_page(
                     # If this is from c8o8Fe (first entry) or PNG, use it immediately
                     if _fname == "full_quality" or "png" in (detected_mime or mime):
                         return downloaded[-1][0]
-            except Exception:
+                else:
+                    logger.warning(f"Download returned None for tag={_fname}")
+            except Exception as dl_err:
+                logger.warning(f"Download failed for tag={_fname}: {dl_err}")
                 continue
 
         if downloaded:
@@ -3084,7 +3323,7 @@ async def _gemini_edit_manga_page(
                 session.cookies.set(ck_name, ck_val, domain=".google.com")
 
             # Step 1: Get auth token
-            at_token, bl_value = await _fetch_snlm0e_and_bl(session)
+            at_token, bl_value, f_sid, source_path, stream_rpc_id, page_session_id = await _fetch_snlm0e_and_bl(session)
 
             # Step 2: Upload image
             image_ref, filename = await _upload_image(session)
@@ -3095,6 +3334,9 @@ async def _gemini_edit_manga_page(
                 try:
                     edited_bytes = await _stream_generate(
                         session, at_token, bl_value, image_ref, filename,
+                        f_sid=f_sid, source_path=source_path,
+                        stream_rpc_id=stream_rpc_id,
+                        page_session_id=page_session_id,
                     )
                     break
                 except Exception as error:

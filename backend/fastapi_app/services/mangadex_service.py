@@ -68,8 +68,8 @@ def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
 MANGADEX_TRANSPORT = str(
     os.getenv("MANGADEX_TRANSPORT", TRANSPORT_CURL_CFFI) or TRANSPORT_CURL_CFFI
 ).strip().lower()
-REQUEST_RETRIES = _env_int("MANGADEX_RETRIES", 3, minimum=1)
-REQUEST_TIMEOUT_SECONDS = _env_float("MANGADEX_TIMEOUT_SECONDS", 25.0, minimum=5.0)
+REQUEST_RETRIES = _env_int("MANGADEX_RETRIES", 1, minimum=1)
+REQUEST_TIMEOUT_SECONDS = _env_float("MANGADEX_TIMEOUT_SECONDS", 12.0, minimum=5.0)
 REQUEST_CONNECT_TIMEOUT_SECONDS = _env_float("MANGADEX_CONNECT_TIMEOUT_SECONDS", 10.0, minimum=1.0)
 REQUEST_CONNECT_TIMEOUT_SECONDS = min(REQUEST_CONNECT_TIMEOUT_SECONDS, REQUEST_TIMEOUT_SECONDS)
 REQUEST_RETRY_BACKOFF_SECONDS = _env_float("MANGADEX_RETRY_BACKOFF_SECONDS", 0.35, minimum=0.05)
@@ -92,6 +92,9 @@ THROTTLE_GLOBAL_COOLDOWN_SECONDS = _env_float(
 THROTTLE_ENHANCE_YOUR_CALM_COOLDOWN_SECONDS = _env_float(
     "MANGADEX_ENHANCE_YOUR_CALM_COOLDOWN_SECONDS", 45.0, minimum=5.0
 )
+COOLDOWN_FAST_FAIL_SECONDS = _env_float(
+    "MANGADEX_COOLDOWN_FAST_FAIL_SECONDS", 4.0, minimum=0.0
+)
 
 _http_client: httpx.AsyncClient | None = None
 _curl_executor = ThreadPoolExecutor(max_workers=CURL_WORKERS)
@@ -99,6 +102,7 @@ _curl_session: Any = None
 _curl_session_lock = threading.Lock()
 _request_semaphore = asyncio.Semaphore(UPSTREAM_REQUEST_CONCURRENCY)
 _throttle_until_ts: float = 0.0
+_inflight_request_tasks: dict[str, asyncio.Task] = {}
 _vi_catalog_cover_enrich_tasks: dict[str, asyncio.Task] = {}
 _vi_catalog_top_up_tasks: dict[str, asyncio.Task] = {}
 _vi_catalog_refresh_tasks: dict[str, asyncio.Task] = {}
@@ -117,7 +121,7 @@ LATEST_CHAPTER_LOW_CONFIDENCE_FALLBACK_MAX = _env_int(
     "MANGADEX_LATEST_LOW_CONFIDENCE_FALLBACK_MAX", 16, minimum=1
 )
 LATEST_CHAPTER_FALLBACK_CONCURRENCY = _env_int(
-    "MANGADEX_LATEST_FALLBACK_CONCURRENCY", 6, minimum=1
+    "MANGADEX_LATEST_FALLBACK_CONCURRENCY", 2, minimum=1
 )
 LATEST_CHAPTER_BATCH_TIMEOUT_SECONDS = _env_float(
     "MANGADEX_LATEST_BATCH_TIMEOUT_SECONDS", 2.8, minimum=0.5
@@ -669,7 +673,47 @@ async def _request_json_via_httpx(url: str, params: dict[str, Any]) -> dict[str,
         raise _MangaDexNetworkError(f"Invalid JSON response: {_format_exception(error)}") from error
 
 
+def _stable_request_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _stable_request_value(value[key])
+            for key in sorted(value.keys(), key=lambda item: str(item))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_stable_request_value(item) for item in value]
+    return value
+
+
+def _request_fingerprint(path: str, params: dict[str, Any] | None) -> str:
+    try:
+        body = json.dumps(
+            _stable_request_value(params or {}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+    except Exception:
+        body = repr(params or {})
+    return f"{path}?{body}"
+
+
 async def _request_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    key = _request_fingerprint(path, params)
+    existing = _inflight_request_tasks.get(key)
+    if existing and not existing.done():
+        return await asyncio.shield(existing)
+
+    task = asyncio.create_task(_request_json_direct(path, params))
+    _inflight_request_tasks[key] = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if _inflight_request_tasks.get(key) is task:
+            _inflight_request_tasks.pop(key, None)
+
+
+async def _request_json_direct(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     global _throttle_until_ts
     url = f"{BASE_URL}{path}"
     request_params = params or {}
@@ -684,7 +728,12 @@ async def _request_json(path: str, params: dict[str, Any] | None = None) -> dict
 
     now = time.monotonic()
     if _throttle_until_ts > now:
-        await asyncio.sleep(_throttle_until_ts - now)
+        cooldown_remaining = _throttle_until_ts - now
+        if cooldown_remaining > COOLDOWN_FAST_FAIL_SECONDS:
+            raise RuntimeError(
+                f"MangaDex upstream cooldown active; retry_after={cooldown_remaining:.1f}s"
+            )
+        await asyncio.sleep(cooldown_remaining)
 
     for attempt in range(REQUEST_RETRIES):
         saw_throttle_signal = False
@@ -731,6 +780,10 @@ async def _request_json(path: str, params: dict[str, Any] | None = None) -> dict
                 _throttle_until_ts,
                 time.monotonic() + status_retry_delay,
             )
+            if status_retry_delay > COOLDOWN_FAST_FAIL_SECONDS:
+                raise RuntimeError(
+                    f"MangaDex upstream rate limited; retry_after={status_retry_delay:.1f}s"
+                )
             await asyncio.sleep(status_retry_delay)
             continue
 

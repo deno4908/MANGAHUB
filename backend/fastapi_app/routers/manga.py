@@ -35,6 +35,20 @@ from fastapi_app.utils.upload_security import detect_image_content_type
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+_MANGADEX_RETRY_AFTER_RE = re.compile(r"retry_after=([0-9.]+)s")
+
+
+def _mangadex_upstream_http_exception(error: RuntimeError) -> HTTPException:
+    detail = str(error)
+    status_code = 503 if "cooldown active" in detail or "rate limited" in detail else 502
+    headers: dict[str, str] = {}
+    match = _MANGADEX_RETRY_AFTER_RE.search(detail)
+    if match:
+        try:
+            headers["Retry-After"] = str(max(1, math.ceil(float(match.group(1)))))
+        except Exception:
+            pass
+    return HTTPException(status_code=status_code, detail=detail, headers=headers or None)
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -4902,59 +4916,62 @@ async def mangadex_search(
         or original_language_values
         or status_values
     )
-    if uses_popular_builder and has_precise_mangadex_filters:
-        data = await _build_mangadex_popular_filtered_search(
-            keyword=keyword,
-            page=page,
-            limit=limit,
-            translated_language=effective_translated_language,
-            genre_values=genre_values,
-            original_language_values=original_language_values,
-            status_values=status_values,
-            content_ratings=content_ratings,
-            db=db,
-        )
-    elif uses_popular_builder:
-        data = await _build_mangadex_popular_with_local_views(
-            keyword=keyword,
-            page=page,
-            limit=limit,
-            translated_language=effective_translated_language,
-            genre_values=genre_values,
-            original_language_values=original_language_values,
-            status_values=status_values,
-            content_ratings=content_ratings,
-            hidden=hidden,
-            db=db,
-        )
-    elif normalized_sort == "rating":
-        data = await _build_mangadex_rating_search(
-            keyword=keyword,
-            page=page,
-            limit=limit,
-            translated_language=effective_translated_language,
-            genre_values=genre_values,
-            original_language_values=original_language_values,
-            status_values=status_values,
-            content_ratings=content_ratings,
-            hidden=hidden,
-            user=user,
-            db=db,
-        )
-    else:
-        data = await mangadex_service.search_manga(
-            keyword=keyword,
-            page=page,
-            limit=limit,
-            translated_language=effective_translated_language,
-            attach_latest=True,
-            included_tag_slugs=genre_values,
-            included_tags_mode="AND",
-            original_languages=original_language_values,
-            statuses=status_values,
-            sort=sort,
-            content_ratings=content_ratings,
-        )
+    try:
+        if uses_popular_builder and has_precise_mangadex_filters:
+            data = await _build_mangadex_popular_filtered_search(
+                keyword=keyword,
+                page=page,
+                limit=limit,
+                translated_language=effective_translated_language,
+                genre_values=genre_values,
+                original_language_values=original_language_values,
+                status_values=status_values,
+                content_ratings=content_ratings,
+                db=db,
+            )
+        elif uses_popular_builder:
+            data = await _build_mangadex_popular_with_local_views(
+                keyword=keyword,
+                page=page,
+                limit=limit,
+                translated_language=effective_translated_language,
+                genre_values=genre_values,
+                original_language_values=original_language_values,
+                status_values=status_values,
+                content_ratings=content_ratings,
+                hidden=hidden,
+                db=db,
+            )
+        elif normalized_sort == "rating":
+            data = await _build_mangadex_rating_search(
+                keyword=keyword,
+                page=page,
+                limit=limit,
+                translated_language=effective_translated_language,
+                genre_values=genre_values,
+                original_language_values=original_language_values,
+                status_values=status_values,
+                content_ratings=content_ratings,
+                hidden=hidden,
+                user=user,
+                db=db,
+            )
+        else:
+            data = await mangadex_service.search_manga(
+                keyword=keyword,
+                page=page,
+                limit=limit,
+                translated_language=effective_translated_language,
+                attach_latest=True,
+                included_tag_slugs=genre_values,
+                included_tags_mode="AND",
+                original_languages=original_language_values,
+                statuses=status_values,
+                sort=sort,
+                content_ratings=content_ratings,
+            )
+    except RuntimeError as error:
+        raise _mangadex_upstream_http_exception(error) from error
 
     items = ((data.get("data") or {}).get("items") or [])
     if not isinstance(items, list):
@@ -5003,7 +5020,7 @@ async def mangadex_home_banner(
             excluded_manga_ids=excluded_manga_ids,
         )
     except RuntimeError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+        raise _mangadex_upstream_http_exception(error) from error
 
     if filter_hidden:
         items = ((data.get("data") or {}).get("items") or [])
@@ -5285,7 +5302,7 @@ async def mangadex_latest_feed(
                 content_ratings=content_ratings,
             )
         except RuntimeError as fallback_error:
-            raise HTTPException(status_code=502, detail=str(fallback_error)) from fallback_error
+            raise _mangadex_upstream_http_exception(fallback_error) from fallback_error
 
     if filter_hidden:
         items = ((data.get("data") or {}).get("items") or [])
@@ -5325,7 +5342,7 @@ async def mangadex_latest_chapters(
             allow_individual_fallback=not fast,
         )
     except RuntimeError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+        raise _mangadex_upstream_http_exception(error) from error
 
     items: dict[str, dict[str, str]] = {}
     for manga_id in manga_ids:
@@ -5349,7 +5366,7 @@ async def mangadex_chapter_pages(
     try:
         return await mangadex_service.get_chapter_pages(chapter_id=chapter_id, mode=mode, refresh=refresh)
     except RuntimeError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+        raise _mangadex_upstream_http_exception(error) from error
 
 
 @router.get("/mangadex/lookup/{manga_id}")
@@ -5372,7 +5389,7 @@ async def mangadex_lookup(
             await _attach_overrides_to_mangadex_payload({"mangas": [manga]}, db)
         return payload
     except RuntimeError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+        raise _mangadex_upstream_http_exception(error) from error
 
 
 @router.get("/mangadex/detail/{manga_id}")
@@ -5432,7 +5449,7 @@ async def mangadex_detail(
             data["manga"] = manga
         return data
     except RuntimeError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+        raise _mangadex_upstream_http_exception(error) from error
 
 
 @router.get("/chapter/{chapter_id}")

@@ -1044,7 +1044,7 @@ export const mangaApi = {
       filter_hidden: String(options.filterHidden ?? true),
     });
     return api<any>(`/api/manga/mangadex/home-banner?${query.toString()}`, {
-      timeoutMs: options.timeoutMs ?? 8_000,
+      timeoutMs: options.timeoutMs ?? 15_000,
     });
   },
   getMangaDexViCatalog: (
@@ -1089,7 +1089,7 @@ export const mangaApi = {
     }
     return api<any>(
       `/api/manga/mangadex/latest-chapters?${query.toString()}`,
-      { timeoutMs: 15_000 },
+      { timeoutMs: 18_000 },
     );
   },
   getMangaDexLatestFeed: (
@@ -1108,7 +1108,7 @@ export const mangaApi = {
       filter_hidden: String(options.filterHidden ?? true),
     });
     return api<any>(`/api/manga/mangadex/latest-feed?${query.toString()}`, {
-      timeoutMs: options.timeoutMs ?? 12_000,
+      timeoutMs: options.timeoutMs ?? 18_000,
     });
   },
   searchMangaDex: (
@@ -1152,7 +1152,7 @@ export const mangaApi = {
       query.set("status", String(options.status));
     }
     return api<any>(`/api/manga/mangadex/search?${query.toString()}`, {
-      timeoutMs: options.timeoutMs ?? 12_000,
+      timeoutMs: options.timeoutMs ?? 18_000,
     });
   },
   getMangaDexDetail: (
