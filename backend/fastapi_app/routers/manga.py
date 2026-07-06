@@ -5273,7 +5273,19 @@ async def mangadex_latest_feed(
             excluded_manga_ids=excluded_manga_ids,
         )
     except RuntimeError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+        logger.warning("MangaDex latest-feed fallback to /manga search after feed error: %s", error)
+        try:
+            data = await mangadex_service.search_manga(
+                keyword="",
+                page=page,
+                limit=limit,
+                translated_language="vi",
+                attach_latest=True,
+                sort="latest",
+                content_ratings=content_ratings,
+            )
+        except RuntimeError as fallback_error:
+            raise HTTPException(status_code=502, detail=str(fallback_error)) from fallback_error
 
     if filter_hidden:
         items = ((data.get("data") or {}).get("items") or [])

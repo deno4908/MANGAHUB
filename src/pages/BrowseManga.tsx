@@ -1803,14 +1803,7 @@ const BrowseManga = () => {
       hasLocalClientFilters ||
       Boolean(filters.status)
     );
-  const useMangaDexLatestFeedMode =
-    isMangaDexSourceTab &&
-    filters.sort === 'latest' &&
-    mangaDexTranslatedLanguage === 'vi' &&
-    !hasSearch &&
-    !hasLocalClientFilters &&
-    !filters.status &&
-    filters.genres.length === 0;
+  const useMangaDexLatestFeedMode = false;
   const mangaDexHasServerQueryableFilters =
     hasSearch ||
     filters.genres.length > 0 ||
@@ -1825,9 +1818,9 @@ const BrowseManga = () => {
   const useMangaDexServerSearchMode =
     isMangaDexSourceTab &&
     !hasLocalClientFilters &&
-    !useMangaDexLatestFeedMode &&
     (
       mangaDexHasServerQueryableFilters ||
+      filters.sort === 'latest' ||
       filters.sort === 'popular' ||
       filters.sort === 'alphabetical'
     );

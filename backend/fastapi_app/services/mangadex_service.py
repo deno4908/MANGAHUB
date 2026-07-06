@@ -64,6 +64,8 @@ REQUEST_TIMEOUT_SECONDS = _env_float("MANGADEX_TIMEOUT_SECONDS", 25.0, minimum=5
 REQUEST_CONNECT_TIMEOUT_SECONDS = _env_float("MANGADEX_CONNECT_TIMEOUT_SECONDS", 10.0, minimum=1.0)
 REQUEST_CONNECT_TIMEOUT_SECONDS = min(REQUEST_CONNECT_TIMEOUT_SECONDS, REQUEST_TIMEOUT_SECONDS)
 REQUEST_RETRY_BACKOFF_SECONDS = _env_float("MANGADEX_RETRY_BACKOFF_SECONDS", 0.35, minimum=0.05)
+HTTP_KEEPALIVE_CONNECTIONS = _env_int("MANGADEX_HTTP_KEEPALIVE_CONNECTIONS", 0, minimum=0)
+HTTP_KEEPALIVE_EXPIRY_SECONDS = _env_float("MANGADEX_HTTP_KEEPALIVE_EXPIRY_SECONDS", 5.0, minimum=0.1)
 CURL_WORKERS = _env_int("MANGADEX_CURL_WORKERS", 8, minimum=1)
 CURL_IMPERSONATE = str(os.getenv("MANGADEX_CURL_IMPERSONATE", "chrome131") or "chrome131").strip() or "chrome131"
 DETAIL_CHAPTER_PAGE_CONCURRENCY = _env_int(
@@ -510,6 +512,11 @@ async def _get_client() -> httpx.AsyncClient:
         _http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=REQUEST_CONNECT_TIMEOUT_SECONDS),
             headers=REQUEST_HEADERS,
+            limits=httpx.Limits(
+                max_connections=max(1, UPSTREAM_REQUEST_CONCURRENCY),
+                max_keepalive_connections=HTTP_KEEPALIVE_CONNECTIONS,
+                keepalive_expiry=HTTP_KEEPALIVE_EXPIRY_SECONDS,
+            ),
             trust_env=False,
         )
     return _http_client
