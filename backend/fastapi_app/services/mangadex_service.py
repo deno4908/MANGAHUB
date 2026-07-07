@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -2456,6 +2457,7 @@ async def search_manga(
     statuses: list[str] | None = None,
     sort: str = "relevance",
     content_ratings: list[str] | None = None,
+    offset_override: int | None = None,
 ) -> dict[str, Any]:
     normalized_keyword = str(keyword or "").strip()
     page = max(1, int(page))
@@ -2464,7 +2466,7 @@ async def search_manga(
     if normalized_language in {"", "all", "any"}:
         normalized_language = "all"
     should_attach_latest = bool(attach_latest) and normalized_language == "vi"
-    offset = (page - 1) * limit
+    offset = max(0, int(offset_override)) if offset_override is not None else (page - 1) * limit
     normalized_sort = str(sort or "relevance").strip().lower()
     if normalized_sort not in {"relevance", "latest", "popular", "updated", "title"}:
         normalized_sort = "relevance"
@@ -2512,7 +2514,7 @@ async def search_manga(
         if rating in {"safe", "suggestive", "erotica", "pornographic"}
     ] or ["safe", "suggestive"]
     cache_key = (
-        f"mangadex:search:v2:{normalized_keyword.lower()}:{page}:{limit}:"
+        f"mangadex:search:v3:{normalized_keyword.lower()}:{page}:{limit}:offset={offset}:"
         f"lang={normalized_language}:latest={1 if should_attach_latest else 0}:"
         f"tags={','.join(tag_ids)}:tag_mode={normalized_tags_mode}:status={','.join(normalized_statuses)}:"
         f"orig_lang={','.join(normalized_original_languages)}:"
@@ -2563,7 +2565,7 @@ async def search_manga(
     elif normalized_sort == "updated":
         params["order[updatedAt]"] = "desc"
     elif normalized_sort == "popular":
-        params["order[latestUploadedChapter]"] = "desc"
+        params["order[followedCount]"] = "desc"
     elif normalized_sort == "title":
         params["order[title]"] = "asc"
     else:
@@ -2585,21 +2587,18 @@ async def search_manga(
                 error,
             )
             return stale_payload
-        return {
-            "data": {
-                "items": [],
-                "params": {
-                    "pagination": {
-                        "totalItems": 0,
-                        "totalItemsPerPage": limit,
-                        "currentPage": page,
-                    }
-                },
-            },
-            "error": str(error),
-        }
+        raise
     data = payload.get("data") or []
     total = int(payload.get("total", 0))
+    if not data and total > 0 and offset >= total:
+        last_page = max(1, math.ceil(total / limit))
+        last_offset = (last_page - 1) * limit
+        if last_offset != offset:
+            params["offset"] = last_offset
+            payload = await _request_json("/manga", params)
+            data = payload.get("data") or []
+            total = int(payload.get("total", total))
+            page = last_page
     parsed_items: list[dict[str, Any]] = []
     for manga_item in data:
         manga_id = str(manga_item.get("id") or "")

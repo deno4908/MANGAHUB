@@ -1713,22 +1713,54 @@ async def translate_text_openrouter(
         f"## CONTEXT AWARENESS\n"
         f"- This is manga dialogue. Characters may be fighting, confessing love, joking, or in daily life.\n"
         f"- Adapt formality level: battle shout ≠ polite greeting ≠ intimate whisper.\n"
-        f"- Keep honorific nuance if the target language supports it.\n"
+        f"- Keep honorific nuance if the target language supports it.\n\n"
+        f"## RELATIONSHIP & CHARACTER CONTEXT\n"
+        f"- Pay close attention to character relationships shown in the artwork:\n"
+        f"  + Couple/lovers: intimate, warm, sometimes teasing tone\n"
+        f"  + Rivals/enemies: aggressive, taunting, or cold tone\n"
+        f"  + Senpai/kouhai: respectful but friendly hierarchy\n"
+        f"  + Parent/child: protective, caring, or stern\n"
+        f"  + Strangers: formal, cautious, polite\n"
+        f"  + Close friends: casual, playful, use nicknames\n"
+        f"- CONSISTENCY: maintain the same pronoun/address style for the same character pair throughout.\n"
+        f"- Detect gender from art context (hair, body, clothing, expressions) to choose correct pronouns.\n"
+        f"- Age hierarchy matters: younger characters speak more politely to older ones unless they're close friends.\n\n"
+        f"## GENRE-SPECIFIC REGISTER\n"
+        f"- Romance: soft, emotional, use tender expressions. Confessions should feel heartfelt.\n"
+        f"- Action/Battle: sharp, intense, commanding. War cries should be powerful.\n"
+        f"- Comedy/Slice-of-life: light, witty, natural daily speech.\n"
+        f"- Horror/Thriller: tense, ominous, unsettling word choices.\n"
+        f"- Fantasy/Isekai: can mix archaic and modern speech depending on character.\n"
     )
 
     vi_rules = ""
     if is_target_vi:
         vi_rules = (
             f"\n## VIETNAMESE-SPECIFIC RULES (RẤT QUAN TRỌNG)\n"
-            f"- Xưng hô mặc định dùng giọng nhẹ nhàng, thân thiện:\n"
-            f"  + Bạn bè ngang hàng: tớ/cậu, mình/bạn, tôi/cậu\n"
-            f"  + Lịch sự / người lớn: tôi/anh, tôi/chị, tôi/em\n"
-            f"  + Cổ trang / fantasy: ta/ngươi, huynh/đệ\n"
-            f"  + CHỈ dùng tao/mày khi nhân vật thực sự tức giận, gây hấn hoặc ngữ cảnh rõ ràng là thô tục.\n"
-            f"- Phân biệt giọng: nam trẻ → 'tớ/cậu', nữ trẻ → 'mình/bạn', trẻ con → 'con/chú/cô/anh/chị'.\n"
+            f"- Xưng hô theo MỐI QUAN HỆ trong truyện:\n"
+            f"  + Cặp đôi yêu nhau: anh/em (nam nói), em/anh (nữ nói), hoặc tên riêng\n"
+            f"  + Bạn bè thân: tớ/cậu, mình/bạn, tao/mày (nếu thân lắm)\n"
+            f"  + Bạn bè ngang hàng bình thường: tôi/cậu, mình/bạn\n"
+            f"  + Senpai/kouhai: em/anh, em/chị (kouhai nói), cậu/em (senpai nói)\n"
+            f"  + Thầy trò: con/thầy, con/sư phụ, đệ tử/sư tôn\n"
+            f"  + Cha mẹ - con cái: con/bố, con/mẹ, con/cha\n"
+            f"  + Anh chị em ruột: em/anh, em/chị, hoặc tên riêng\n"
+            f"  + Đối thủ/kẻ thù: ta/ngươi, tao/mày, tôi/anh-chị (lạnh lùng)\n"
+            f"  + Vua/thần/quý tộc: ta/ngươi, bệ hạ, điện hạ, thần/bệ hạ\n"
+            f"  + Lịch sự / người lớn: tôi/anh, tôi/chị\n"
+            f"  + Cổ trang / fantasy: ta/ngươi, huynh/đệ, tỷ/muội\n"
+            f"  + CHỈ dùng tao/mày khi nhân vật thực sự tức giận, gây hấn, thân thiết kiểu bad boy, hoặc ngữ cảnh rõ ràng là thô tục.\n"
+            f"- NHẤT QUÁN xưng hô: cùng một cặp nhân vật phải dùng cùng kiểu xưng hô xuyên suốt.\n"
+            f"- Phân biệt giọng theo giới tính và tính cách:\n"
+            f"  + Nam mạnh mẽ: tôi/ta, giọng dứt khoát\n"
+            f"  + Nam hiền: tớ/mình, giọng nhẹ nhàng\n"
+            f"  + Nữ dịu dàng: em/mình, giọng mềm mại\n"
+            f"  + Nữ mạnh: tôi/ta, giọng quyết đoán\n"
+            f"  + Trẻ con: con, cháu, giọng ngây thơ\n"
             f"- Câu cảm thán tự nhiên: 'Chết rồi!', 'Trời ơi!', 'Khoan đã!', 'Sao cơ?!' thay vì dịch sát.\n"
-            f"- Thêm ngữ khí từ: à, ư, nhỉ, nhé, đấy, sao, chứ, hả, vậy, nha, hen.\n"
-            f"- VD đúng: 守ってやる → 'Để tớ bảo vệ cậu' (KHÔNG phải 'Tôi sẽ bảo vệ bạn').\n"
+            f"- Thêm ngữ khí từ cho tự nhiên: à, ư, nhỉ, nhé, đấy, sao, chứ, hả, vậy, nha, hen, cơ, mà.\n"
+            f"- Tình cảm lãng mạn dịch cho ngọt ngào: 好き→'thích cậu/anh/em', 愛してる→'yêu anh/em'.\n"
+            f"- VD đúng: 守ってやる → 'Để tớ bảo vệ cậu' / 'Anh sẽ bảo vệ em' tùy ngữ cảnh.\n"
             f"- Câu ngắn giữ ngắn: うん → 'Ừ', いいよ → 'Được thôi', ダメ → 'Không được đâu!'.\n"
             f"- Giữ nhịp đọc manga: câu gọn, dễ hiểu, có cảm xúc, đọc lên thấy tự nhiên.\n"
             f"- KHÔNG dùng văn phong quá trang trọng hay sách vở cho hội thoại thường ngày.\n"
@@ -3240,8 +3272,7 @@ async def _gemini_edit_manga_page(
         # Helper: ensure URL requests max resolution
         def _full_res_url(url: str) -> str:
             """Append =s0 to Google image URL for original/full resolution."""
-            # Don't append for /gg-dl/ signed URLs or URLs with existing params
-            if "?" in url or url.endswith("=s0") or "/gg-dl/" in url:
+            if "?" in url or url.endswith("=s0"):
                 return url
             return url + "=s0"
 
@@ -3249,9 +3280,10 @@ async def _gemini_edit_manga_page(
         download_urls: list[tuple[str, str, str]] = []
         if full_quality_url:
             download_urls.append((_full_res_url(full_quality_url), "image/png", "full_quality"))
+            download_urls.append((full_quality_url, "image/png", "full_quality_raw"))
         for img_url, mime, fname in unique_entries:
             download_urls.append((_full_res_url(img_url), mime, fname))
-            # Also try without =s0 as fallback
+            # Also try without =s0 as fallback (for signed /gg-dl/ URLs)
             download_urls.append((img_url, mime, fname + "_raw"))
 
         # Download images – try full quality first, then PNG

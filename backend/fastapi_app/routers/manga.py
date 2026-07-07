@@ -2848,7 +2848,6 @@ async def _resolve_local_viewed_mangadex_search_rows(
         or (genre_values or [])
         or (original_language_values or [])
         or (status_values or [])
-        or str(translated_language or "").strip().lower() not in {"", "all", "any", "*"}
     )
 
     if not filtering_required:
@@ -2874,7 +2873,7 @@ async def _resolve_local_viewed_mangadex_search_rows(
             manga = (lookup_payload or {}).get("manga") if isinstance(lookup_payload, dict) else None
             if not isinstance(manga, dict):
                 return None
-            if filtering_required and not _mangadex_lookup_matches_search_filters(
+            if not _mangadex_lookup_matches_search_filters(
                 manga,
                 keyword=keyword,
                 translated_language=translated_language,
@@ -2925,16 +2924,20 @@ async def _fetch_mangadex_latest_search_fill(
 
     collected: list[dict[str, Any]] = []
     seen: set[str] = set()
-    skipped = 0
     total = 0
-    upstream_page = 1
-    upstream_limit = 100
-    max_pages = max(3, min(40, math.ceil((offset + limit + len(exclude_ids)) / upstream_limit) + 6))
+    cursor = max(0, int(offset))
+    attempts = 0
+    max_attempts = 3
 
-    while len(collected) < limit and upstream_page <= max_pages:
+    while len(collected) < limit and attempts < max_attempts:
+        remaining = limit - len(collected)
+        upstream_limit = min(
+            100,
+            max(remaining, remaining + min(48, len(exclude_ids))),
+        )
         payload = await mangadex_service.search_manga(
             keyword=keyword,
-            page=upstream_page,
+            page=max(1, math.floor(cursor / max(1, upstream_limit)) + 1),
             limit=upstream_limit,
             translated_language=translated_language,
             attach_latest=True,
@@ -2944,6 +2947,7 @@ async def _fetch_mangadex_latest_search_fill(
             statuses=status_values,
             sort="latest",
             content_ratings=content_ratings,
+            offset_override=cursor,
         )
         page_data = payload.get("data") or {}
         pagination = (page_data.get("params") or {}).get("pagination") or {}
@@ -2957,16 +2961,14 @@ async def _fetch_mangadex_latest_search_fill(
             if not manga_id or manga_id in exclude_ids or manga_id in seen:
                 continue
             seen.add(manga_id)
-            if skipped < offset:
-                skipped += 1
-                continue
             collected.append(item)
             if len(collected) >= limit:
                 break
 
+        cursor += len(page_items)
         if len(page_items) < upstream_limit:
             break
-        upstream_page += 1
+        attempts += 1
 
     return collected, total
 

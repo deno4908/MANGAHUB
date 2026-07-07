@@ -5383,33 +5383,9 @@ const BrowseManga = () => {
     if (page > totalPages) setPage(totalPages);
   }, [page, totalPages, hasResolvedTotalPages, isLoading, isFetching, isNearMangaDexLoadedLimit]);
 
-  // Prefetch adjacent MangaDex search pages so pagination feels instant.
-  useEffect(() => {
-    if (!useMangaDexServerSearchMode) return;
-    if (mangaDexHasServerQueryableFilters) return;
-    const total = Math.max(1, mangaDexServerTotalPages);
-    const targetPages = Array.from(new Set([page + 1, page - 1]))
-      .filter((targetPage) => targetPage >= 1 && targetPage <= total);
-
-    targetPages.forEach((targetPage) => {
-      queryClient.prefetchQuery({
-        queryKey: getMangaDexServerSearchQueryKey(targetPage),
-        queryFn: () => fetchMangaDexServerSearchPage(targetPage),
-        staleTime: 2 * 60 * 1000,
-        gcTime: 8 * 60 * 1000,
-      }).catch(() => {
-        // Best-effort warmup only; normal navigation still handles errors.
-      });
-    });
-  }, [
-    useMangaDexServerSearchMode,
-    mangaDexHasServerQueryableFilters,
-    page,
-    mangaDexServerTotalPages,
-    queryClient,
-    getMangaDexServerSearchQueryKey,
-    fetchMangaDexServerSearchPage,
-  ]);
+  // Keep MangaDex browse to one explicit server-page request per user action.
+  // Adjacent-page prefetch makes pagination feel a bit faster, but it can
+  // multiply upstream calls when users click through pages quickly.
 
   // Prefetch adjacent MangaDex latest pages. This mirrors MangaDex's native
   // chapter offset paging, so every page stays stable and quick to revisit.
