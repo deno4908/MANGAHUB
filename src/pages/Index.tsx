@@ -333,6 +333,25 @@ const RATING_BATCH_WAVE_SIZE = 2;
 const RATING_BATCH_TIMEOUT_MS = 4_500;
 const ANNOUNCEMENT_DISMISS_KEY_PREFIX = 'mb:home-announcement-dismissed:';
 const HOME_SOURCE_SYNC_GRACE_MS = 3_000;
+const HOME_DEFERRED_WORK_IDLE_MS = 900;
+
+type HomeIdleWindow = Window & {
+  requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+  cancelIdleCallback?: (handle: number) => void;
+};
+
+const scheduleHomeDeferredWork = (callback: () => void, timeoutMs = HOME_DEFERRED_WORK_IDLE_MS) => {
+  if (typeof window === 'undefined') return () => undefined;
+
+  const win = window as HomeIdleWindow;
+  if (typeof win.requestIdleCallback === 'function') {
+    const id = win.requestIdleCallback(callback, { timeout: timeoutMs });
+    return () => win.cancelIdleCallback?.(id);
+  }
+
+  const timer = window.setTimeout(callback, timeoutMs);
+  return () => window.clearTimeout(timer);
+};
 // Proxy URL = primary (local disk cache after startup warmup = instant)
 const toMangaDexCoverProxy = (coverUrl?: string, mangaId?: string) => {
   const raw = String(coverUrl || '').trim();
@@ -1113,6 +1132,7 @@ const Index = () => {
     isMangaDexCatalogError || (!isMangaDexCatalogLoading && !isMangaDexCatalogFetching);
   const [homeSyncReady, setHomeSyncReady] = useState(false);
   const [syncedMangaDexMangas, setSyncedMangaDexMangas] = useState<MangaDexCatalogItem[]>([]);
+  const [homeDeferredWorkReady, setHomeDeferredWorkReady] = useState(false);
 
   useEffect(() => {
     if (isInitialMergedLoading) {
@@ -1150,6 +1170,26 @@ const Index = () => {
     isMangaDexCatalogSettled,
     mangaDexMangasCandidate,
   ]);
+
+  const isHomePrimaryReady = isHomepageCoreReady && homeSyncReady;
+  useEffect(() => {
+    if (!isHomePrimaryReady) {
+      setHomeDeferredWorkReady(false);
+      return;
+    }
+
+    let cancelled = false;
+    const cleanup = scheduleHomeDeferredWork(() => {
+      if (!cancelled) setHomeDeferredWorkReady(true);
+    });
+
+    return () => {
+      cancelled = true;
+      cleanup();
+    };
+  }, [isHomePrimaryReady]);
+
+  const canRunHomeDeferredQueries = isHomePrimaryReady && homeDeferredWorkReady;
 
   const mangaDexMangas = syncedMangaDexMangas;
   const mangaDexItems = useMemo<Manga[]>(() => {
@@ -1312,7 +1352,7 @@ const Index = () => {
         return { items: [] };
       }
     },
-    enabled: canUseUserRatings && isHomepageCoreReady,
+    enabled: canUseUserRatings && canRunHomeDeferredQueries,
     staleTime: 2 * 60 * 1000,
     retry: 0,
     placeholderData: (previousData) => previousData,
@@ -1452,7 +1492,7 @@ const Index = () => {
         return { ratings: {}, my_scores: {} };
       }
     },
-    enabled: ratingSlugs.length > 0,
+    enabled: canRunHomeDeferredQueries && ratingSlugs.length > 0,
     staleTime: 2 * 60 * 1000,
     retry: 1,
     placeholderData: (previousData) => previousData,
@@ -1514,7 +1554,7 @@ const Index = () => {
         return { items: [] };
       }
     },
-    enabled: isHomepageCoreReady,
+    enabled: canRunHomeDeferredQueries,
     staleTime: 2 * 60 * 1000,
     retry: 1,
     placeholderData: (previousData) => previousData,
@@ -1659,7 +1699,7 @@ const Index = () => {
 
       return result;
     },
-    enabled: isHomepageCoreReady && guestTopRatedMissingSlugs.length > 0,
+    enabled: canRunHomeDeferredQueries && guestTopRatedMissingSlugs.length > 0,
     staleTime: 10 * 60 * 1000,
     retry: 0,
     placeholderData: (previousData) => previousData,
@@ -1934,7 +1974,7 @@ const Index = () => {
   const { data: popularMangaDexChapterMap = {} } = useQuery({
     queryKey: ['manga', 'index', 'popular-mangadex-latest-chapter-v2', popularMangaDexIds],
     queryFn: () => fetchMangaDexLatestChapterMetaMap(popularMangaDexIds, 3),
-    enabled: isHomepageCoreReady && popularMangaDexIds.length > 0,
+    enabled: canRunHomeDeferredQueries && popularMangaDexIds.length > 0,
     staleTime: 10 * 60 * 1000,
     retry: 1,
     placeholderData: (previousData) => previousData,
@@ -1990,7 +2030,7 @@ const Index = () => {
   const { data: topRatedMangaDexChapterMap = {} } = useQuery({
     queryKey: ['manga', 'index', 'top-rated-mangadex-latest-chapter-v4', topRatedMangaDexIds],
     queryFn: () => fetchMangaDexLatestChapterMetaMap(topRatedMangaDexIds, 3),
-    enabled: isHomepageCoreReady && topRatedMangaDexIds.length > 0,
+    enabled: canRunHomeDeferredQueries && topRatedMangaDexIds.length > 0,
     staleTime: 10 * 60 * 1000,
     retry: 1,
     placeholderData: (previousData) => previousData,
