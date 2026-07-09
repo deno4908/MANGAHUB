@@ -114,12 +114,12 @@ _MANGADEX_RATING_SORT_MAX_CANDIDATES = _env_int("MANGADEX_RATING_SORT_MAX_CANDID
 _MANGADEX_RATING_SORT_PAGE_SIZE = 100
 _MANGADEX_POPULAR_FILTERED_CANDIDATE_LIMIT = _env_int(
     "MANGADEX_POPULAR_FILTERED_CANDIDATE_LIMIT",
-    240,
+    100,
     minimum=48,
 )
 _MANGADEX_POPULAR_FILTERED_MAX_CANDIDATES = _env_int(
     "MANGADEX_POPULAR_FILTERED_MAX_CANDIDATES",
-    500,
+    300,
     minimum=100,
 )
 _MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT = _env_int(
@@ -3251,14 +3251,14 @@ async def _build_mangadex_popular_filtered_search(
     )
     upstream_limit = min(100, max(safe_limit, 100))
     cache_key = (
-        "manga:mangadex-popular-filtered:v7:"
+        "manga:mangadex-popular-filtered:v8:"
         f"p={safe_page}:l={safe_limit}:target={candidate_target}:ll={_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT}:"
         f"q={str(keyword or '').strip().lower()}:lang={translated_language}:"
         f"g={','.join(sorted(genre_values))}:orig={','.join(sorted(original_language_values))}:"
         f"s={','.join(sorted(status_values))}:rating={','.join(sorted(content_ratings))}"
     )
     snapshot_cache_key = (
-        "manga:mangadex-popular-filtered-snapshot:v7:"
+        "manga:mangadex-popular-filtered-snapshot:v8:"
         f"l={safe_limit}:target={candidate_target}:ll={_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT}:"
         f"q={str(keyword or '').strip().lower()}:lang={translated_language}:"
         f"g={','.join(sorted(genre_values))}:orig={','.join(sorted(original_language_values))}:"
@@ -3310,6 +3310,22 @@ async def _build_mangadex_popular_filtered_search(
             manga_id = _extract_mangadex_id(manga.get("id") or manga.get("slug"))
             if manga_id and manga_id not in cached_by_id:
                 cached_by_id[manga_id] = manga
+
+    cached_filter_total = 0
+    if cached_by_id:
+        cached_filter_total = sum(
+            1
+            for cached_manga in cached_by_id.values()
+            if _mangadex_lookup_matches_search_filters(
+                cached_manga,
+                keyword=keyword,
+                translated_language=translated_language,
+                genre_values=genre_values,
+                original_language_values=original_language_values,
+                status_values=status_values,
+                content_ratings=content_ratings,
+            )
+        )
 
     if cached_by_id and views_lookup:
         for manga_id, views in _top_local_viewed_mangadex_ids(
@@ -3409,6 +3425,42 @@ async def _build_mangadex_popular_filtered_search(
             )
         if resolved_local_rows:
             local_view_rows = [*local_view_rows, *resolved_local_rows]
+
+    if local_view_rows and cached_filter_total > 0:
+        local_candidates: list[dict[str, Any]] = []
+        local_seen: set[str] = set()
+        for item in local_view_rows:
+            manga_id = _extract_mangadex_id((item or {}).get("slug") or (item or {}).get("id"))
+            if not manga_id or manga_id in local_seen:
+                continue
+            local_seen.add(manga_id)
+            local_candidates.append(item)
+
+        local_payload = {"mangas": local_candidates}
+        await _async_attach_local_views_to_mangadex_payload(local_payload, db)
+        local_sorted_items = _sort_mangadex_items_by_local_views_first(local_payload.get("mangas") or [])
+        local_page_items = local_sorted_items[offset: offset + safe_limit]
+        if len(local_page_items) >= safe_limit:
+            result_total_items = max(cached_filter_total, len(local_sorted_items), offset + len(local_page_items))
+            result = {
+                "data": {
+                    "items": local_page_items,
+                    "params": {
+                        "pagination": {
+                            "totalItems": result_total_items,
+                            "totalItemsPerPage": safe_limit,
+                            "currentPage": safe_page,
+                            "candidateItems": len(local_sorted_items),
+                            "candidateWindow": len(local_sorted_items),
+                            "localViewFastPath": True,
+                        }
+                    },
+                }
+            }
+            raw = json.dumps(result, ensure_ascii=False)
+            cache.set(cache_key, raw, ttl=MANGADEX_POPULAR_FILTERED_CACHE_TTL_SECONDS)
+            cache.set(f"{cache_key}:stale", raw, ttl=COMBINED_LIST_STALE_TTL_SECONDS)
+            return result
 
     collected: list[dict[str, Any]] = []
     seen: set[str] = set()
