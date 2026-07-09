@@ -75,6 +75,12 @@ const resolveMangaDexCurrentCover = (mangaId?: string): string => {
   return `${API_BASE}/api/manga/mangadex-cover/${encodeURIComponent(normalized)}`;
 };
 
+const isUsableCoverSrc = (value?: string): boolean => {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return false;
+  return !raw.includes('/no-cover.svg') && !raw.includes('/no-cover-dark.svg');
+};
+
 const formatCompactViews = (value: number): string => {
   const views = Math.max(0, Math.floor(Number(value) || 0));
   if (views < 1_000) return views.toLocaleString('vi-VN');
@@ -228,11 +234,14 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
   const chapterMetaLabel = chapterTime ? `${chapterLabel} - ${chapterTime}` : chapterLabel;
   const safeCoverFallback = String(manga.coverProxy || '').trim() || DEFAULT_CARD_COVER_FALLBACK;
   const mangaDexCatalogCover = resolveMangaDexCardCover(manga.cover, manga.coverProxy);
+  const mangaDexCurrentCover = resolveMangaDexCurrentCover(manga.id);
   const coverSrc = isMangaDexItem
-    ? (resolveMangaDexCurrentCover(manga.id) || mangaDexCatalogCover)
+    ? (isUsableCoverSrc(mangaDexCatalogCover) ? mangaDexCatalogCover : (mangaDexCurrentCover || DEFAULT_CARD_COVER_FALLBACK))
     : manga.cover;
-  const coverFallbackSrc = isMangaDexItem ? mangaDexCatalogCover : safeCoverFallback;
-  const coverFallbackDelayMs = isMangaDexItem ? 3500 : undefined;
+  const coverFallbackSrc = isMangaDexItem
+    ? (mangaDexCurrentCover || (isUsableCoverSrc(mangaDexCatalogCover) ? mangaDexCatalogCover : DEFAULT_CARD_COVER_FALLBACK))
+    : safeCoverFallback;
+  const coverFallbackDelayMs = isMangaDexItem ? 1800 : undefined;
   const coverPriority = variant === 'horizontal' ? index < 3 : index < 4;
   const coverMaxRetries = isMangaDexItem ? 2 : 1;
   const detailLinkState = { previewManga: manga };

@@ -112,6 +112,17 @@ _MANGADEX_LOCAL_VIEWED_LOOKUP_TIMEOUT_SECONDS = 8.0
 _MANGADEX_RATING_SORT_CANDIDATE_LIMIT = _env_int("MANGADEX_RATING_SORT_CANDIDATE_LIMIT", 300, minimum=48)
 _MANGADEX_RATING_SORT_MAX_CANDIDATES = _env_int("MANGADEX_RATING_SORT_MAX_CANDIDATES", 600, minimum=100)
 _MANGADEX_RATING_SORT_PAGE_SIZE = 100
+_MANGADEX_POPULAR_FILTERED_CANDIDATE_LIMIT = _env_int(
+    "MANGADEX_POPULAR_FILTERED_CANDIDATE_LIMIT",
+    240,
+    minimum=48,
+)
+_MANGADEX_POPULAR_FILTERED_MAX_CANDIDATES = _env_int(
+    "MANGADEX_POPULAR_FILTERED_MAX_CANDIDATES",
+    500,
+    minimum=100,
+)
+MANGADEX_POPULAR_FILTERED_CACHE_TTL_SECONDS = 90
 VIEW_DEDUP_SECONDS = 15 * 60
 VIEW_DB_DEDUP_SECONDS = 15 * 60
 VIEW_BURST_LIMIT_PER_MINUTE = 180
@@ -1919,6 +1930,7 @@ async def manga_list(
         items = (data.get("data") or {}).get("items") or []
         if isinstance(items, list):
             data["data"]["items"] = _filter_hidden(items, hidden)
+    await _async_attach_local_views_to_otruyen_payload(data, db)
     # Run rating attachment in thread pool to avoid blocking the event loop
     await _async_attach_ratings_to_items(data, db, user)
     return data
@@ -1951,6 +1963,7 @@ async def _build_otruyen_page_batch(
     attach_ratings: bool,
 ) -> dict[str, Any]:
     semaphore = asyncio.Semaphore(10)
+    views_lookup = await asyncio.to_thread(_fetch_local_views_lookup, db)
 
     async def load_one(page_number: int) -> tuple[int, dict[str, Any] | None, str | None]:
         async with semaphore:
@@ -1960,6 +1973,11 @@ async def _build_otruyen_page_batch(
                     items = (payload.get("data") or {}).get("items") or []
                     if isinstance(items, list):
                         payload["data"]["items"] = _filter_hidden(items, hidden)
+                items = (payload.get("data") or {}).get("items") or []
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict):
+                            _otruyen_apply_local_views(item, views_lookup)
                 if attach_ratings:
                     await _async_attach_ratings_to_items(payload, db, user)
                 return page_number, payload, None
@@ -1982,6 +2000,11 @@ OTRUYEN_FILTERED_CACHE_TTL_SECONDS = 180
 OTRUYEN_FILTERED_FETCH_CHUNK = 12
 OTRUYEN_FILTERED_MAX_SCAN_PAGES = 500
 OTRUYEN_FILTERED_EXACT_SCAN_PAGE_CAP = 12
+OTRUYEN_FILTERED_POPULAR_SCAN_PAGE_CAP = _env_int(
+    "OTRUYEN_FILTERED_POPULAR_SCAN_PAGE_CAP",
+    96,
+    minimum=12,
+)
 
 
 def _otruyen_filtered_cache_key(
@@ -1996,7 +2019,7 @@ def _otruyen_filtered_cache_key(
 ) -> str:
     genre_key = ",".join(sorted(_clean_slug(value) for value in genre_values if _clean_slug(value)))
     return (
-        "manga:otruyen-filtered:"
+        "manga:otruyen-filtered:v2:"
         f"p{page}:l{limit}:base={_clean_slug(base_slug)}:"
         f"g={genre_key}:s={_clean_slug(status_value)}:sort={_clean_slug(sort)}:"
         f"mature={1 if show_mature else 0}"
@@ -2153,6 +2176,22 @@ def _otruyen_apply_local_views(item: dict[str, Any], views_lookup: dict[str, int
     item["views"] = item["view_count"]
 
 
+def _attach_local_views_to_otruyen_payload(payload: Any, db: Any) -> None:
+    if not isinstance(payload, dict):
+        return
+    items = (payload.get("data") or {}).get("items") or []
+    if not isinstance(items, list) or not items:
+        return
+    views_lookup = _fetch_local_views_lookup(db)
+    for item in items:
+        if isinstance(item, dict):
+            _otruyen_apply_local_views(item, views_lookup)
+
+
+async def _async_attach_local_views_to_otruyen_payload(payload: Any, db: Any) -> None:
+    await asyncio.to_thread(_attach_local_views_to_otruyen_payload, payload, db)
+
+
 def _sort_otruyen_filtered_items(
     items: list[dict[str, Any]],
     *,
@@ -2235,6 +2274,10 @@ async def _build_otruyen_filtered_payload(
     first_payload = await fetch_page(1)
     total_source_pages = min(_otruyen_payload_total_pages(first_payload), OTRUYEN_FILTERED_MAX_SCAN_PAGES)
     exact_scan = total_source_pages <= OTRUYEN_FILTERED_EXACT_SCAN_PAGE_CAP
+    popular_scan = (_clean_slug(sort) or "latest") == "popular"
+    scan_page_limit = total_source_pages
+    if popular_scan and not exact_scan:
+        scan_page_limit = min(total_source_pages, OTRUYEN_FILTERED_POPULAR_SCAN_PAGE_CAP)
     desired_buffer_count = target_count + safe_limit
 
     collected: list[dict[str, Any]] = []
@@ -2275,10 +2318,10 @@ async def _build_otruyen_filtered_payload(
             except Exception:
                 return target_page, None
 
-    for start_page in range(2, total_source_pages + 1, OTRUYEN_FILTERED_FETCH_CHUNK):
-        if not exact_scan and len(collected) >= desired_buffer_count:
+    for start_page in range(2, scan_page_limit + 1, OTRUYEN_FILTERED_FETCH_CHUNK):
+        if not exact_scan and not popular_scan and len(collected) >= desired_buffer_count:
             break
-        end_page = min(total_source_pages, start_page + OTRUYEN_FILTERED_FETCH_CHUNK - 1)
+        end_page = min(scan_page_limit, start_page + OTRUYEN_FILTERED_FETCH_CHUNK - 1)
         page_numbers = [target_page for target_page in range(start_page, end_page + 1) if target_page not in scanned_pages]
         if not page_numbers:
             continue
@@ -2293,6 +2336,7 @@ async def _build_otruyen_filtered_payload(
     page_items = sorted_items[offset: offset + safe_limit]
 
     scanned_all = len(scanned_pages) >= total_source_pages
+    scanned_popular_window = popular_scan and len(scanned_pages) >= scan_page_limit
     if scanned_all:
         total_items = len(sorted_items)
     else:
@@ -2317,6 +2361,8 @@ async def _build_otruyen_filtered_payload(
                     "source_pages_scanned": len(scanned_pages),
                     "source_pages_total": total_source_pages,
                     "source_scan_complete": scanned_all,
+                    "source_popular_scan_complete": scanned_popular_window,
+                    "source_scan_page_limit": scan_page_limit,
                 },
             },
         },
@@ -2422,6 +2468,7 @@ async def category_manga(
         items = (data.get("data") or {}).get("items") or []
         if isinstance(items, list):
             data["data"]["items"] = _filter_hidden(items, hidden)
+    await _async_attach_local_views_to_otruyen_payload(data, db)
     await _async_attach_ratings_to_items(data, db, user)
     return data
 
@@ -3085,36 +3132,230 @@ async def _build_mangadex_popular_filtered_search(
     content_ratings: list[str],
     db: Any,
 ) -> dict[str, Any]:
-    """Use one official MangaDex /manga query, then prefer local-viewed rows.
+    """Use official MangaDex /manga queries, then prefer local-viewed rows.
 
     Resolving every locally viewed MangaDex title against filters can fan out
     into hundreds of /manga/{id} calls. For tag/status searches, keep upstream
-    traffic to the exact public /manga query shape and only reorder the returned
-    page after local views are attached.
+    traffic to the public /manga query shape, fetch a bounded cached candidate
+    window, attach local views, then paginate the locally popular rows first.
     """
-    data = await mangadex_service.search_manga(
-        keyword=keyword,
-        page=page,
-        limit=limit,
-        translated_language=translated_language,
-        attach_latest=True,
-        included_tag_slugs=genre_values,
-        included_tags_mode="AND",
-        original_languages=original_language_values,
-        statuses=status_values,
-        sort="latest",
-        content_ratings=content_ratings,
+    safe_page = max(1, int(page))
+    safe_limit = max(1, min(100, int(limit)))
+    offset = (safe_page - 1) * safe_limit
+    candidate_target = min(
+        _MANGADEX_POPULAR_FILTERED_MAX_CANDIDATES,
+        max(offset + safe_limit, _MANGADEX_POPULAR_FILTERED_CANDIDATE_LIMIT),
     )
-    items = ((data.get("data") or {}).get("items") or [])
-    if not isinstance(items, list) or not items:
-        return data
+    upstream_limit = min(100, max(safe_limit, 100))
+    cache_key = (
+        "manga:mangadex-popular-filtered:v2:"
+        f"p={safe_page}:l={safe_limit}:target={candidate_target}:"
+        f"q={str(keyword or '').strip().lower()}:lang={translated_language}:"
+        f"g={','.join(sorted(genre_values))}:orig={','.join(sorted(original_language_values))}:"
+        f"s={','.join(sorted(status_values))}:rating={','.join(sorted(content_ratings))}"
+    )
+    cached = _load_json_cache(cache_key)
+    if cached is not None:
+        return cached
+    stale = _load_json_cache(f"{cache_key}:stale")
 
-    payload = {"mangas": items}
-    await _async_attach_local_views_to_mangadex_payload(payload, db)
-    data.setdefault("data", {})["items"] = _sort_mangadex_items_by_local_views_first(
-        payload.get("mangas") or []
+    views_lookup = await asyncio.to_thread(_fetch_local_views_lookup, db)
+    local_view_rows: list[dict[str, Any]] = []
+    cached_catalog = (
+        _load_mangadex_catalog_cache(None)
+        or _load_mangadex_catalog_cache(10000)
+        or _load_mangadex_catalog_cache(6000)
+        or _load_mangadex_catalog_cache(3000)
+        or _load_mangadex_catalog_cache(2000)
     )
-    return data
+    cached_mangas = (cached_catalog or {}).get("mangas") if isinstance(cached_catalog, dict) else []
+    cached_by_id: dict[str, dict[str, Any]] = {}
+    if isinstance(cached_mangas, list):
+        for manga in cached_mangas:
+            if not isinstance(manga, dict):
+                continue
+            manga_id = _extract_mangadex_id(manga.get("id") or manga.get("slug"))
+            if manga_id and manga_id not in cached_by_id:
+                cached_by_id[manga_id] = manga
+
+    if cached_by_id and views_lookup:
+        for manga_id, views in _top_local_viewed_mangadex_ids(
+            views_lookup,
+            limit=_MANGADEX_POPULAR_LOCAL_VIEW_LIMIT,
+        ):
+            cached_manga = cached_by_id.get(manga_id)
+            if not cached_manga:
+                continue
+            if not _mangadex_lookup_matches_search_filters(
+                cached_manga,
+                keyword=keyword,
+                translated_language=translated_language,
+                genre_values=genre_values,
+                original_language_values=original_language_values,
+                status_values=status_values,
+                content_ratings=content_ratings,
+            ):
+                continue
+            row = _legacy_mangadex_search_item_from_lookup(cached_manga, views)
+            latest_chapter = None
+            chapters = cached_manga.get("chapters")
+            if isinstance(chapters, list) and chapters:
+                latest_chapter = max(
+                    (chapter for chapter in chapters if isinstance(chapter, dict)),
+                    key=lambda chapter: (
+                        _safe_float(str(chapter.get("chapter") or "").replace(",", ".")),
+                        _parse_sort_timestamp(
+                            chapter.get("publish_at")
+                            or chapter.get("readable_at")
+                            or chapter.get("created_at")
+                            or chapter.get("updated_at")
+                        ),
+                    ),
+                    default=None,
+                )
+            if isinstance(latest_chapter, dict) and latest_chapter.get("chapter"):
+                row["chaptersLatest"] = [{
+                    "chapter_name": str(latest_chapter.get("chapter") or ""),
+                    "chapter_title": str(latest_chapter.get("chapter_with_groups") or ""),
+                    "chapter_api_data": str(latest_chapter.get("id") or ""),
+                    "publish_at": str(
+                        latest_chapter.get("readable_at")
+                        or latest_chapter.get("publish_at")
+                        or latest_chapter.get("created_at")
+                        or latest_chapter.get("updated_at")
+                        or cached_manga.get("updated_at")
+                        or ""
+                    ),
+                }]
+                row["local_last_published_at"] = row["chaptersLatest"][0]["publish_at"]
+                row["updatedAt"] = row["chaptersLatest"][0]["publish_at"] or row.get("updatedAt")
+            local_view_rows.append(row)
+
+    collected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    upstream_total = 0
+
+    try:
+        cursor = 0
+        while cursor < candidate_target:
+            payload = await mangadex_service.search_manga(
+                keyword=keyword,
+                page=max(1, math.floor(cursor / max(1, upstream_limit)) + 1),
+                limit=upstream_limit,
+                translated_language=translated_language,
+                attach_latest=True,
+                included_tag_slugs=genre_values,
+                included_tags_mode="AND",
+                original_languages=original_language_values,
+                statuses=status_values,
+                sort="latest",
+                content_ratings=content_ratings,
+                offset_override=cursor,
+            )
+            page_data = payload.get("data") or {}
+            pagination = (page_data.get("params") or {}).get("pagination") or {}
+            upstream_total = max(upstream_total, _safe_int(pagination.get("totalItems")))
+            page_items = page_data.get("items") or []
+            if not isinstance(page_items, list) or not page_items:
+                break
+
+            for item in page_items:
+                manga_id = _extract_mangadex_id((item or {}).get("slug") or (item or {}).get("id"))
+                if not manga_id or manga_id in seen:
+                    continue
+                seen.add(manga_id)
+                collected.append(item)
+
+            cursor += len(page_items)
+            if len(page_items) < upstream_limit:
+                break
+            if upstream_total > 0 and cursor >= upstream_total:
+                break
+    except RuntimeError:
+        if stale is not None:
+            return stale
+        raise
+
+    if not collected:
+        data = await mangadex_service.search_manga(
+            keyword=keyword,
+            page=safe_page,
+            limit=safe_limit,
+            translated_language=translated_language,
+            attach_latest=True,
+            included_tag_slugs=genre_values,
+            included_tags_mode="AND",
+            original_languages=original_language_values,
+            statuses=status_values,
+            sort="latest",
+            content_ratings=content_ratings,
+        )
+        items = ((data.get("data") or {}).get("items") or [])
+        if not isinstance(items, list):
+            items = []
+        collected = items
+        upstream_total = _safe_int(
+            ((((data.get("data") or {}).get("params") or {}).get("pagination") or {}).get("totalItems"))
+        )
+
+    merged_candidates: list[dict[str, Any]] = []
+    merged_seen: set[str] = set()
+    for item in [*local_view_rows, *collected]:
+        manga_id = _extract_mangadex_id((item or {}).get("slug") or (item or {}).get("id"))
+        if not manga_id or manga_id in merged_seen:
+            continue
+        merged_seen.add(manga_id)
+        merged_candidates.append(item)
+
+    payload = {"mangas": merged_candidates}
+    await _async_attach_local_views_to_mangadex_payload(payload, db)
+    sorted_items = _sort_mangadex_items_by_local_views_first(payload.get("mangas") or [])
+    page_items = sorted_items[offset: offset + safe_limit]
+
+    if not page_items and offset >= len(sorted_items) and upstream_total > len(sorted_items):
+        fallback = await mangadex_service.search_manga(
+            keyword=keyword,
+            page=safe_page,
+            limit=safe_limit,
+            translated_language=translated_language,
+            attach_latest=True,
+            included_tag_slugs=genre_values,
+            included_tags_mode="AND",
+            original_languages=original_language_values,
+            statuses=status_values,
+            sort="latest",
+            content_ratings=content_ratings,
+        )
+        fallback_items = ((fallback.get("data") or {}).get("items") or [])
+        if isinstance(fallback_items, list):
+            fallback_payload = {"mangas": fallback_items}
+            await _async_attach_local_views_to_mangadex_payload(fallback_payload, db)
+            page_items = _sort_mangadex_items_by_local_views_first(fallback_payload.get("mangas") or [])
+            upstream_total = max(
+                upstream_total,
+                _safe_int(
+                    ((((fallback.get("data") or {}).get("params") or {}).get("pagination") or {}).get("totalItems"))
+                ),
+            )
+
+    result = {
+        "data": {
+            "items": page_items,
+            "params": {
+                "pagination": {
+                    "totalItems": max(upstream_total, len(sorted_items)),
+                    "totalItemsPerPage": safe_limit,
+                    "currentPage": safe_page,
+                    "candidateItems": len(sorted_items),
+                    "candidateWindow": candidate_target,
+                }
+            },
+        }
+    }
+    raw = json.dumps(result, ensure_ascii=False)
+    cache.set(cache_key, raw, ttl=MANGADEX_POPULAR_FILTERED_CACHE_TTL_SECONDS)
+    cache.set(f"{cache_key}:stale", raw, ttl=COMBINED_LIST_STALE_TTL_SECONDS)
+    return result
 
 
 async def _build_mangadex_rating_search(

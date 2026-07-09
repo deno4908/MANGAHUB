@@ -1140,7 +1140,16 @@ const compareByRating = (a: Manga, b: Manga): number => {
 
 const getRealViewSortScore = (manga: Manga): number => {
   if (isMangaDexSlug(String(manga.id || ''))) {
-    return Math.max(0, toNumber((manga as any).localViewCount ?? (manga as any).local_view_count ?? 0));
+    return Math.max(
+      0,
+      toNumber(
+        (manga as any).localViewCount ??
+        (manga as any).local_view_count ??
+        (manga as any).view_count ??
+        manga.views ??
+        0,
+      ),
+    );
   }
   return Math.max(0, toNumber((manga as any).view_count ?? manga.views));
 };
@@ -1969,7 +1978,7 @@ const BrowseManga = () => {
     !isClientPaginationMode &&
     !hasSearch &&
     !hasLocalClientFilters &&
-    Boolean(filters.status) &&
+    (Boolean(filters.status) || filters.sort === 'popular') &&
     directOTruyenFilterGenreSlugs.length > 0 &&
     directOTruyenFilterGenreSlugs.length === filters.genres.length &&
     !useCombinedList &&
