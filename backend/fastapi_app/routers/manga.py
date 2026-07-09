@@ -122,6 +122,11 @@ _MANGADEX_POPULAR_FILTERED_MAX_CANDIDATES = _env_int(
     500,
     minimum=100,
 )
+_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT = _env_int(
+    "MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT",
+    96,
+    minimum=0,
+)
 MANGADEX_POPULAR_FILTERED_CACHE_TTL_SECONDS = 90
 VIEW_DEDUP_SECONDS = 15 * 60
 VIEW_DB_DEDUP_SECONDS = 15 * 60
@@ -3159,8 +3164,8 @@ async def _build_mangadex_popular_filtered_search(
     )
     upstream_limit = min(100, max(safe_limit, 100))
     cache_key = (
-        "manga:mangadex-popular-filtered:v3:"
-        f"p={safe_page}:l={safe_limit}:target={candidate_target}:"
+        "manga:mangadex-popular-filtered:v4:"
+        f"p={safe_page}:l={safe_limit}:target={candidate_target}:ll={_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT}:"
         f"q={str(keyword or '').strip().lower()}:lang={translated_language}:"
         f"g={','.join(sorted(genre_values))}:orig={','.join(sorted(original_language_values))}:"
         f"s={','.join(sorted(status_values))}:rating={','.join(sorted(content_ratings))}"
@@ -3241,6 +3246,28 @@ async def _build_mangadex_popular_filtered_search(
                 row["local_last_published_at"] = row["chaptersLatest"][0]["publish_at"]
                 row["updatedAt"] = row["chaptersLatest"][0]["publish_at"] or row.get("updatedAt")
             local_view_rows.append(row)
+
+    if views_lookup and _MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT > 0:
+        ranked_for_lookup = _top_local_viewed_mangadex_ids(
+            views_lookup,
+            limit=min(
+                _MANGADEX_POPULAR_LOCAL_VIEW_LIMIT,
+                _MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT,
+            ),
+        )
+        resolved_local_rows, _ = await _resolve_local_viewed_mangadex_search_rows(
+            ranked_for_lookup,
+            offset=0,
+            limit=_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT,
+            keyword=keyword,
+            translated_language=translated_language,
+            genre_values=genre_values,
+            original_language_values=original_language_values,
+            status_values=status_values,
+            content_ratings=content_ratings,
+        )
+        if resolved_local_rows:
+            local_view_rows = [*local_view_rows, *resolved_local_rows]
 
     collected: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -5239,6 +5266,8 @@ async def mangadex_search(
     payload = {"mangas": items}
     await _async_attach_local_views_to_mangadex_payload(payload, db)
     items = payload.get("mangas") or []
+    if normalized_sort == "popular":
+        items = _sort_mangadex_items_by_local_views_first(items)
     data.setdefault("data", {})["items"] = items
 
     if attach_ratings and normalized_sort != "rating":

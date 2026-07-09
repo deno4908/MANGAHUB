@@ -455,6 +455,14 @@ export function adaptMangaItem(item: any): Manga {
   const ratingCount = Number.isFinite(Number(ratingCountRaw))
     ? Number(ratingCountRaw)
     : 0;
+  const localViewRaw = item.local_view_count ?? item.localViewCount;
+  const viewRaw = item.view_count ?? item.views ?? localViewRaw;
+  const localViewCount = Number.isFinite(Number(localViewRaw))
+    ? Math.max(0, Number(localViewRaw))
+    : 0;
+  const viewCount = Number.isFinite(Number(viewRaw))
+    ? Math.max(0, Number(viewRaw))
+    : 0;
   const myRatingRaw = item.my_rating ?? item.user_rating;
   const myRating = Number.isFinite(Number(myRatingRaw))
     ? Number(myRatingRaw)
@@ -595,7 +603,10 @@ export function adaptMangaItem(item: any): Manga {
     ratingCount,
     myRating,
     follows: 0,
-    views: item.view_count || item.views || 0,
+    views: Math.max(viewCount, localViewCount),
+    localViewCount,
+    local_view_count: localViewCount,
+    view_count: Math.max(viewCount, localViewCount),
     year: resolveItemYear(item),
     chapters: latestChapters,
     lastUpdated: resolvedLastUpdated,
