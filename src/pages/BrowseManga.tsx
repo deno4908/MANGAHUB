@@ -1872,10 +1872,13 @@ const BrowseManga = () => {
   );
   const fetchMangaDexServerSearchPage = useCallback(
     async (targetPage: number) => {
-      const requestPage = async (sort: string) => adaptListData(await mangaApi.searchMangaDex({
+      const requestPage = async (
+        sort: string,
+        options: { page?: number; limit?: number; timeoutMs?: number } = {},
+      ) => adaptListData(await mangaApi.searchMangaDex({
         keyword: normalizedSearch,
-        page: targetPage,
-        limit: BROWSE_PAGE_SIZE,
+        page: options.page ?? targetPage,
+        limit: options.limit ?? BROWSE_PAGE_SIZE,
         genreSlugs: mangaDexServerSearchGenreSlugs,
         translatedLanguage: mangaDexTranslatedLanguage,
         status: filters.status || '',
@@ -1883,30 +1886,58 @@ const BrowseManga = () => {
         showMature: showMatureContent,
         attachRatings: filters.sort === 'rating' && sort === mangaDexServerSearchSort,
         filterHidden: true,
-        timeoutMs: 12_000,
+        timeoutMs: options.timeoutMs ?? (sort === 'popular' ? 24_000 : 12_000),
       }));
+
+      const requestPopularFallbackPage = async () => {
+        const targetCount = Math.max(BROWSE_PAGE_SIZE, targetPage * BROWSE_PAGE_SIZE);
+        const chunkLimit = 100;
+        const chunkPages = Math.max(1, Math.min(3, Math.ceil(targetCount / chunkLimit)));
+        const chunks = await Promise.all(
+          Array.from({ length: chunkPages }, (_, index) =>
+            requestPage('latest', {
+              page: index + 1,
+              limit: chunkLimit,
+              timeoutMs: 16_000,
+            })
+          )
+        );
+        const fallback = chunks[0] || { items: [], totalItems: 0, totalPages: 1, currentPage: 1 };
+        const windowItems = dedupeMangaById(chunks.flatMap((chunk) => chunk.items || []));
+        const sortedItems = sortBrowseWindowItems(windowItems, 'popular');
+        const start = (Math.max(1, targetPage) - 1) * BROWSE_PAGE_SIZE;
+        const fallbackTotalItems = Math.max(
+          fallback.totalItems,
+          ...chunks.map((chunk) => chunk.totalItems || 0),
+          sortedItems.length,
+        );
+        return {
+          ...fallback,
+          items: sortedItems.slice(start, start + BROWSE_PAGE_SIZE),
+          totalItems: fallbackTotalItems,
+          totalPages: Math.max(
+            ...chunks.map((chunk) => chunk.totalPages || 1),
+            Math.ceil(fallbackTotalItems / BROWSE_PAGE_SIZE),
+          ),
+        };
+      };
 
       try {
         const data = await requestPage(mangaDexServerSearchSort);
         if (mangaDexServerSearchSort === 'popular' && data.items.length === 0 && data.totalItems > 0) {
-          const fallback = await requestPage('latest');
+          const fallback = await requestPopularFallbackPage();
           if (fallback.items.length > 0) {
             return {
               ...fallback,
               totalItems: Math.max(data.totalItems, fallback.totalItems),
               totalPages: Math.max(data.totalPages, fallback.totalPages),
-              items: sortBrowseWindowItems(fallback.items, 'popular'),
             };
           }
         }
         return data;
       } catch (error) {
         if (mangaDexServerSearchSort !== 'popular') throw error;
-        const fallback = await requestPage('latest');
-        return {
-          ...fallback,
-          items: sortBrowseWindowItems(fallback.items, 'popular'),
-        };
+        return requestPopularFallbackPage();
       }
     },
     [

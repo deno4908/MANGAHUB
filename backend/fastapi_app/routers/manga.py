@@ -2970,6 +2970,72 @@ async def _resolve_local_viewed_mangadex_search_rows(
     return matched[offset: offset + limit], len(matched)
 
 
+async def _resolve_local_viewed_mangadex_search_rows_batch(
+    ranked: list[tuple[str, int]],
+    *,
+    limit: int,
+    translated_language: str = "all",
+    genre_values: list[str] | None = None,
+    original_language_values: list[str] | None = None,
+    status_values: list[str] | None = None,
+    content_ratings: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Resolve locally viewed MangaDex rows in one official /manga query.
+
+    This keeps first-load popular-tag ordering stable without warming dozens of
+    individual /manga/{id} lookups first.
+    """
+    if limit <= 0 or not ranked:
+        return []
+
+    target = ranked[: min(100, max(1, limit))]
+    views_by_id = {manga_id: views for manga_id, views in target}
+    try:
+        payload = await mangadex_service.search_manga(
+            keyword="",
+            page=1,
+            limit=len(target),
+            translated_language=translated_language,
+            attach_latest=True,
+            included_tag_slugs=genre_values or [],
+            included_tags_mode="AND",
+            original_languages=original_language_values or [],
+            statuses=status_values or [],
+            sort="latest",
+            content_ratings=content_ratings or [],
+            manga_ids=[manga_id for manga_id, _ in target],
+        )
+    except Exception:
+        return []
+
+    items = ((payload.get("data") or {}).get("items") or [])
+    if not isinstance(items, list):
+        return []
+
+    resolved: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        manga_id = _extract_mangadex_id(item.get("slug") or item.get("id"))
+        if not manga_id:
+            continue
+        views = _safe_int(views_by_id.get(manga_id))
+        item = dict(item)
+        item["local_view_count"] = views
+        item["view_count"] = views
+        item["views"] = views
+        item["local_view_injected"] = True
+        resolved.append(item)
+
+    resolved.sort(
+        key=lambda item: (
+            -_safe_int((item or {}).get("local_view_count") or (item or {}).get("views") or (item or {}).get("view_count")),
+            str((item or {}).get("slug") or (item or {}).get("id") or ""),
+        )
+    )
+    return resolved
+
+
 async def _fetch_mangadex_latest_search_fill(
     *,
     keyword: str,
@@ -3164,8 +3230,15 @@ async def _build_mangadex_popular_filtered_search(
     )
     upstream_limit = min(100, max(safe_limit, 100))
     cache_key = (
-        "manga:mangadex-popular-filtered:v4:"
+        "manga:mangadex-popular-filtered:v6:"
         f"p={safe_page}:l={safe_limit}:target={candidate_target}:ll={_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT}:"
+        f"q={str(keyword or '').strip().lower()}:lang={translated_language}:"
+        f"g={','.join(sorted(genre_values))}:orig={','.join(sorted(original_language_values))}:"
+        f"s={','.join(sorted(status_values))}:rating={','.join(sorted(content_ratings))}"
+    )
+    snapshot_cache_key = (
+        "manga:mangadex-popular-filtered-snapshot:v6:"
+        f"l={safe_limit}:target={candidate_target}:ll={_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT}:"
         f"q={str(keyword or '').strip().lower()}:lang={translated_language}:"
         f"g={','.join(sorted(genre_values))}:orig={','.join(sorted(original_language_values))}:"
         f"s={','.join(sorted(status_values))}:rating={','.join(sorted(content_ratings))}"
@@ -3174,6 +3247,29 @@ async def _build_mangadex_popular_filtered_search(
     if cached is not None:
         return cached
     stale = _load_json_cache(f"{cache_key}:stale")
+    snapshot = _load_json_cache(snapshot_cache_key)
+    if isinstance(snapshot, dict):
+        snapshot_items = snapshot.get("items") or []
+        if isinstance(snapshot_items, list) and snapshot_items:
+            snapshot_total = _safe_int(snapshot.get("totalItems"))
+            result = {
+                "data": {
+                    "items": snapshot_items[offset: offset + safe_limit],
+                    "params": {
+                        "pagination": {
+                            "totalItems": max(snapshot_total, len(snapshot_items)),
+                            "totalItemsPerPage": safe_limit,
+                            "currentPage": safe_page,
+                            "candidateItems": len(snapshot_items),
+                            "candidateWindow": candidate_target,
+                        }
+                    },
+                }
+            }
+            raw = json.dumps(result, ensure_ascii=False)
+            cache.set(cache_key, raw, ttl=MANGADEX_POPULAR_FILTERED_CACHE_TTL_SECONDS)
+            cache.set(f"{cache_key}:stale", raw, ttl=COMBINED_LIST_STALE_TTL_SECONDS)
+            return result
 
     views_lookup = await asyncio.to_thread(_fetch_local_views_lookup, db)
     local_view_rows: list[dict[str, Any]] = []
@@ -3255,17 +3351,29 @@ async def _build_mangadex_popular_filtered_search(
                 _MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT,
             ),
         )
-        resolved_local_rows, _ = await _resolve_local_viewed_mangadex_search_rows(
-            ranked_for_lookup,
-            offset=0,
-            limit=_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT,
-            keyword=keyword,
-            translated_language=translated_language,
-            genre_values=genre_values,
-            original_language_values=original_language_values,
-            status_values=status_values,
-            content_ratings=content_ratings,
-        )
+        resolved_local_rows: list[dict[str, Any]] = []
+        if not str(keyword or "").strip():
+            resolved_local_rows = await _resolve_local_viewed_mangadex_search_rows_batch(
+                ranked_for_lookup,
+                limit=_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT,
+                translated_language=translated_language,
+                genre_values=genre_values,
+                original_language_values=original_language_values,
+                status_values=status_values,
+                content_ratings=content_ratings,
+            )
+        if not resolved_local_rows:
+            resolved_local_rows, _ = await _resolve_local_viewed_mangadex_search_rows(
+                ranked_for_lookup,
+                offset=0,
+                limit=_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT,
+                keyword=keyword,
+                translated_language=translated_language,
+                genre_values=genre_values,
+                original_language_values=original_language_values,
+                status_values=status_values,
+                content_ratings=content_ratings,
+            )
         if resolved_local_rows:
             local_view_rows = [*local_view_rows, *resolved_local_rows]
 
@@ -3392,6 +3500,17 @@ async def _build_mangadex_popular_filtered_search(
     }
     result_total_items = max(upstream_total, len(sorted_items))
     if page_items or result_total_items <= 0:
+        if sorted_items:
+            snapshot_raw = json.dumps(
+                {
+                    "items": sorted_items,
+                    "totalItems": result_total_items,
+                    "candidateWindow": candidate_target,
+                },
+                ensure_ascii=False,
+            )
+            cache.set(snapshot_cache_key, snapshot_raw, ttl=MANGADEX_POPULAR_FILTERED_CACHE_TTL_SECONDS)
+            cache.set(f"{snapshot_cache_key}:stale", snapshot_raw, ttl=COMBINED_LIST_STALE_TTL_SECONDS)
         raw = json.dumps(result, ensure_ascii=False)
         cache.set(cache_key, raw, ttl=MANGADEX_POPULAR_FILTERED_CACHE_TTL_SECONDS)
         cache.set(f"{cache_key}:stale", raw, ttl=COMBINED_LIST_STALE_TTL_SECONDS)

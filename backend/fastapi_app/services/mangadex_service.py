@@ -2458,6 +2458,7 @@ async def search_manga(
     sort: str = "relevance",
     content_ratings: list[str] | None = None,
     offset_override: int | None = None,
+    manga_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     normalized_keyword = str(keyword or "").strip()
     page = max(1, int(page))
@@ -2491,8 +2492,23 @@ async def search_manga(
         )
         if status in {"ongoing", "completed", "hiatus", "cancelled"}
     ]
+    normalized_manga_ids = [
+        manga_id
+        for manga_id in (
+            str(value or "").strip().lower()
+            for value in (manga_ids or [])
+        )
+        if _MANGADEX_UUID_RE.match(manga_id)
+    ]
+    normalized_manga_ids = list(dict.fromkeys(normalized_manga_ids))[:100]
     allow_empty_catalog_query = normalized_sort in {"latest", "popular", "updated", "title"}
-    if not normalized_keyword and not tag_ids and not normalized_statuses and not allow_empty_catalog_query:
+    if (
+        not normalized_keyword
+        and not tag_ids
+        and not normalized_statuses
+        and not normalized_manga_ids
+        and not allow_empty_catalog_query
+    ):
         return {
             "data": {
                 "items": [],
@@ -2513,12 +2529,13 @@ async def search_manga(
         )
         if rating in {"safe", "suggestive", "erotica", "pornographic"}
     ] or ["safe", "suggestive"]
+    manga_ids_key = hashlib.sha1(",".join(normalized_manga_ids).encode("utf-8")).hexdigest() if normalized_manga_ids else ""
     cache_key = (
         f"mangadex:search:v3:{normalized_keyword.lower()}:{page}:{limit}:offset={offset}:"
         f"lang={normalized_language}:latest={1 if should_attach_latest else 0}:"
         f"tags={','.join(tag_ids)}:tag_mode={normalized_tags_mode}:status={','.join(normalized_statuses)}:"
         f"orig_lang={','.join(normalized_original_languages)}:"
-        f"sort={normalized_sort}:rating={','.join(normalized_content_ratings)}"
+        f"sort={normalized_sort}:rating={','.join(normalized_content_ratings)}:ids={manga_ids_key}"
     )
     cached = cache.get(cache_key)
     if cached:
@@ -2548,6 +2565,8 @@ async def search_manga(
         "offset": offset,
         "contentRating[]": normalized_content_ratings,
     }
+    if normalized_manga_ids:
+        params["ids[]"] = normalized_manga_ids
     if normalized_language not in {"all", "non_vi"}:
         params["availableTranslatedLanguage[]"] = normalized_language
     if normalized_original_languages:
