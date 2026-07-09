@@ -2653,6 +2653,27 @@ def _fetch_local_views_lookup(db: Any) -> dict[str, int]:
     return dict(lookup)
 
 
+def _bump_manga_views_lookup_cache(slug: Any, delta: int = 1) -> None:
+    """Keep the hot local view cache fresh without forcing the next browse to hit DB."""
+    if not _manga_views_lookup_cache:
+        return
+
+    normalized = _normalize_view_slug(slug)
+    if not normalized:
+        return
+
+    aliases = [normalized]
+    cleaned = _clean_slug(normalized)
+    if cleaned and cleaned != normalized:
+        aliases.append(cleaned)
+
+    for alias in aliases:
+        _manga_views_lookup_cache[alias] = max(
+            0,
+            _safe_int(_manga_views_lookup_cache.get(alias)) + max(1, int(delta or 1)),
+        )
+
+
 def _local_views_for_mangadex_id(views_lookup: dict[str, int], manga_id: str) -> int:
     total = 0
     seen: set[str] = set()
@@ -2996,7 +3017,7 @@ async def _resolve_local_viewed_mangadex_search_rows_batch(
             page=1,
             limit=len(target),
             translated_language=translated_language,
-            attach_latest=True,
+            attach_latest=False,
             included_tag_slugs=genre_values or [],
             included_tags_mode="AND",
             original_languages=original_language_values or [],
@@ -3230,14 +3251,14 @@ async def _build_mangadex_popular_filtered_search(
     )
     upstream_limit = min(100, max(safe_limit, 100))
     cache_key = (
-        "manga:mangadex-popular-filtered:v6:"
+        "manga:mangadex-popular-filtered:v7:"
         f"p={safe_page}:l={safe_limit}:target={candidate_target}:ll={_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT}:"
         f"q={str(keyword or '').strip().lower()}:lang={translated_language}:"
         f"g={','.join(sorted(genre_values))}:orig={','.join(sorted(original_language_values))}:"
         f"s={','.join(sorted(status_values))}:rating={','.join(sorted(content_ratings))}"
     )
     snapshot_cache_key = (
-        "manga:mangadex-popular-filtered-snapshot:v6:"
+        "manga:mangadex-popular-filtered-snapshot:v7:"
         f"l={safe_limit}:target={candidate_target}:ll={_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT}:"
         f"q={str(keyword or '').strip().lower()}:lang={translated_language}:"
         f"g={','.join(sorted(genre_values))}:orig={','.join(sorted(original_language_values))}:"
@@ -3343,7 +3364,19 @@ async def _build_mangadex_popular_filtered_search(
                 row["updatedAt"] = row["chaptersLatest"][0]["publish_at"] or row.get("updatedAt")
             local_view_rows.append(row)
 
-    if views_lookup and _MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT > 0:
+    required_local_rows_for_page = min(
+        offset + safe_limit,
+        max(safe_limit, _MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT),
+    )
+    should_resolve_local_view_rows = (
+        len(local_view_rows) < required_local_rows_for_page
+    )
+
+    if (
+        should_resolve_local_view_rows
+        and views_lookup
+        and _MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT > 0
+    ):
         ranked_for_lookup = _top_local_viewed_mangadex_ids(
             views_lookup,
             limit=min(
@@ -3445,13 +3478,28 @@ async def _build_mangadex_popular_filtered_search(
         )
 
     merged_candidates: list[dict[str, Any]] = []
-    merged_seen: set[str] = set()
+    merged_by_id: dict[str, dict[str, Any]] = {}
     for item in [*local_view_rows, *collected]:
         manga_id = _extract_mangadex_id((item or {}).get("slug") or (item or {}).get("id"))
-        if not manga_id or manga_id in merged_seen:
+        if not manga_id:
             continue
-        merged_seen.add(manga_id)
-        merged_candidates.append(item)
+        existing = merged_by_id.get(manga_id)
+        if existing is None:
+            merged_by_id[manga_id] = item
+            merged_candidates.append(item)
+            continue
+        if (
+            isinstance(existing, dict)
+            and isinstance(item, dict)
+            and not existing.get("chaptersLatest")
+            and item.get("chaptersLatest")
+        ):
+            existing.update({
+                "chaptersLatest": item.get("chaptersLatest"),
+                "updatedAt": item.get("updatedAt") or existing.get("updatedAt"),
+                "latest_uploaded_chapter": item.get("latest_uploaded_chapter")
+                or existing.get("latest_uploaded_chapter"),
+            })
 
     payload = {"mangas": merged_candidates}
     await _async_attach_local_views_to_mangadex_payload(payload, db)
@@ -5046,7 +5094,6 @@ async def add_view(
     db=Depends(get_supabase),
 ):
     """Tăng view local cho manga khi user mở chapter."""
-    global _manga_views_lookup_cache_at
     normalized_slug = str(slug or "").strip()
     view_slug = await _canonical_view_slug(normalized_slug)
     if _is_invalid_manga_slug(view_slug):
@@ -5119,7 +5166,7 @@ async def add_view(
     if checked_rpc_result is not None:
         if checked_rpc_result.get("counted"):
             check_recent_once(once_key, VIEW_DEDUP_SECONDS, mark=True)
-            _manga_views_lookup_cache_at = 0.0
+            _bump_manga_views_lookup_cache(view_slug)
             return {"ok": True, "counted": True}
         return {
             "ok": bool(checked_rpc_result.get("ok", True)),
@@ -5156,7 +5203,7 @@ async def add_view(
         ).execute()
     except Exception:
         logger.debug("manga.view event insert skipped: slug=%s ip=%s", view_slug, client_ip)
-    _manga_views_lookup_cache_at = 0.0
+    _bump_manga_views_lookup_cache(view_slug)
     check_recent_once(once_key, VIEW_DEDUP_SECONDS, mark=True)
     return {"ok": True, "counted": True}
 
