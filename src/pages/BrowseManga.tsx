@@ -1872,20 +1872,42 @@ const BrowseManga = () => {
   );
   const fetchMangaDexServerSearchPage = useCallback(
     async (targetPage: number) => {
-      const payload = await mangaApi.searchMangaDex({
+      const requestPage = async (sort: string) => adaptListData(await mangaApi.searchMangaDex({
         keyword: normalizedSearch,
         page: targetPage,
         limit: BROWSE_PAGE_SIZE,
         genreSlugs: mangaDexServerSearchGenreSlugs,
         translatedLanguage: mangaDexTranslatedLanguage,
         status: filters.status || '',
-        sort: mangaDexServerSearchSort,
+        sort,
         showMature: showMatureContent,
-        attachRatings: filters.sort === 'rating',
+        attachRatings: filters.sort === 'rating' && sort === mangaDexServerSearchSort,
         filterHidden: true,
         timeoutMs: 12_000,
-      });
-      return adaptListData(payload);
+      }));
+
+      try {
+        const data = await requestPage(mangaDexServerSearchSort);
+        if (mangaDexServerSearchSort === 'popular' && data.items.length === 0 && data.totalItems > 0) {
+          const fallback = await requestPage('latest');
+          if (fallback.items.length > 0) {
+            return {
+              ...fallback,
+              totalItems: Math.max(data.totalItems, fallback.totalItems),
+              totalPages: Math.max(data.totalPages, fallback.totalPages),
+              items: sortBrowseWindowItems(fallback.items, 'popular'),
+            };
+          }
+        }
+        return data;
+      } catch (error) {
+        if (mangaDexServerSearchSort !== 'popular') throw error;
+        const fallback = await requestPage('latest');
+        return {
+          ...fallback,
+          items: sortBrowseWindowItems(fallback.items, 'popular'),
+        };
+      }
     },
     [
       normalizedSearch,
@@ -2233,18 +2255,43 @@ const BrowseManga = () => {
       showMatureContent,
     ],
     queryFn: async () => {
-      const payload = await mangaApi.getOTruyenFiltered({
-        genreSlugs: directOTruyenFilterGenreSlugs,
-        status: filters.status,
-        sort: filters.sort,
-        page,
-        limit: BROWSE_PAGE_SIZE,
-        showMature: showMatureContent,
-        baseSlug: directOTruyenFilterGenreSlugs[0] || activeCategorySlug,
-        attachRatings: filters.sort === 'rating',
-      });
-      assertOTruyenPayload(payload);
-      return adaptListData(payload);
+      const requestPage = async (sort: SortOption | string) => {
+        const payload = await mangaApi.getOTruyenFiltered({
+          genreSlugs: directOTruyenFilterGenreSlugs,
+          status: filters.status,
+          sort,
+          page,
+          limit: BROWSE_PAGE_SIZE,
+          showMature: showMatureContent,
+          baseSlug: directOTruyenFilterGenreSlugs[0] || activeCategorySlug,
+          attachRatings: filters.sort === 'rating' && sort === filters.sort,
+        });
+        assertOTruyenPayload(payload);
+        return adaptListData(payload);
+      };
+
+      try {
+        const data = await requestPage(filters.sort);
+        if (filters.sort === 'popular' && data.items.length === 0 && data.totalItems > 0) {
+          const fallback = await requestPage('latest');
+          if (fallback.items.length > 0) {
+            return {
+              ...fallback,
+              totalItems: Math.max(data.totalItems, fallback.totalItems),
+              totalPages: Math.max(data.totalPages, fallback.totalPages),
+              items: sortBrowseWindowItems(fallback.items, 'popular'),
+            };
+          }
+        }
+        return data;
+      } catch (error) {
+        if (filters.sort !== 'popular') throw error;
+        const fallback = await requestPage('latest');
+        return {
+          ...fallback,
+          items: sortBrowseWindowItems(fallback.items, 'popular'),
+        };
+      }
     },
     enabled: useOTruyenFilteredServerMode,
     staleTime: 10 * 60 * 1000,

@@ -2019,7 +2019,7 @@ def _otruyen_filtered_cache_key(
 ) -> str:
     genre_key = ",".join(sorted(_clean_slug(value) for value in genre_values if _clean_slug(value)))
     return (
-        "manga:otruyen-filtered:v2:"
+        "manga:otruyen-filtered:v3:"
         f"p{page}:l{limit}:base={_clean_slug(base_slug)}:"
         f"g={genre_key}:s={_clean_slug(status_value)}:sort={_clean_slug(sort)}:"
         f"mature={1 if show_mature else 0}"
@@ -2027,6 +2027,11 @@ def _otruyen_filtered_cache_key(
 
 
 def _cache_otruyen_filtered_payload(cache_key: str, payload: dict[str, Any]) -> None:
+    items = (((payload.get("data") or {}).get("items") or []))
+    pagination = (((payload.get("data") or {}).get("params") or {}).get("pagination") or {})
+    total_items = _safe_int(pagination.get("totalItems"))
+    if isinstance(items, list) and not items and total_items > 0:
+        return
     raw = json.dumps(payload, ensure_ascii=False)
     cache.set(cache_key, raw, ttl=OTRUYEN_FILTERED_CACHE_TTL_SECONDS)
     cache.set(f"{cache_key}:stale", raw, ttl=COMBINED_LIST_STALE_TTL_SECONDS)
@@ -2264,6 +2269,12 @@ async def _build_otruyen_filtered_payload(
     }
     selected_base_slug = _clean_slug(base_slug) or (next(iter(required_genres), ""))
     use_category_source = bool(selected_base_slug)
+    effective_required_genres = set(required_genres)
+    if use_category_source and selected_base_slug in effective_required_genres:
+        # The category endpoint already guarantees the base genre. Some OTruyen
+        # rows omit category metadata, so requiring that same slug again can
+        # incorrectly turn a valid popular tag page into an empty result.
+        effective_required_genres.discard(selected_base_slug)
     list_type = _otruyen_list_type_for_status(status_value)
 
     async def fetch_page(target_page: int) -> dict[str, Any]:
@@ -2294,7 +2305,7 @@ async def _build_otruyen_filtered_payload(
                 continue
             if not _otruyen_item_matches_filters(
                 raw_item,
-                required_genres=required_genres,
+                required_genres=effective_required_genres,
                 status_value=status_value,
                 show_mature=show_mature,
                 hidden=hidden,
@@ -3148,7 +3159,7 @@ async def _build_mangadex_popular_filtered_search(
     )
     upstream_limit = min(100, max(safe_limit, 100))
     cache_key = (
-        "manga:mangadex-popular-filtered:v2:"
+        "manga:mangadex-popular-filtered:v3:"
         f"p={safe_page}:l={safe_limit}:target={candidate_target}:"
         f"q={str(keyword or '').strip().lower()}:lang={translated_language}:"
         f"g={','.join(sorted(genre_values))}:orig={','.join(sorted(original_language_values))}:"
@@ -3352,9 +3363,11 @@ async def _build_mangadex_popular_filtered_search(
             },
         }
     }
-    raw = json.dumps(result, ensure_ascii=False)
-    cache.set(cache_key, raw, ttl=MANGADEX_POPULAR_FILTERED_CACHE_TTL_SECONDS)
-    cache.set(f"{cache_key}:stale", raw, ttl=COMBINED_LIST_STALE_TTL_SECONDS)
+    result_total_items = max(upstream_total, len(sorted_items))
+    if page_items or result_total_items <= 0:
+        raw = json.dumps(result, ensure_ascii=False)
+        cache.set(cache_key, raw, ttl=MANGADEX_POPULAR_FILTERED_CACHE_TTL_SECONDS)
+        cache.set(f"{cache_key}:stale", raw, ttl=COMBINED_LIST_STALE_TTL_SECONDS)
     return result
 
 
