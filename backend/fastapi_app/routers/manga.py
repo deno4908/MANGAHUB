@@ -2042,6 +2042,11 @@ OTRUYEN_FILTERED_POPULAR_SCAN_PAGE_CAP = _env_int(
     96,
     minimum=12,
 )
+OTRUYEN_FILTERED_POPULAR_SNAPSHOT_TTL_SECONDS = _env_int(
+    "OTRUYEN_FILTERED_POPULAR_SNAPSHOT_TTL_SECONDS",
+    OTRUYEN_FILTERED_CACHE_TTL_SECONDS,
+    minimum=30,
+)
 
 
 def _otruyen_filtered_cache_key(
@@ -2056,10 +2061,57 @@ def _otruyen_filtered_cache_key(
 ) -> str:
     genre_key = ",".join(sorted(_clean_slug(value) for value in genre_values if _clean_slug(value)))
     return (
-        "manga:otruyen-filtered:v3:"
+        "manga:otruyen-filtered:v4:"
         f"p{page}:l{limit}:base={_clean_slug(base_slug)}:"
         f"g={genre_key}:s={_clean_slug(status_value)}:sort={_clean_slug(sort)}:"
         f"mature={1 if show_mature else 0}"
+    )
+
+
+def _otruyen_filtered_popular_snapshot_cache_key(
+    *,
+    base_slug: str,
+    genre_values: list[str],
+    status_value: str,
+    show_mature: bool,
+) -> str:
+    """Key for the shared ranked candidate window used by popular pages."""
+    genre_key = ",".join(sorted(_clean_slug(value) for value in genre_values if _clean_slug(value)))
+    return (
+        "manga:otruyen-filtered:popular-snapshot:v1:"
+        f"base={_clean_slug(base_slug)}:g={genre_key}:s={_clean_slug(status_value)}:"
+        f"mature={1 if show_mature else 0}"
+    )
+
+
+def _load_otruyen_filtered_popular_snapshot(cache_key: str) -> dict[str, Any] | None:
+    snapshot = _load_json_cache(cache_key)
+    if not isinstance(snapshot, dict):
+        return None
+
+    items = snapshot.get("items")
+    if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+        return None
+
+    scanned_pages = _safe_int(snapshot.get("scanned_pages"))
+    total_source_pages = _safe_int(snapshot.get("total_source_pages"))
+    scan_page_limit = _safe_int(snapshot.get("scan_page_limit"))
+    if scanned_pages < 1 or total_source_pages < 1 or scan_page_limit < 1:
+        return None
+
+    return snapshot
+
+
+def _cache_otruyen_filtered_popular_snapshot(cache_key: str, snapshot: dict[str, Any]) -> None:
+    """Cache one ranked OTruyen candidate window for every page of a filter."""
+    items = snapshot.get("items")
+    if not isinstance(items, list) or not items:
+        # An upstream hiccup must not turn into a shared empty popular catalog.
+        return
+    cache.set(
+        cache_key,
+        json.dumps(snapshot, ensure_ascii=False),
+        ttl=OTRUYEN_FILTERED_POPULAR_SNAPSHOT_TTL_SECONDS,
     )
 
 
@@ -2282,6 +2334,57 @@ def _sort_otruyen_filtered_items(
     return [item for _, item in decorated]
 
 
+def _otruyen_filtered_page_payload(
+    *,
+    sorted_items: list[dict[str, Any]],
+    safe_page: int,
+    safe_limit: int,
+    required_genres: set[str],
+    status_value: str,
+    sort: str,
+    total_source_pages: int,
+    scanned_page_count: int,
+    scan_page_limit: int,
+    popular_scan: bool,
+) -> dict[str, Any]:
+    """Render one page from an already filtered and sorted OTruyen window."""
+    offset = (safe_page - 1) * safe_limit
+    page_items = sorted_items[offset: offset + safe_limit]
+
+    scanned_all = scanned_page_count >= total_source_pages
+    scanned_popular_window = popular_scan and scanned_page_count >= scan_page_limit
+    if scanned_all:
+        total_items = len(sorted_items)
+    else:
+        scanned_ratio = max(1, scanned_page_count) / max(1, total_source_pages)
+        estimated_total = math.ceil(len(sorted_items) / scanned_ratio)
+        total_items = max(len(sorted_items), safe_page * safe_limit + 1, estimated_total)
+
+    return {
+        "status": "success",
+        "data": {
+            "items": page_items,
+            "params": {
+                "pagination": {
+                    "currentPage": safe_page,
+                    "totalItemsPerPage": safe_limit,
+                    "totalItems": total_items,
+                },
+                "filters": {
+                    "genre_slugs": sorted(required_genres),
+                    "status": _normalize_otruyen_status(status_value),
+                    "sort": _clean_slug(sort) or "latest",
+                    "source_pages_scanned": scanned_page_count,
+                    "source_pages_total": total_source_pages,
+                    "source_scan_complete": scanned_all,
+                    "source_popular_scan_complete": scanned_popular_window,
+                    "source_scan_page_limit": scan_page_limit,
+                },
+            },
+        },
+    }
+
+
 async def _build_otruyen_filtered_payload(
     *,
     genre_values: list[str],
@@ -2305,14 +2408,56 @@ async def _build_otruyen_filtered_payload(
         if _clean_slug(value)
     }
     selected_base_slug = _clean_slug(base_slug) or (next(iter(required_genres), ""))
-    use_category_source = bool(selected_base_slug)
+    normalized_status_value = _normalize_otruyen_status(status_value)
+    # For an intersection such as Romance + Completed, the status list is a
+    # much narrower source than the whole Romance category. We still apply all
+    # genre checks below, so this changes fetch cost rather than result logic.
+    use_category_source = bool(selected_base_slug) and not normalized_status_value
     effective_required_genres = set(required_genres)
     if use_category_source and selected_base_slug in effective_required_genres:
         # The category endpoint already guarantees the base genre. Some OTruyen
         # rows omit category metadata, so requiring that same slug again can
         # incorrectly turn a valid popular tag page into an empty result.
         effective_required_genres.discard(selected_base_slug)
-    list_type = _otruyen_list_type_for_status(status_value)
+    list_type = _otruyen_list_type_for_status(normalized_status_value)
+    normalized_sort = _clean_slug(sort) or "latest"
+    popular_scan = normalized_sort == "popular"
+    popular_snapshot_key = _otruyen_filtered_popular_snapshot_cache_key(
+        base_slug=selected_base_slug,
+        genre_values=genre_values,
+        status_value=normalized_status_value,
+        show_mature=show_mature,
+    )
+
+    if popular_scan:
+        popular_snapshot = _load_otruyen_filtered_popular_snapshot(popular_snapshot_key)
+        snapshot_item_count = len((popular_snapshot or {}).get("items") or [])
+        snapshot_scanned_pages = _safe_int((popular_snapshot or {}).get("scanned_pages"))
+        snapshot_total_source_pages = _safe_int((popular_snapshot or {}).get("total_source_pages"))
+        # A snapshot created for an earlier page can be too shallow for a deep
+        # direct link. Rebuild and extend it below instead of returning an empty
+        # page that makes the client issue a second latest-sort request.
+        snapshot_covers_page = (
+            snapshot_item_count >= target_count
+            or snapshot_scanned_pages >= snapshot_total_source_pages
+        )
+        if popular_snapshot is not None and snapshot_covers_page:
+            payload = _otruyen_filtered_page_payload(
+                sorted_items=popular_snapshot["items"],
+                safe_page=safe_page,
+                safe_limit=safe_limit,
+                required_genres=required_genres,
+                status_value=status_value,
+                sort=sort,
+                total_source_pages=_safe_int(popular_snapshot.get("total_source_pages")),
+                scanned_page_count=_safe_int(popular_snapshot.get("scanned_pages")),
+                scan_page_limit=_safe_int(popular_snapshot.get("scan_page_limit")),
+                popular_scan=True,
+            )
+            await _attach_overrides_to_otruyen_payload(payload, db)
+            if attach_ratings:
+                await _async_attach_ratings_to_items(payload, db, user)
+            return payload
 
     async def fetch_page(target_page: int) -> dict[str, Any]:
         if use_category_source:
@@ -2322,7 +2467,6 @@ async def _build_otruyen_filtered_payload(
     first_payload = await fetch_page(1)
     total_source_pages = min(_otruyen_payload_total_pages(first_payload), OTRUYEN_FILTERED_MAX_SCAN_PAGES)
     exact_scan = total_source_pages <= OTRUYEN_FILTERED_EXACT_SCAN_PAGE_CAP
-    popular_scan = (_clean_slug(sort) or "latest") == "popular"
     scan_page_limit = total_source_pages
     if popular_scan and not exact_scan:
         scan_page_limit = min(total_source_pages, OTRUYEN_FILTERED_POPULAR_SCAN_PAGE_CAP)
@@ -2331,6 +2475,7 @@ async def _build_otruyen_filtered_payload(
     collected: list[dict[str, Any]] = []
     seen_items: set[str] = set()
     scanned_pages: set[int] = set()
+    failed_source_pages: set[int] = set()
     views_lookup = await asyncio.to_thread(_fetch_local_views_lookup, db)
 
     def append_payload(payload: Any) -> None:
@@ -2378,43 +2523,54 @@ async def _build_otruyen_filtered_payload(
             scanned_pages.add(target_page)
             if payload is not None:
                 append_payload(payload)
+            else:
+                failed_source_pages.add(target_page)
+
+    # The initial popular window protects the upstream from an unbounded scan.
+    # For a deep page, however, it may contain fewer filtered rows than the page
+    # itself needs. Extend only until that page can be filled; otherwise the UI
+    # falls back to a second, expensive latest-sort request.
+    if popular_scan and len(collected) < target_count and scan_page_limit < total_source_pages:
+        for start_page in range(scan_page_limit + 1, total_source_pages + 1, OTRUYEN_FILTERED_FETCH_CHUNK):
+            end_page = min(total_source_pages, start_page + OTRUYEN_FILTERED_FETCH_CHUNK - 1)
+            page_numbers = [target_page for target_page in range(start_page, end_page + 1) if target_page not in scanned_pages]
+            if not page_numbers:
+                continue
+            rows = await asyncio.gather(*(load_one(target_page) for target_page in page_numbers))
+            scan_page_limit = end_page
+            for target_page, payload in sorted(rows, key=lambda row: row[0]):
+                scanned_pages.add(target_page)
+                if payload is not None:
+                    append_payload(payload)
+                else:
+                    failed_source_pages.add(target_page)
+            if len(collected) >= target_count:
+                break
 
     sorted_items = _sort_otruyen_filtered_items(collected, sort=sort)
-    offset = (safe_page - 1) * safe_limit
-    page_items = sorted_items[offset: offset + safe_limit]
-
-    scanned_all = len(scanned_pages) >= total_source_pages
-    scanned_popular_window = popular_scan and len(scanned_pages) >= scan_page_limit
-    if scanned_all:
-        total_items = len(sorted_items)
-    else:
-        scanned_ratio = max(1, len(scanned_pages)) / max(1, total_source_pages)
-        estimated_total = math.ceil(len(sorted_items) / scanned_ratio)
-        total_items = max(len(sorted_items), target_count + 1, estimated_total)
-
-    payload = {
-        "status": "success",
-        "data": {
-            "items": page_items,
-            "params": {
-                "pagination": {
-                    "currentPage": safe_page,
-                    "totalItemsPerPage": safe_limit,
-                    "totalItems": total_items,
-                },
-                "filters": {
-                    "genre_slugs": sorted(required_genres),
-                    "status": _normalize_otruyen_status(status_value),
-                    "sort": _clean_slug(sort) or "latest",
-                    "source_pages_scanned": len(scanned_pages),
-                    "source_pages_total": total_source_pages,
-                    "source_scan_complete": scanned_all,
-                    "source_popular_scan_complete": scanned_popular_window,
-                    "source_scan_page_limit": scan_page_limit,
-                },
+    if popular_scan and not failed_source_pages:
+        _cache_otruyen_filtered_popular_snapshot(
+            popular_snapshot_key,
+            {
+                "items": sorted_items,
+                "total_source_pages": total_source_pages,
+                "scanned_pages": len(scanned_pages),
+                "scan_page_limit": scan_page_limit,
             },
-        },
-    }
+        )
+
+    payload = _otruyen_filtered_page_payload(
+        sorted_items=sorted_items,
+        safe_page=safe_page,
+        safe_limit=safe_limit,
+        required_genres=required_genres,
+        status_value=status_value,
+        sort=sort,
+        total_source_pages=total_source_pages,
+        scanned_page_count=len(scanned_pages),
+        scan_page_limit=scan_page_limit,
+        popular_scan=popular_scan,
+    )
     await _attach_overrides_to_otruyen_payload(payload, db)
     if attach_ratings or _clean_slug(sort) == "rating":
         await _async_attach_ratings_to_items(payload, db, user)

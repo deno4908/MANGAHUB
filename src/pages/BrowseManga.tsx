@@ -5503,7 +5503,10 @@ const BrowseManga = () => {
 
   // Prefetch next OTruyen page
   useEffect(() => {
-    if (isClientPaginationMode) return;
+    // A filtered OTruyen page can scan a large upstream window. Starting page
+    // N + 1 while page N is still loading doubles that work and slows direct
+    // jumps such as completed Romance page 25.
+    if (isClientPaginationMode || useOTruyenFilteredServerMode) return;
     const nextPage = page + 1;
     if (nextPage > otruyenServerPages) return;
     if (useCombinedList) {
@@ -5516,32 +5519,6 @@ const BrowseManga = () => {
             mangadex: (payload?.mangadex?.mangas || []) as MangaDexCatalogItem[],
           };
         },
-        staleTime: 5 * 60 * 1000,
-        gcTime: 2 * 60 * 1000,
-      });
-      return;
-    }
-    if (useOTruyenFilteredServerMode) {
-      queryClient.prefetchQuery({
-        queryKey: [
-          'manga',
-          'otruyen-filtered',
-          directOTruyenFilterGenreSlugs,
-          filters.status,
-          filters.sort,
-          nextPage,
-          showMatureContent,
-        ],
-        queryFn: async () => adaptListData(await mangaApi.getOTruyenFiltered({
-          genreSlugs: directOTruyenFilterGenreSlugs,
-          status: filters.status,
-          sort: filters.sort,
-          page: nextPage,
-          limit: BROWSE_PAGE_SIZE,
-          showMature: showMatureContent,
-          baseSlug: directOTruyenFilterGenreSlugs[0] || activeCategorySlug,
-          attachRatings: filters.sort === 'rating',
-        })),
         staleTime: 5 * 60 * 1000,
         gcTime: 2 * 60 * 1000,
       });
