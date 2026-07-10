@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -30,7 +30,12 @@ const MANGADEX_SEARCH_INITIAL_LIMIT = 3000;
 const MANGADEX_SEARCH_LIMIT_STEP = 1500;
 const MANGADEX_SEARCH_MAX_LIMIT = 10000;
 const MANGADEX_SEARCH_PREFETCH_PAGES = 4;
-const SEARCH_PAGE_PREFETCH_RADIUS = 2;
+const SEARCH_PAGE_PREFETCH_COUNT = 1;
+
+const parseSearchPage = (value: string | null) => {
+  const page = Number.parseInt(String(value || ""), 10);
+  return Number.isFinite(page) && page > 0 ? page : 1;
+};
 
 type MangaDexCatalogItem = {
   id: string;
@@ -136,25 +141,55 @@ const dedupeManga = (items: Manga[]): Manga[] => {
 const SearchPage = () => {
   const queryClient = useQueryClient();
   const showMatureContent = useSettingsStore((s) => s.settings.privacy.showMatureContent);
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const urlQuery = searchParams.get("q") || "";
   const [query, setQuery] = useState(urlQuery);
-  const [page, setPage] = useState(1);
+  const page = parseSearchPage(searchParams.get("page"));
   const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
   const [debouncedQuery, setDebouncedQuery] = useState(urlQuery);
   const [mangaDexSearchLimit, setMangaDexSearchLimit] = useState(MANGADEX_SEARCH_INITIAL_LIMIT);
+
+  const setSearchLocation = useCallback(
+    (nextQuery: string, nextPage: number, replace = false) => {
+      const nextParams = new URLSearchParams(searchParams);
+      const normalizedQuery = nextQuery.trim();
+      const safePage = Math.max(1, Math.floor(Number(nextPage) || 1));
+
+      if (normalizedQuery) {
+        nextParams.set("q", normalizedQuery);
+      } else {
+        nextParams.delete("q");
+      }
+
+      if (safePage > 1) {
+        nextParams.set("page", String(safePage));
+      } else {
+        nextParams.delete("page");
+      }
+
+      setSearchParams(nextParams, { replace });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const setPage = useCallback(
+    (nextPage: number, replace = false) => {
+      setSearchLocation(query, nextPage, replace);
+    },
+    [query, setSearchLocation],
+  );
 
   useEffect(() => {
     if (urlQuery !== query) {
       setQuery(urlQuery);
       setDebouncedQuery(urlQuery);
-      setPage(1);
     }
-  }, [urlQuery]);
+  }, [query, urlQuery]);
 
   const handleQueryChange = (val: string) => {
     setQuery(val);
-    setPage(1);
+    // Keep a typed search shareable without adding a history entry per keystroke.
+    setSearchLocation(val, 1, true);
   };
 
   useEffect(() => {
@@ -170,6 +205,7 @@ const SearchPage = () => {
     data: searchData,
     isLoading,
     isFetching: isSearchFetching,
+    isPlaceholderData: isSearchPlaceholderData,
   } = useSearch(trimmedDebouncedQuery, serverSearchPage);
   const { data: homepageData } = useHomepage();
   const { data: categories = [] } = useCategories();
@@ -208,12 +244,15 @@ const SearchPage = () => {
 
   useEffect(() => {
     if (!trimmedDebouncedQuery || selectedGenres.length > 0) return;
+    if (isLoading || isSearchFetching || isSearchPlaceholderData) return;
+    if (Number(searchData?.currentPage || 0) !== page) return;
     const totalPages = Number(searchData?.totalPages || 0);
     if (!Number.isFinite(totalPages) || totalPages <= 1) return;
 
-    const targets = Array.from({ length: SEARCH_PAGE_PREFETCH_RADIUS }, (_, index) => page + index + 1)
-      .concat(Array.from({ length: SEARCH_PAGE_PREFETCH_RADIUS }, (_, index) => page - index - 1))
-      .filter((targetPage) => targetPage >= 1 && targetPage <= totalPages && targetPage !== page);
+    const targets = Array.from(
+      { length: SEARCH_PAGE_PREFETCH_COUNT },
+      (_, index) => page + index + 1,
+    ).filter((targetPage) => targetPage <= totalPages);
 
     Array.from(new Set(targets)).forEach((targetPage) => {
       void queryClient.prefetchQuery({
@@ -229,7 +268,17 @@ const SearchPage = () => {
         gcTime: 10 * 60 * 1000,
       });
     });
-  }, [page, queryClient, searchData?.totalPages, selectedGenres.length, trimmedDebouncedQuery]);
+  }, [
+    isLoading,
+    isSearchFetching,
+    isSearchPlaceholderData,
+    page,
+    queryClient,
+    searchData?.currentPage,
+    searchData?.totalPages,
+    selectedGenres.length,
+    trimmedDebouncedQuery,
+  ]);
 
   const mangaDexCatalogItems = useMemo(
     () => mangaDexCatalogToManga(mangaDexCatalogQuery.data || []),
@@ -313,6 +362,12 @@ const SearchPage = () => {
 
   const loadingState =
     (isLoading && allResults.length === 0) ||
+    (
+      !useClientPagination &&
+      Boolean(trimmedDebouncedQuery) &&
+      isSearchFetching &&
+      (isSearchPlaceholderData || Number(searchData?.currentPage || 0) !== serverSearchPage)
+    ) ||
     (
       shouldLoadMangaDexCatalog &&
       mangaDexCatalogQuery.isLoading &&
