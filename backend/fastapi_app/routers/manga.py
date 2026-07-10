@@ -2047,6 +2047,11 @@ OTRUYEN_FILTERED_POPULAR_SNAPSHOT_TTL_SECONDS = _env_int(
     OTRUYEN_FILTERED_CACHE_TTL_SECONDS,
     minimum=30,
 )
+OTRUYEN_FILTERED_EXACT_RESULT_PAGE_CAP = _env_int(
+    "OTRUYEN_FILTERED_EXACT_RESULT_PAGE_CAP",
+    12,
+    minimum=1,
+)
 
 
 def _otruyen_filtered_cache_key(
@@ -2061,7 +2066,7 @@ def _otruyen_filtered_cache_key(
 ) -> str:
     genre_key = ",".join(sorted(_clean_slug(value) for value in genre_values if _clean_slug(value)))
     return (
-        "manga:otruyen-filtered:v4:"
+        "manga:otruyen-filtered:v5:"
         f"p{page}:l{limit}:base={_clean_slug(base_slug)}:"
         f"g={genre_key}:s={_clean_slug(status_value)}:sort={_clean_slug(sort)}:"
         f"mature={1 if show_mature else 0}"
@@ -2078,7 +2083,7 @@ def _otruyen_filtered_popular_snapshot_cache_key(
     """Key for the shared ranked candidate window used by popular pages."""
     genre_key = ",".join(sorted(_clean_slug(value) for value in genre_values if _clean_slug(value)))
     return (
-        "manga:otruyen-filtered:popular-snapshot:v1:"
+        "manga:otruyen-filtered:popular-snapshot:v2:"
         f"base={_clean_slug(base_slug)}:g={genre_key}:s={_clean_slug(status_value)}:"
         f"mature={1 if show_mature else 0}"
     )
@@ -2526,11 +2531,25 @@ async def _build_otruyen_filtered_payload(
             else:
                 failed_source_pages.add(target_page)
 
+    scanned_page_count = max(1, len(scanned_pages))
+    estimated_total_items = math.ceil(len(collected) * total_source_pages / scanned_page_count)
+    estimated_result_pages = math.ceil(estimated_total_items / safe_limit)
+    should_complete_sparse_popular_scan = (
+        popular_scan
+        and not exact_scan
+        and not failed_source_pages
+        and estimated_result_pages <= OTRUYEN_FILTERED_EXACT_RESULT_PAGE_CAP
+    )
+
     # The initial popular window protects the upstream from an unbounded scan.
-    # For a deep page, however, it may contain fewer filtered rows than the page
-    # itself needs. Extend only until that page can be filled; otherwise the UI
-    # falls back to a second, expensive latest-sort request.
-    if popular_scan and len(collected) < target_count and scan_page_limit < total_source_pages:
+    # Complete sparse result sets so the first page never advertises estimated
+    # pages that disappear later. Deep pages also extend only as far as needed
+    # to fill themselves, avoiding a second latest-sort request from the UI.
+    if (
+        popular_scan
+        and scan_page_limit < total_source_pages
+        and (len(collected) < target_count or should_complete_sparse_popular_scan)
+    ):
         for start_page in range(scan_page_limit + 1, total_source_pages + 1, OTRUYEN_FILTERED_FETCH_CHUNK):
             end_page = min(total_source_pages, start_page + OTRUYEN_FILTERED_FETCH_CHUNK - 1)
             page_numbers = [target_page for target_page in range(start_page, end_page + 1) if target_page not in scanned_pages]
@@ -2544,7 +2563,7 @@ async def _build_otruyen_filtered_payload(
                     append_payload(payload)
                 else:
                     failed_source_pages.add(target_page)
-            if len(collected) >= target_count:
+            if len(collected) >= target_count and not should_complete_sparse_popular_scan:
                 break
 
     sorted_items = _sort_otruyen_filtered_items(collected, sort=sort)
