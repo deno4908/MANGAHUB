@@ -1890,35 +1890,17 @@ const BrowseManga = () => {
       }));
 
       const requestPopularFallbackPage = async () => {
-        const targetCount = Math.max(BROWSE_PAGE_SIZE, targetPage * BROWSE_PAGE_SIZE);
-        const chunkLimit = 100;
-        const chunkPages = Math.max(1, Math.min(3, Math.ceil(targetCount / chunkLimit)));
-        const chunks = await Promise.all(
-          Array.from({ length: chunkPages }, (_, index) =>
-            requestPage('latest', {
-              page: index + 1,
-              limit: chunkLimit,
-              timeoutMs: 16_000,
-            })
-          )
-        );
-        const fallback = chunks[0] || { items: [], totalItems: 0, totalPages: 1, currentPage: 1 };
-        const windowItems = dedupeMangaById(chunks.flatMap((chunk) => chunk.items || []));
-        const sortedItems = sortBrowseWindowItems(windowItems, 'popular');
-        const start = (Math.max(1, targetPage) - 1) * BROWSE_PAGE_SIZE;
-        const fallbackTotalItems = Math.max(
-          fallback.totalItems,
-          ...chunks.map((chunk) => chunk.totalItems || 0),
-          sortedItems.length,
-        );
+        // This is an availability fallback, not the global popular ranking.
+        // Request the actual page: slicing a small page-1 window by a high
+        // offset made pages such as 277 look empty although MangaDex had data.
+        const fallback = await requestPage('latest', {
+          page: targetPage,
+          limit: BROWSE_PAGE_SIZE,
+          timeoutMs: 16_000,
+        });
         return {
           ...fallback,
-          items: sortedItems.slice(start, start + BROWSE_PAGE_SIZE),
-          totalItems: fallbackTotalItems,
-          totalPages: Math.max(
-            ...chunks.map((chunk) => chunk.totalPages || 1),
-            Math.ceil(fallbackTotalItems / BROWSE_PAGE_SIZE),
-          ),
+          items: sortBrowseWindowItems(fallback.items || [], 'popular'),
         };
       };
 

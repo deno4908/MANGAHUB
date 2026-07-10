@@ -1636,12 +1636,21 @@ async def home(
 
 @router.get("/homepage")
 async def homepage(
+    include_featured: bool = Query(False),
     user=Depends(get_optional_user),
     db=Depends(get_supabase_public),
 ):
     """Combined homepage data — returns both latest + ongoing in one request."""
     import asyncio
 
+    # Only the actual Home screen needs featured titles. Starting it here
+    # keeps that screen to one request without making other consumers of this
+    # endpoint (such as search suggestions) more expensive.
+    featured_task = (
+        asyncio.create_task(featured_manga(limit=12, user=user, db=db))
+        if include_featured
+        else None
+    )
     latest, ongoing, hidden = await asyncio.gather(
         otruyen_service.get_list("truyen-moi", 1),
         otruyen_service.get_list("dang-phat-hanh", 1),
@@ -1652,16 +1661,39 @@ async def homepage(
             items = (src.get("data") or {}).get("items") or []
             if isinstance(items, list):
                 src["data"]["items"] = _filter_hidden(items, hidden)
-    # Run overrides + ratings in parallel (all use thread pool, won't block event loop)
+    # Both sections contain independent items, so enrich their combined item
+    # list once. The objects are shared with their source payloads, which
+    # avoids duplicate override and rating database lookups without changing
+    # either response section.
+    home_items = [
+        item
+        for source in (latest, ongoing)
+        for item in (((source.get("data") or {}).get("items") or []) if isinstance(source, dict) else [])
+        if isinstance(item, dict)
+    ]
+    home_items_payload = {"data": {"items": home_items}}
     await asyncio.gather(
-        _attach_overrides_to_otruyen_payload(latest, db),
-        _attach_overrides_to_otruyen_payload(ongoing, db),
+        _attach_overrides_to_otruyen_payload(home_items_payload, db),
+        _async_attach_ratings_to_items(home_items_payload, db, user),
     )
-    await asyncio.gather(
-        _async_attach_ratings_to_items(latest, db, user),
-        _async_attach_ratings_to_items(ongoing, db, user),
-    )
-    return {"latest": latest, "ongoing": ongoing}
+    result = {"latest": latest, "ongoing": ongoing}
+    if featured_task is not None:
+        try:
+            result["featured"] = await featured_task
+        except Exception:
+            result["featured"] = {
+                "data": {
+                    "items": [],
+                    "params": {
+                        "pagination": {
+                            "currentPage": 1,
+                            "totalItemsPerPage": 12,
+                            "totalItems": 0,
+                        }
+                    },
+                }
+            }
+    return result
 
 
 def _canonical_featured_slug(value: Any) -> str:
@@ -3251,14 +3283,14 @@ async def _build_mangadex_popular_filtered_search(
     )
     upstream_limit = min(100, max(safe_limit, 100))
     cache_key = (
-        "manga:mangadex-popular-filtered:v8:"
+        "manga:mangadex-popular-filtered:v9:"
         f"p={safe_page}:l={safe_limit}:target={candidate_target}:ll={_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT}:"
         f"q={str(keyword or '').strip().lower()}:lang={translated_language}:"
         f"g={','.join(sorted(genre_values))}:orig={','.join(sorted(original_language_values))}:"
         f"s={','.join(sorted(status_values))}:rating={','.join(sorted(content_ratings))}"
     )
     snapshot_cache_key = (
-        "manga:mangadex-popular-filtered-snapshot:v8:"
+        "manga:mangadex-popular-filtered-snapshot:v9:"
         f"l={safe_limit}:target={candidate_target}:ll={_MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT}:"
         f"q={str(keyword or '').strip().lower()}:lang={translated_language}:"
         f"g={','.join(sorted(genre_values))}:orig={','.join(sorted(original_language_values))}:"
@@ -3273,24 +3305,31 @@ async def _build_mangadex_popular_filtered_search(
         snapshot_items = snapshot.get("items") or []
         if isinstance(snapshot_items, list) and snapshot_items:
             snapshot_total = _safe_int(snapshot.get("totalItems"))
-            result = {
-                "data": {
-                    "items": snapshot_items[offset: offset + safe_limit],
-                    "params": {
-                        "pagination": {
-                            "totalItems": max(snapshot_total, len(snapshot_items)),
-                            "totalItemsPerPage": safe_limit,
-                            "currentPage": safe_page,
-                            "candidateItems": len(snapshot_items),
-                            "candidateWindow": candidate_target,
-                        }
-                    },
+            snapshot_page_items = snapshot_items[offset: offset + safe_limit]
+            snapshot_is_complete = snapshot_total <= len(snapshot_items)
+
+            # A snapshot only contains the bounded candidate window used to
+            # rank local views. Never use a short final slice as if it covered
+            # the full MangaDex result set, or high page numbers become empty.
+            if snapshot_is_complete or len(snapshot_page_items) >= safe_limit:
+                result = {
+                    "data": {
+                        "items": snapshot_page_items,
+                        "params": {
+                            "pagination": {
+                                "totalItems": max(snapshot_total, len(snapshot_items)),
+                                "totalItemsPerPage": safe_limit,
+                                "currentPage": safe_page,
+                                "candidateItems": len(snapshot_items),
+                                "candidateWindow": candidate_target,
+                            }
+                        },
+                    }
                 }
-            }
-            raw = json.dumps(result, ensure_ascii=False)
-            cache.set(cache_key, raw, ttl=MANGADEX_POPULAR_FILTERED_CACHE_TTL_SECONDS)
-            cache.set(f"{cache_key}:stale", raw, ttl=COMBINED_LIST_STALE_TTL_SECONDS)
-            return result
+                raw = json.dumps(result, ensure_ascii=False)
+                cache.set(cache_key, raw, ttl=MANGADEX_POPULAR_FILTERED_CACHE_TTL_SECONDS)
+                cache.set(f"{cache_key}:stale", raw, ttl=COMBINED_LIST_STALE_TTL_SECONDS)
+                return result
 
     views_lookup = await asyncio.to_thread(_fetch_local_views_lookup, db)
     local_view_rows: list[dict[str, Any]] = []

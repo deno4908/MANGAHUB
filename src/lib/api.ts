@@ -1028,7 +1028,10 @@ export const systemApi = {
 
 export const mangaApi = {
   getHome: () => api<any>("/api/manga/home"),
-  getHomepage: () => api<any>("/api/manga/homepage"),
+  getHomepage: (options: { includeFeatured?: boolean } = {}) => {
+    const query = options.includeFeatured ? "?include_featured=true" : "";
+    return api<any>(`/api/manga/homepage${query}`);
+  },
   getFeatured: (limit = 12) => api<any>(`/api/manga/featured?limit=${limit}`),
   getMangaDexHomeBanner: (
     options: {

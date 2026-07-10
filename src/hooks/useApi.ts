@@ -312,24 +312,38 @@ export function useHomepageCombined(maxChapters = 120) {
         ? (cachedCatalogRaw as HomepageMangaDexItem[])
         : [];
 
-      const homepagePromise = withTimeout(
-        mangaApi.getHomepage(),
-        HOMEPAGE_CORE_TIMEOUT_MS,
-      );
-      const featuredPromise = withTimeout(
-        mangaApi.getFeatured(12),
-        HOMEPAGE_CORE_TIMEOUT_MS,
-      );
+      type HomepagePayload = {
+        latest?: unknown;
+        ongoing?: unknown;
+        featured?: unknown;
+      };
 
-      const [homepageResult, featuredResult] = await Promise.allSettled([
-        homepagePromise,
-        featuredPromise,
-      ]);
+      let homepagePayload: HomepagePayload = {};
+      try {
+        homepagePayload = await withTimeout(
+          mangaApi.getHomepage({ includeFeatured: true }),
+          HOMEPAGE_CORE_TIMEOUT_MS,
+        ) as HomepagePayload;
+      } catch {
+        // The fallback below still gives older or temporarily unavailable
+        // backends a chance to render featured titles.
+      }
 
-      const homepagePayload = homepageResult.status === "fulfilled" ? homepageResult.value : {};
-      const featuredPayload = featuredResult.status === "fulfilled" ? featuredResult.value : {};
-      const latest = adaptListData((homepagePayload as any).latest || {});
-      const ongoing = adaptListData((homepagePayload as any).ongoing || {});
+      // Newer backends include featured titles in /homepage. Keep the small
+      // fallback for a rolling deployment where a frontend arrives first.
+      let featuredPayload = homepagePayload.featured;
+      if (featuredPayload === undefined) {
+        try {
+          featuredPayload = await withTimeout(
+            mangaApi.getFeatured(12),
+            HOMEPAGE_CORE_TIMEOUT_MS,
+          );
+        } catch {
+          featuredPayload = {};
+        }
+      }
+      const latest = adaptListData(homepagePayload.latest || {});
+      const ongoing = adaptListData(homepagePayload.ongoing || {});
       const featured = adaptListData(featuredPayload || {});
 
       return {

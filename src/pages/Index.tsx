@@ -1103,6 +1103,7 @@ const Index = () => {
   const { data: announcementData } = useQuery({
     queryKey: ['site-announcements', 'active-home-popup'],
     queryFn: () => announcementApi.getActive(3),
+    enabled: isHomepageCoreReady,
     staleTime: 60 * 1000,
     retry: 1,
     refetchOnWindowFocus: true,
@@ -1865,6 +1866,7 @@ const Index = () => {
         return { trending: [] };
       }
     },
+    enabled: canRunHomeDeferredQueries,
     staleTime: 2 * 60 * 1000,
     retry: 1,
     placeholderData: (previousData) => previousData,
@@ -2056,7 +2058,7 @@ const Index = () => {
   }, [heroBannerItems, latestMergedRated, popularDisplay, topRatedDisplay]);
 
   useEffect(() => {
-    if (!homeCoverWarmupUrls.length) return;
+    if (!canRunHomeDeferredQueries || !homeCoverWarmupUrls.length) return;
     const timers = homeCoverWarmupUrls
       .reduce<string[][]>((chunks, url, index) => {
         const chunkIndex = Math.floor(index / 6);
@@ -2069,7 +2071,7 @@ const Index = () => {
     return () => {
       timers.forEach((timer) => window.clearTimeout(timer));
     };
-  }, [homeCoverWarmupUrls]);
+  }, [canRunHomeDeferredQueries, homeCoverWarmupUrls]);
 
   const isHeroBannerLoading = isHomeSynchronizedLoading || !homeBannerSnapshotReady;
 
