@@ -1072,6 +1072,7 @@ export const mangaApi = {
     ids: string[],
     options?: {
       fast?: boolean;
+      translatedLanguage?: string;
     },
   ) => {
     const normalizedIds = Array.from(
@@ -1089,6 +1090,10 @@ export const mangaApi = {
     });
     if (options?.fast) {
       query.set("fast", "true");
+    }
+    const translatedLanguage = String(options?.translatedLanguage || "vi").trim().toLowerCase();
+    if (translatedLanguage) {
+      query.set("translated_language", translatedLanguage);
     }
     return api<any>(
       `/api/manga/mangadex/latest-chapters?${query.toString()}`,

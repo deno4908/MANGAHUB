@@ -1321,12 +1321,30 @@ def _latest_chapter_info_from_cached_catalog(manga_id: str) -> dict[str, str] | 
     }
 
 
+def _normalize_latest_chapter_language(value: str) -> str:
+    language = str(value or "vi").strip().lower()
+    if language in {"", "all", "any", "*", "non_vi"}:
+        return "vi"
+    return language
+
+
+def _latest_chapter_cache_key(manga_id: str, translated_language: str) -> str:
+    language = _normalize_latest_chapter_language(translated_language)
+    # Keep the established Vietnamese key warm while separating every other
+    # translation so a VI chapter is never shown for a Japanese result.
+    if language == "vi":
+        return f"mangadex:latest-chapter:v{LATEST_CHAPTER_CACHE_VERSION}:{manga_id}"
+    return f"mangadex:latest-chapter:v{LATEST_CHAPTER_CACHE_VERSION}:lang={language}:{manga_id}"
+
+
 async def _get_latest_vi_chapter_for_manga(
     manga_id: str,
     *,
+    translated_language: str = "vi",
     ignore_cache: bool = False,
 ) -> dict[str, str]:
-    cache_key = f"mangadex:latest-chapter:v{LATEST_CHAPTER_CACHE_VERSION}:{manga_id}"
+    language = _normalize_latest_chapter_language(translated_language)
+    cache_key = _latest_chapter_cache_key(manga_id, language)
     if not ignore_cache:
         cached = cache.get(cache_key)
         if cached:
@@ -1335,7 +1353,7 @@ async def _get_latest_vi_chapter_for_manga(
             except Exception:
                 cache.delete(cache_key)
 
-    chapter_info = {"chapter_name": "", "chapter_title": "", "publish_at": ""}
+    chapter_info = {"id": "", "chapter_name": "", "chapter_title": "", "publish_at": ""}
     best_entry: dict[str, Any] | None = None
 
     def _ingest_payload(payload: dict[str, Any]) -> None:
@@ -1345,6 +1363,7 @@ async def _get_latest_vi_chapter_for_manga(
             attributes = (chapter or {}).get("attributes") or {}
             chapter_name = str(attributes.get("chapter") or "").strip()
             candidate_info = {
+                "id": str((chapter or {}).get("id") or "").strip(),
                 "chapter_name": chapter_name or "0",
                 "chapter_title": str(attributes.get("title") or ""),
                 "publish_at": str(attributes.get("publishAt") or ""),
@@ -1366,7 +1385,7 @@ async def _get_latest_vi_chapter_for_manga(
             "/chapter",
             {
                 "manga": manga_id,
-                "translatedLanguage[]": "vi",
+                "translatedLanguage[]": language,
                 "order[chapter]": "desc",
                 "order[publishAt]": "desc",
                 "limit": 80,
@@ -1382,7 +1401,7 @@ async def _get_latest_vi_chapter_for_manga(
                 "/chapter",
                 {
                     "manga": manga_id,
-                    "translatedLanguage[]": "vi",
+                    "translatedLanguage[]": language,
                     "order[publishAt]": "desc",
                     "limit": 120,
                     "offset": 0,
@@ -1408,15 +1427,17 @@ def _extract_manga_id_from_chapter(chapter: dict[str, Any]) -> str:
 async def _get_latest_vi_chapter_for_manga_ids(
     manga_ids: list[str],
     *,
+    translated_language: str = "vi",
     allow_individual_fallback: bool = True,
 ) -> dict[str, dict[str, str]]:
+    language = _normalize_latest_chapter_language(translated_language)
     normalized_ids = [str(manga_id or "").strip() for manga_id in manga_ids]
     normalized_ids = [manga_id for manga_id in dict.fromkeys(normalized_ids) if manga_id]
     result: dict[str, dict[str, str]] = {}
     missing_ids: list[str] = []
 
     for manga_id in normalized_ids:
-        cache_key = f"mangadex:latest-chapter:v{LATEST_CHAPTER_CACHE_VERSION}:{manga_id}"
+        cache_key = _latest_chapter_cache_key(manga_id, language)
         cached = cache.get(cache_key)
         if cached:
             try:
@@ -1437,7 +1458,7 @@ async def _get_latest_vi_chapter_for_manga_ids(
                 "/chapter",
                 {
                     "manga[]": missing_ids,
-                    "translatedLanguage[]": "vi",
+                    "translatedLanguage[]": language,
                     "includes[]": "manga",
                     **order_params,
                     "limit": batch_limit,
@@ -1461,6 +1482,7 @@ async def _get_latest_vi_chapter_for_manga_ids(
                 attributes = chapter.get("attributes") or {}
                 chapter_name = str(attributes.get("chapter") or "").strip()
                 candidate_info = {
+                    "id": str(chapter.get("id") or "").strip(),
                     "chapter_name": chapter_name or "0",
                     "chapter_title": str(attributes.get("title") or ""),
                     "publish_at": str(attributes.get("publishAt") or ""),
@@ -1531,6 +1553,7 @@ async def _get_latest_vi_chapter_for_manga_ids(
                     try:
                         response = await _get_latest_vi_chapter_for_manga(
                             fallback_manga_id,
+                            translated_language=language,
                             ignore_cache=fallback_ignore_cache,
                         )
                     except Exception:
@@ -1565,16 +1588,18 @@ async def _get_latest_vi_chapter_for_manga_ids(
 
         for manga_id in missing_ids:
             catalog_fallback = None if allow_individual_fallback else _latest_chapter_info_from_cached_catalog(manga_id)
+            if language != "vi":
+                catalog_fallback = None
             chapter_info = (
                 found.get(manga_id)
                 or catalog_fallback
-                or {"chapter_name": "", "chapter_title": "", "publish_at": ""}
+                or {"id": "", "chapter_name": "", "chapter_title": "", "publish_at": ""}
             )
             result[manga_id] = chapter_info
             # Only cache successful lookups — don't cache empty results so next request retries
             if str(chapter_info.get("chapter_name") or "").strip():
                 cache.set(
-                    f"mangadex:latest-chapter:v{LATEST_CHAPTER_CACHE_VERSION}:{manga_id}",
+                    _latest_chapter_cache_key(manga_id, language),
                     json.dumps(chapter_info, ensure_ascii=False),
                     ttl=VI_CATALOG_TTL,
                 )
@@ -1584,6 +1609,7 @@ async def _get_latest_vi_chapter_for_manga_ids(
 
 def _to_legacy_item(manga: dict[str, Any], latest_chapter: dict[str, str] | None = None) -> dict[str, Any]:
     category = [{"name": genre, "slug": genre.lower().replace(" ", "-")} for genre in manga.get("genres", [])]
+    chapter_id = str((latest_chapter or {}).get("id") or "").strip()
     chapter_name = str((latest_chapter or {}).get("chapter_name") or manga.get("last_chapter") or "")
     chapter_title = str((latest_chapter or {}).get("chapter_title") or "")
     publish_at = str((latest_chapter or {}).get("publish_at") or manga.get("updated_at") or "")
@@ -1593,7 +1619,7 @@ def _to_legacy_item(manga: dict[str, Any], latest_chapter: dict[str, str] | None
             {
                 "chapter_name": chapter_name,
                 "chapter_title": chapter_title,
-                "chapter_api_data": "",
+                "chapter_api_data": chapter_id,
             }
         )
     author_names = [str(author.get("name") or "").strip() for author in manga.get("authors", []) if author.get("name")]
@@ -2222,9 +2248,10 @@ async def get_vi_catalog(
     raise RuntimeError("MangaDex vi-catalog tạm thời không khả dụng")
 
 
-async def get_latest_vi_chapters_for_manga_ids(
+async def get_latest_chapters_for_manga_ids(
     manga_ids: list[str],
     *,
+    translated_language: str = "vi",
     allow_individual_fallback: bool = True,
 ) -> dict[str, dict[str, str]]:
     normalized_ids = [str(manga_id or "").strip().lower() for manga_id in manga_ids]
@@ -2233,6 +2260,19 @@ async def get_latest_vi_chapters_for_manga_ids(
         return {}
     return await _get_latest_vi_chapter_for_manga_ids(
         normalized_ids,
+        translated_language=translated_language,
+        allow_individual_fallback=allow_individual_fallback,
+    )
+
+
+async def get_latest_vi_chapters_for_manga_ids(
+    manga_ids: list[str],
+    *,
+    allow_individual_fallback: bool = True,
+) -> dict[str, dict[str, str]]:
+    return await get_latest_chapters_for_manga_ids(
+        manga_ids,
+        translated_language="vi",
         allow_individual_fallback=allow_individual_fallback,
     )
 
@@ -2466,7 +2506,7 @@ async def search_manga(
     normalized_language = str(translated_language or "vi").strip().lower()
     if normalized_language in {"", "all", "any"}:
         normalized_language = "all"
-    should_attach_latest = bool(attach_latest) and normalized_language == "vi"
+    should_attach_latest = bool(attach_latest) and normalized_language not in {"all", "non_vi"}
     offset = max(0, int(offset_override)) if offset_override is not None else (page - 1) * limit
     normalized_sort = str(sort or "relevance").strip().lower()
     if normalized_sort not in {"relevance", "latest", "popular", "updated", "title"}:
@@ -2639,7 +2679,8 @@ async def search_manga(
     latest_map: dict[str, dict[str, str]] = {}
     if should_attach_latest:
         latest_map = await _get_latest_vi_chapter_for_manga_ids(
-            [str(parsed.get("id") or "") for parsed in parsed_items]
+            [str(parsed.get("id") or "") for parsed in parsed_items],
+            translated_language=normalized_language,
         )
     items: list[dict[str, Any]] = []
     for parsed in parsed_items:

@@ -1657,6 +1657,9 @@ const BrowseManga = () => {
   const normalizedSearch = String(filters.search || '').trim();
   const hasSearch = normalizedSearch.length > 0;
   const mangaDexTranslatedLanguage = String(filters.translatedLanguage || 'vi').trim().toLowerCase() || 'vi';
+  const mangaDexLatestChapterLanguage = ['all', 'any', '*', 'non_vi'].includes(mangaDexTranslatedLanguage)
+    ? ''
+    : mangaDexTranslatedLanguage;
   const mangaDexHasTranslationFilter = mangaDexTranslatedLanguage !== 'vi';
   const lastNonEmptyMangaDexRef = useRef<Record<string, MangaDexCatalogItem[]>>({});
   const lastNonEmptyTrendingRowsRef = useRef<TrendingMangaItem[]>([]);
@@ -4875,13 +4878,21 @@ const BrowseManga = () => {
   }, [pagedItems]);
 
   const mangaDexLatestChaptersQuery = useQuery({
-    queryKey: ['manga', 'mangadex', 'latest-chapters', 'browse-fast-v1', visibleMangaDexIds],
+    queryKey: [
+      'manga',
+      'mangadex',
+      'latest-chapters',
+      'browse-fast-v2',
+      mangaDexLatestChapterLanguage,
+      visibleMangaDexIds,
+    ],
     queryFn: async () => {
       const result: Record<string, { latestChapter?: Manga['chapters'][number]; lastUpdated?: string }> = {
         ...visibleMangaDexChapterSeedMap,
       };
       const payload = await mangaApi.getMangaDexLatestChapters(visibleMangaDexIds, {
         fast: true,
+        translatedLanguage: mangaDexLatestChapterLanguage,
       });
       const latestMap = (payload?.items || {}) as Record<string, any>;
 
@@ -4914,12 +4925,11 @@ const BrowseManga = () => {
 
       return result;
     },
-    enabled: visibleMangaDexIds.length > 0,
+    enabled: Boolean(mangaDexLatestChapterLanguage) && visibleMangaDexIds.length > 0,
     staleTime: 5 * 60 * 1000,
     retry: 0,
-    placeholderData: (previousData) => ({
+    placeholderData: () => ({
       ...visibleMangaDexChapterSeedMap,
-      ...(previousData || {}),
     }),
   });
 
@@ -4964,7 +4974,13 @@ const BrowseManga = () => {
   ]);
 
   const { data: mangaDexVisibleChapterFallbackMap = {} } = useQuery({
-    queryKey: ['manga', 'mangadex', 'visible-chapter-fallback-v1', mangaDexMissingVisibleChapterIds],
+    queryKey: [
+      'manga',
+      'mangadex',
+      'visible-chapter-fallback-v2',
+      mangaDexLatestChapterLanguage,
+      mangaDexMissingVisibleChapterIds,
+    ],
     queryFn: async () => {
       const result: Record<string, { latestChapter?: Manga['chapters'][number]; lastUpdated?: string }> = {};
       const queue = [...mangaDexMissingVisibleChapterIds];
@@ -4975,7 +4991,7 @@ const BrowseManga = () => {
           mangaApi.getMangaDexDetail(
             detailId,
             MANGADEX_VISIBLE_CHAPTER_FALLBACK_CHAPTERS,
-            'vi',
+            mangaDexLatestChapterLanguage,
             { timeoutMs: MANGADEX_VISIBLE_CHAPTER_FALLBACK_TIMEOUT_MS },
           ),
           MANGADEX_VISIBLE_CHAPTER_FALLBACK_TIMEOUT_MS,
@@ -5050,10 +5066,12 @@ const BrowseManga = () => {
 
       return result;
     },
-    enabled: isMangaDexSourceTab && mangaDexMissingVisibleChapterIds.length > 0,
+    enabled:
+      isMangaDexSourceTab &&
+      Boolean(mangaDexLatestChapterLanguage) &&
+      mangaDexMissingVisibleChapterIds.length > 0,
     staleTime: 10 * 60 * 1000,
     retry: 0,
-    placeholderData: (previousData) => previousData,
   });
 
   const mangaDexEnrichIds = useMemo(() => {

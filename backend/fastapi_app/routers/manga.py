@@ -5962,6 +5962,7 @@ async def mangadex_latest_feed(
 async def mangadex_latest_chapters(
     ids: str = Query(..., min_length=1),
     fast: bool = Query(False),
+    translated_language: str = Query("vi"),
 ):
     raw_ids = [str(segment or "").strip().lower() for segment in str(ids or "").split(",")]
 
@@ -5979,9 +5980,14 @@ async def mangadex_latest_chapters(
     if not manga_ids:
         return {"items": {}}
 
+    effective_translated_language = str(translated_language or "vi").strip().lower() or "vi"
+    if effective_translated_language in {"all", "any", "*", "non_vi"}:
+        return {"items": {}}
+
     try:
-        latest_map = await mangadex_service.get_latest_vi_chapters_for_manga_ids(
+        latest_map = await mangadex_service.get_latest_chapters_for_manga_ids(
             manga_ids,
+            translated_language=effective_translated_language,
             allow_individual_fallback=not fast,
         )
     except RuntimeError as error:
