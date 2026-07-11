@@ -1,4 +1,5 @@
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { useEffect, useId, useState, type FormEvent } from 'react';
+import { ArrowRight, ChevronLeft, ChevronRight } from 'lucide-react';
 
 interface MangaPaginationProps {
   currentPage: number;
@@ -7,7 +8,31 @@ interface MangaPaginationProps {
 }
 
 const MangaPagination = ({ currentPage, totalPages, onPageChange }: MangaPaginationProps) => {
+  const pageInputId = useId();
+  const [pageInput, setPageInput] = useState(String(currentPage));
+
+  useEffect(() => {
+    setPageInput(String(currentPage));
+  }, [currentPage]);
+
   if (totalPages <= 1) return null;
+
+  const goToPage = () => {
+    const parsedPage = Number.parseInt(pageInput, 10);
+    if (!Number.isFinite(parsedPage)) {
+      setPageInput(String(currentPage));
+      return;
+    }
+
+    const nextPage = Math.min(totalPages, Math.max(1, parsedPage));
+    setPageInput(String(nextPage));
+    if (nextPage !== currentPage) onPageChange(nextPage);
+  };
+
+  const handleGoToPageSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    goToPage();
+  };
 
   const getPages = () => {
     const pages: (number | '...')[] = [];
@@ -26,38 +51,73 @@ const MangaPagination = ({ currentPage, totalPages, onPageChange }: MangaPaginat
   };
 
   return (
-    <div className="flex items-center justify-center gap-1 mt-8">
-      <button
-        disabled={currentPage === 1}
-        onClick={() => onPageChange(currentPage - 1)}
-        className="p-2 rounded-md bg-secondary text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
-      >
-        <ChevronLeft className="w-4 h-4" />
-      </button>
-      {getPages().map((p, i) =>
-        p === '...' ? (
-          <span key={`ellipsis-${i}`} className="px-2 text-muted-foreground text-sm">...</span>
-        ) : (
-          <button
-            key={p}
-            onClick={() => onPageChange(p)}
-            className={`w-9 h-9 rounded-md text-sm font-medium transition-all ${
-              currentPage === p
-                ? 'bg-primary text-primary-foreground'
-                : 'bg-secondary text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            {p}
-          </button>
-        )
-      )}
-      <button
-        disabled={currentPage === totalPages}
-        onClick={() => onPageChange(currentPage + 1)}
-        className="p-2 rounded-md bg-secondary text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
-      >
-        <ChevronRight className="w-4 h-4" />
-      </button>
+    <div className="mt-8 flex flex-wrap items-center justify-center gap-2">
+      <div className="flex items-center justify-center gap-1">
+        <button
+          type="button"
+          disabled={currentPage === 1}
+          onClick={() => onPageChange(currentPage - 1)}
+          className="p-2 rounded-md bg-secondary text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
+          aria-label="Trang trước"
+          title="Trang trước"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+        {getPages().map((p, i) =>
+          p === '...' ? (
+            <span key={`ellipsis-${i}`} className="px-2 text-muted-foreground text-sm">...</span>
+          ) : (
+            <button
+              type="button"
+              key={p}
+              onClick={() => onPageChange(p)}
+              className={`w-9 h-9 rounded-md text-sm font-medium transition-all ${
+                currentPage === p
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-secondary text-muted-foreground hover:text-foreground'
+              }`}
+              aria-label={`Trang ${p}`}
+              aria-current={currentPage === p ? 'page' : undefined}
+            >
+              {p}
+            </button>
+          )
+        )}
+        <button
+          type="button"
+          disabled={currentPage === totalPages}
+          onClick={() => onPageChange(currentPage + 1)}
+          className="p-2 rounded-md bg-secondary text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
+          aria-label="Trang sau"
+          title="Trang sau"
+        >
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      </div>
+
+      <form onSubmit={handleGoToPageSubmit} className="flex h-9 items-center gap-1.5">
+        <label htmlFor={pageInputId} className="sr-only">Đến trang</label>
+        <input
+          id={pageInputId}
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          value={pageInput}
+          onChange={(event) => setPageInput(event.target.value.replace(/\D/g, ''))}
+          placeholder="Trang"
+          className="h-full w-16 rounded-md border border-border bg-card px-2 text-center text-sm font-medium text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
+          aria-label={`Đến trang, từ 1 đến ${totalPages}`}
+        />
+        <span className="text-xs font-medium text-muted-foreground">/ {totalPages}</span>
+        <button
+          type="submit"
+          className="grid h-full w-9 place-items-center rounded-md bg-secondary text-muted-foreground transition-colors hover:text-foreground"
+          aria-label="Đến trang"
+          title="Đến trang"
+        >
+          <ArrowRight className="w-4 h-4" />
+        </button>
+      </form>
     </div>
   );
 };
