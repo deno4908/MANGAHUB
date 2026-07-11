@@ -34,6 +34,7 @@ from fastapi_app.routers import (
 )
 from fastapi_app.services import otruyen_service
 from fastapi_app.services.chapter_checker import chapter_check_loop
+from vip_access import revoke_expired_vips
 
 logging.getLogger("multipart.multipart").setLevel(logging.ERROR)
 logging.getLogger("python_multipart.multipart").setLevel(logging.ERROR)
@@ -52,6 +53,7 @@ DATABASE_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
 DATABASE_CLEANUP_INITIAL_DELAY_SECONDS = 60
 VIEW_SESSION_RETENTION_DAYS = 7
 VIEW_EVENT_RETENTION_DAYS = 90
+VIP_EXPIRY_SWEEP_INTERVAL_SECONDS = 5 * 60
 
 
 class MaintenanceModeUpdate(BaseModel):
@@ -221,6 +223,20 @@ async def _database_cleanup_loop():
         await asyncio.sleep(DATABASE_CLEANUP_INTERVAL_SECONDS)
 
 
+async def _vip_expiry_sweep_loop():
+    """Keep persisted VIP flags aligned with their expiry timestamps."""
+    logger = logging.getLogger(__name__)
+    while True:
+        try:
+            db = get_supabase_admin()
+            revoked = await asyncio.to_thread(revoke_expired_vips, db, force=True)
+            if revoked:
+                logger.info("Revoked %s expired VIP account(s)", revoked)
+        except Exception as exc:
+            logger.debug("VIP expiry sweep skipped: %s", exc)
+        await asyncio.sleep(VIP_EXPIRY_SWEEP_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle — warm cache + start background tasks."""
@@ -231,6 +247,7 @@ async def lifespan(app: FastAPI):
     deferred_warmup_task = asyncio.create_task(_deferred_warmup_loop())
     admin_dashboard_warmup_task = asyncio.create_task(_prewarm_admin_dashboard_cache())
     database_cleanup_task = asyncio.create_task(_database_cleanup_loop())
+    vip_expiry_sweep_task = asyncio.create_task(_vip_expiry_sweep_loop())
     # Pre-warm MangaDex vi_catalog in background so /manga loads immediately
     manga.schedule_startup_warmup()
     yield
@@ -239,6 +256,7 @@ async def lifespan(app: FastAPI):
     deferred_warmup_task.cancel()
     admin_dashboard_warmup_task.cancel()
     database_cleanup_task.cancel()
+    vip_expiry_sweep_task.cancel()
     try:
         await asyncio.gather(
             task,
@@ -246,6 +264,7 @@ async def lifespan(app: FastAPI):
             deferred_warmup_task,
             admin_dashboard_warmup_task,
             database_cleanup_task,
+            vip_expiry_sweep_task,
             return_exceptions=True,
         )
     except asyncio.CancelledError:

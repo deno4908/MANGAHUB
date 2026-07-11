@@ -152,11 +152,12 @@ const SearchPage = () => {
   const setSearchLocation = useCallback(
     (nextQuery: string, nextPage: number, replace = false) => {
       const nextParams = new URLSearchParams(searchParams);
-      const normalizedQuery = nextQuery.trim();
+      const hasQuery = nextQuery.trim().length > 0;
       const safePage = Math.max(1, Math.floor(Number(nextPage) || 1));
 
-      if (normalizedQuery) {
-        nextParams.set("q", normalizedQuery);
+      if (hasQuery) {
+        // Preserve spaces while typing. Search requests normalize separately.
+        nextParams.set("q", nextQuery);
       } else {
         nextParams.delete("q");
       }
@@ -180,11 +181,9 @@ const SearchPage = () => {
   );
 
   useEffect(() => {
-    if (urlQuery !== query) {
-      setQuery(urlQuery);
-      setDebouncedQuery(urlQuery);
-    }
-  }, [query, urlQuery]);
+    setQuery(urlQuery);
+    setDebouncedQuery(urlQuery);
+  }, [urlQuery]);
 
   const handleQueryChange = (val: string) => {
     setQuery(val);

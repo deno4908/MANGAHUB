@@ -45,6 +45,14 @@ interface UserStore {
   uploadAvatar: (file: File, cropArea?: AvatarCropArea) => Promise<{ success: boolean; avatarUrl?: string; error?: string }>;
 }
 
+function profileHasActiveVip(profile: any): boolean {
+  if (!profile?.is_vip) return false;
+  const expiry = String(profile.vip_expiry || '').trim();
+  if (!expiry) return true;
+  const expiresAt = Date.parse(expiry);
+  return Number.isFinite(expiresAt) && expiresAt > Date.now();
+}
+
 function mapProfile(profile: any): User {
   return {
     id: profile.id || '',
@@ -55,7 +63,7 @@ function mapProfile(profile: any): User {
     bio: profile.bio || '',
     joinDate: profile.created_at || '',
     role: profile.role || 'reader',
-    isVip: profile.is_vip || false,
+    isVip: profileHasActiveVip(profile),
     vipExpiry: profile.vip_expiry || undefined,
     nameColor: profile.name_color || undefined,
     nameFont: profile.name_font || undefined,

@@ -29,6 +29,7 @@ from fastapi_app.utils.anti_spam import (
     request_fingerprint,
 )
 from fastapi_app.utils.upload_security import IMAGE_EXT_BY_CONTENT_TYPE, read_upload_limited
+from vip_access import normalize_vip_profile
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -597,7 +598,7 @@ async def get_comments(
     query = (
         db.table("comments")
         .select(
-            "*, profiles!comments_user_id_fkey(username, display_name, avatar, role, is_vip, name_color, name_font, name_effect)"
+            "*, profiles!comments_user_id_fkey(id, username, display_name, avatar, role, is_vip, vip_expiry, name_color, name_font, name_effect)"
         )
         .eq("manga_slug", manga_slug)
         .eq("is_deleted", False)
@@ -635,6 +636,7 @@ async def get_comments(
         return {"comments": [], "page": page, "limit": limit, "has_more": False}
 
     def _fmt_profile(row: dict, profile: dict) -> dict:
+        profile = normalize_vip_profile(profile)
         return {
             **row,
             "username": profile.get("display_name") or profile.get("username", ""),
@@ -668,7 +670,7 @@ async def get_comments(
                 lambda: (
                     db.table("comments")
                     .select(
-                        "*, profiles!comments_user_id_fkey(username, display_name, avatar, role, is_vip, name_color, name_font, name_effect)"
+                        "*, profiles!comments_user_id_fkey(id, username, display_name, avatar, role, is_vip, vip_expiry, name_color, name_font, name_effect)"
                     )
                     .in_("parent_id", ids_at_level)
                     .eq("is_deleted", False)

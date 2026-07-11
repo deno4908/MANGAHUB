@@ -21,6 +21,7 @@ from fastapi_app.dependencies import (
 )
 from fastapi_app.models.schemas import ProfileResponse, ProfileUpdate, SettingsUpdate
 from fastapi_app.utils.upload_security import IMAGE_EXT_BY_CONTENT_TYPE, read_upload_limited
+from vip_access import has_active_vip, normalize_vip_profile
 
 router = APIRouter()
 
@@ -38,7 +39,7 @@ _USER_STATS_CACHE: dict[str, tuple[dict, float]] = {}
 PUBLIC_PROFILE_CACHE_TTL_SECONDS = 20
 PUBLIC_PROFILE_ACTIVITY_LIMIT = 12
 PUBLIC_PROFILE_SELECT = (
-    "id, username, display_name, avatar, bio, role, is_vip, "
+    "id, username, display_name, avatar, bio, role, is_vip, vip_expiry, "
     "name_color, name_font, name_effect, chapters_read, total_reading_time, "
     "comments_posted, reading_streak, created_at"
 )
@@ -323,18 +324,18 @@ def _normalize_name_font(value: object) -> str:
 def _has_premium_name_style_access(profile_data: dict | None) -> bool:
     data = profile_data or {}
     role = str(data.get("role") or "").strip().lower()
-    return bool(data.get("is_vip")) or role in PREMIUM_NAME_STYLE_ROLES
+    return has_active_vip(data) or role in PREMIUM_NAME_STYLE_ROLES
 
 
 def _fetch_name_style_access_profile(db, user_id: str) -> dict:
     result = (
         db.table("profiles")
-        .select("role, is_vip")
+        .select("id, role, is_vip, vip_expiry")
         .eq("id", user_id)
         .single()
         .execute()
     )
-    return result.data or {}
+    return normalize_vip_profile(result.data or {}, db)
 
 
 def _public_settings_from_row(user_id: str, row: dict | None) -> dict[str, object]:
@@ -507,11 +508,17 @@ def _fetch_public_profile_by_identifier(db, identifier: str) -> dict | None:
                 .execute()
             )
             if result and result.data:
-                return result.data
+                return normalize_vip_profile(result.data)
         except Exception:
             continue
 
     return None
+
+
+def _public_profile_response(profile: dict | None) -> dict:
+    payload = dict(profile or {})
+    payload.pop("vip_expiry", None)
+    return payload
 
 
 def _storage_path_from_public_url(url: str, bucket: str) -> str:
@@ -657,7 +664,7 @@ async def search_users(
     """Tìm kiếm user theo username hoặc display_name."""
     pattern = f"%{_normalize_search_pattern(q)}%"
     select_fields = (
-        "id, username, display_name, avatar, role, is_vip, "
+        "id, username, display_name, avatar, role, is_vip, vip_expiry, "
         "name_color, name_font, name_effect"
     )
     rows_by_id: dict[str, dict] = {}
@@ -675,6 +682,8 @@ async def search_users(
         except Exception:
             continue
         for row in result.data or []:
+            row = normalize_vip_profile(row)
+            row.pop("vip_expiry", None)
             user_id = str(row.get("id") or "")
             if user_id and user_id not in rows_by_id:
                 rows_by_id[user_id] = row
@@ -693,7 +702,7 @@ async def get_profile(user=Depends(get_current_user), db=Depends(get_supabase)):
     profile = result.data
     if not profile:
         raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    return {"profile": profile}
+    return {"profile": normalize_vip_profile(profile, db)}
 
 
 @router.get("/profile/{user_id}")
@@ -711,8 +720,9 @@ async def get_user_profile(
 
     cached_payload = _user_stats_cache_get(_public_profile_cache_key(owner_id))
     if isinstance(cached_payload, dict):
+        cached_profile = normalize_vip_profile(cached_payload.get("profile") or profile)
         cached_settings = cached_payload.get("settings") or {}
-        can_view, visibility, is_self = _can_view_public_profile(profile, cached_settings, viewer)
+        can_view, visibility, is_self = _can_view_public_profile(cached_profile, cached_settings, viewer)
         if not can_view:
             raise HTTPException(
                 status_code=403,
@@ -720,7 +730,7 @@ async def get_user_profile(
             )
         return {
             **cached_payload,
-            "profile": cached_payload.get("profile") or profile,
+            "profile": _public_profile_response(cached_profile),
             "settings": {
                 **cached_settings,
                 "profile_visibility": visibility,
@@ -803,7 +813,12 @@ async def get_user_profile(
         payload,
         PUBLIC_PROFILE_CACHE_TTL_SECONDS,
     )
-    return {**payload, "viewer": {"is_self": is_self}, "cached": False}
+    return {
+        **payload,
+        "profile": _public_profile_response(profile),
+        "viewer": {"is_self": is_self},
+        "cached": False,
+    }
 
 
 @router.put("/profile")

@@ -20,6 +20,7 @@ from fastapi_app.models.schemas import BanUser, ChangeRole, NotifyRequest, VipUp
 from fastapi_app.services import mangadex_service, otruyen_service
 from fastapi_app.utils.upload_security import IMAGE_EXT_BY_CONTENT_TYPE, read_upload_limited
 from maintenance import get_maintenance_state, set_maintenance_state
+from vip_access import revoke_expired_vips
 
 router = APIRouter()
 COMMENT_IMAGE_BUCKET = "comment-images"
@@ -1513,6 +1514,7 @@ async def list_users(
     db=Depends(get_supabase),
 ):
     """Danh sách users (admin)."""
+    await asyncio.to_thread(revoke_expired_vips, db)
     query = db.table("profiles").select("*")
     search_filter = _build_ilike_or_filter(("username", "display_name", "email"), search)
 
@@ -2834,11 +2836,10 @@ async def set_user_vip(
 ):
     """Cấp hoặc thu hồi VIP — optimized with parallel IO."""
     # Fetch + build update payload concurrently
-    update_payload: dict[str, Any] = {"is_vip": data.is_vip}
-    if data.is_vip and data.vip_expiry:
-        update_payload["vip_expiry"] = data.vip_expiry
-    elif not data.is_vip:
-        update_payload["vip_expiry"] = None
+    update_payload: dict[str, Any] = {
+        "is_vip": data.is_vip,
+        "vip_expiry": data.vip_expiry if data.is_vip else None,
+    }
 
     target_res, _ = await asyncio.gather(
         asyncio.to_thread(
@@ -2969,6 +2970,7 @@ async def export_users_csv(
 
     from fastapi.responses import StreamingResponse
 
+    await asyncio.to_thread(revoke_expired_vips, db)
     result = (
         db.table("profiles")
         .select(

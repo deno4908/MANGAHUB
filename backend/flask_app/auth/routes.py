@@ -16,6 +16,7 @@ from supabase import create_client
 from config import config
 from flask_app.middleware import clear_auth_cache, require_auth, get_current_user_id
 from flask_app import limiter
+from vip_access import normalize_vip_profile
 
 try:
     import redis  # type: ignore
@@ -638,6 +639,8 @@ def _fetch_profile_and_settings(user_id: str) -> tuple[dict, dict]:
 
     if profile_data is None:
         profile_data = _build_fallback_profile(user_id)
+    else:
+        profile_data = normalize_vip_profile(profile_data, sb)
     if settings_data is None:
         settings_data = _build_default_settings(user_id)
 
@@ -1023,6 +1026,10 @@ def login():
             profile = _get_sb_admin().table("profiles").select("*").eq(
                 "id", str(result.user.id)
             ).single().execute()
+            profile_data = normalize_vip_profile(
+                profile.data if profile.data else None,
+                _get_sb_admin(),
+            )
 
             return _json({
                 "message": "Đăng nhập thành công",
@@ -1034,7 +1041,7 @@ def login():
                     "id": str(result.user.id),
                     "email": result.user.email,
                 },
-                "profile": profile.data if profile.data else None,
+                "profile": profile_data or None,
             }, 200, refresh_token=result.session.refresh_token)
         else:
             if "invalid" in last_auth_error.lower():
@@ -1231,53 +1238,7 @@ def get_me():
     if not user_id:
         return jsonify({"error": "Không xác thực được"}), 401
 
-    sb = _get_sb_admin()
-
-    profile_data = None
-    settings_data = None
-
-    try:
-        profile = (
-            sb.table("profiles")
-            .select("*")
-            .eq("id", user_id)
-            .single()
-            .execute()
-        )
-        profile_data = profile.data if profile and profile.data else None
-    except Exception:
-        profile_data = None
-
-    try:
-        settings = (
-            sb.table("user_settings")
-            .select("*")
-            .eq("user_id", user_id)
-            .maybe_single()
-            .execute()
-        )
-        settings_data = settings.data if settings and settings.data else None
-    except Exception:
-        settings_data = None
-
-    if settings_data is None:
-        try:
-            sb.table("user_settings").insert({"user_id": user_id}).execute()
-            settings = (
-                sb.table("user_settings")
-                .select("*")
-                .eq("user_id", user_id)
-                .maybe_single()
-                .execute()
-            )
-            settings_data = settings.data if settings and settings.data else None
-        except Exception:
-            settings_data = None
-
-    if profile_data is None:
-        profile_data = _build_fallback_profile(user_id)
-    if settings_data is None:
-        settings_data = _build_default_settings(user_id)
+    profile_data, settings_data = _fetch_profile_and_settings(user_id)
 
     return jsonify({
         "profile": profile_data,
@@ -1513,7 +1474,10 @@ def oauth_callback():
             except Exception:
                 pass
 
-        profile = profile_result.data[0] if profile_result.data else None
+        profile = normalize_vip_profile(
+            profile_result.data[0] if profile_result.data else None,
+            _get_sb_admin(),
+        ) or None
 
         # Check if banned
         if profile and profile.get("is_banned"):
@@ -1612,7 +1576,10 @@ def oauth_exchange_code():
             except Exception:
                 pass
 
-        profile = profile_result.data[0] if profile_result.data else None
+        profile = normalize_vip_profile(
+            profile_result.data[0] if profile_result.data else None,
+            _get_sb_admin(),
+        ) or None
 
         if profile and profile.get("is_banned"):
             return _json({
