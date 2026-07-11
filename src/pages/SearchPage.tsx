@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -148,29 +148,34 @@ const SearchPage = () => {
   const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
   const [debouncedQuery, setDebouncedQuery] = useState(urlQuery);
   const [mangaDexSearchLimit, setMangaDexSearchLimit] = useState(MANGADEX_SEARCH_INITIAL_LIMIT);
+  const queryRef = useRef(urlQuery);
+  const skipNextQueryUrlWriteRef = useRef(false);
+  const hasInitializedQuerySyncRef = useRef(false);
 
   const setSearchLocation = useCallback(
     (nextQuery: string, nextPage: number, replace = false) => {
-      const nextParams = new URLSearchParams(searchParams);
-      const hasQuery = nextQuery.trim().length > 0;
-      const safePage = Math.max(1, Math.floor(Number(nextPage) || 1));
+      setSearchParams((currentParams) => {
+        const nextParams = new URLSearchParams(currentParams);
+        const hasQuery = nextQuery.trim().length > 0;
+        const safePage = Math.max(1, Math.floor(Number(nextPage) || 1));
 
-      if (hasQuery) {
-        // Preserve spaces while typing. Search requests normalize separately.
-        nextParams.set("q", nextQuery);
-      } else {
-        nextParams.delete("q");
-      }
+        if (hasQuery) {
+          // Preserve spaces while typing. Search requests normalize separately.
+          nextParams.set("q", nextQuery);
+        } else {
+          nextParams.delete("q");
+        }
 
-      if (safePage > 1) {
-        nextParams.set("page", String(safePage));
-      } else {
-        nextParams.delete("page");
-      }
+        if (safePage > 1) {
+          nextParams.set("page", String(safePage));
+        } else {
+          nextParams.delete("page");
+        }
 
-      setSearchParams(nextParams, { replace });
+        return nextParams;
+      }, { replace });
     },
-    [searchParams, setSearchParams],
+    [setSearchParams],
   );
 
   const setPage = useCallback(
@@ -181,22 +186,40 @@ const SearchPage = () => {
   );
 
   useEffect(() => {
+    queryRef.current = query;
+  }, [query]);
+
+  useEffect(() => {
+    if (urlQuery === queryRef.current) return;
+
+    // A URL change from back/forward or a shared link is authoritative. Do not
+    // immediately write it back, otherwise it would reset its page to one.
+    skipNextQueryUrlWriteRef.current = true;
+    queryRef.current = urlQuery;
     setQuery(urlQuery);
     setDebouncedQuery(urlQuery);
   }, [urlQuery]);
 
-  const handleQueryChange = (val: string) => {
-    setQuery(val);
-    // Keep a typed search shareable without adding a history entry per keystroke.
-    setSearchLocation(val, 1, true);
-  };
+  const handleQueryChange = (val: string) => setQuery(val);
 
   useEffect(() => {
+    if (!hasInitializedQuerySyncRef.current) {
+      hasInitializedQuerySyncRef.current = true;
+      return;
+    }
+
+    if (skipNextQueryUrlWriteRef.current) {
+      skipNextQueryUrlWriteRef.current = false;
+      return;
+    }
+
     const timer = window.setTimeout(() => {
       setDebouncedQuery(query);
+      // Keep a typed search shareable without adding a history entry per keystroke.
+      setSearchLocation(query, 1, true);
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [query]);
+  }, [query, setSearchLocation]);
 
   const trimmedDebouncedQuery = debouncedQuery.trim();
   const serverSearchPage = selectedGenres.length > 0 ? 1 : page;
