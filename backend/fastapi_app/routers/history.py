@@ -3,6 +3,7 @@ Reading history router.
 """
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -14,6 +15,7 @@ from fastapi_app.routers.users import clear_user_stats_cache
 from fastapi_app.utils.anti_spam import enforce_user_action_limit
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 HISTORY_UPDATE_LIMIT_PER_MINUTE = 90
 HISTORY_UPDATE_LIMIT_PER_10_MINUTES = 600
@@ -191,7 +193,8 @@ async def add_or_update_history(
         clear_user_stats_cache(user["id"])
         return {"message": "Đã cập nhật lịch sử"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Reading history update failed")
+        raise HTTPException(status_code=500, detail="Không thể cập nhật lịch sử đọc lúc này") from e
 
 
 @router.delete("/{manga_slug}")

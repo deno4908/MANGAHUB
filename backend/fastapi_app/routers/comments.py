@@ -811,7 +811,8 @@ async def upload_comment_image(
         )
         image_url = db.storage.from_(COMMENT_IMAGE_BUCKET).get_public_url(path)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload ảnh bình luận thất bại: {str(e)}")
+        logger.exception("Comment image upload failed")
+        raise HTTPException(status_code=500, detail="Upload ảnh bình luận thất bại") from e
 
     return {"message": "Upload ảnh thành công", "image_url": image_url}
 

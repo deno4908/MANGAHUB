@@ -16,6 +16,14 @@ CREATE INDEX IF NOT EXISTS idx_manga_view_events_dedup
 ON public.manga_view_events (manga_slug, chapter_id, viewer_hash, created_at DESC)
 WHERE viewer_hash IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS idx_manga_view_events_manga_viewer_recent
+ON public.manga_view_events (manga_slug, viewer_hash, created_at DESC)
+WHERE viewer_hash IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_manga_view_events_manga_ip_recent
+ON public.manga_view_events (manga_slug, ip_hash, created_at DESC)
+WHERE ip_hash IS NOT NULL;
+
 -- v15 stores hashed viewer/IP/user-agent signals in manga_view_events.
 -- Keep aggregate counts public via manga_views, but never expose raw event rows to clients.
 ALTER TABLE public.manga_view_events ENABLE ROW LEVEL SECURITY;
@@ -179,6 +187,16 @@ BEGIN
         RETURN jsonb_build_object('ok', true, 'counted', false, 'reason', 'session-not-started');
     END IF;
 
+    IF v_session.started_at < NOW() - INTERVAL '6 hours' THEN
+        RETURN jsonb_build_object('ok', true, 'counted', false, 'reason', 'session-expired');
+    END IF;
+
+    -- Serialize different session IDs for the same viewer and manga so two
+    -- concurrent requests cannot both pass the recent-view check.
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(trim(p_manga_slug) || ':' || v_viewer_hash, 0)
+    );
+
     v_actual_elapsed := GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - v_session.started_at)))::INTEGER);
     v_progress := GREATEST(v_progress, COALESCE(v_session.max_progress, 0));
     v_page_seen := GREATEST(v_page_seen, COALESCE(v_session.max_page_seen, 0));
@@ -218,11 +236,15 @@ BEGIN
         SELECT 1
         FROM public.manga_view_events e
         WHERE e.manga_slug = p_manga_slug
-          AND COALESCE(e.chapter_id, '') = COALESCE(p_chapter_id, '')
           AND e.created_at >= NOW() - make_interval(secs => GREATEST(1, p_dedup_seconds))
           AND (
               (p_user_id IS NOT NULL AND e.user_id = p_user_id)
               OR (p_viewer_hash IS NOT NULL AND e.viewer_hash = p_viewer_hash)
+              OR (
+                  p_user_id IS NULL
+                  AND p_ip_hash IS NOT NULL
+                  AND e.ip_hash = p_ip_hash
+              )
           )
         LIMIT 1
     ) THEN
@@ -507,3 +529,6 @@ GRANT EXECUTE ON FUNCTION public.cleanup_view_anti_spam_events(
     INTEGER,
     INTEGER
 ) TO service_role;
+
+REVOKE ALL ON FUNCTION public.increment_manga_view(TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.increment_manga_view(TEXT) TO service_role;

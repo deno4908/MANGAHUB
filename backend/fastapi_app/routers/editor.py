@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
@@ -9,6 +10,7 @@ from fastapi_app.services import image_editor_service
 from fastapi_app.utils.upload_security import read_upload_limited
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 EDITOR_MAX_IMAGE_SIZE = 20 * 1024 * 1024
 EDITOR_ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
@@ -62,9 +64,14 @@ async def editor_inpaint(
             regions,
         )
     except image_editor_service.EditorProcessingError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        logger.warning("Editor inpaint rejected: %s", error)
+        raise HTTPException(
+            status_code=400,
+            detail="Không thể xử lý ảnh. Vui lòng kiểm tra vùng chọn và thử lại.",
+        ) from error
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Xử lý ảnh thất bại: {error}") from error
+        logger.exception("Editor inpaint failed")
+        raise HTTPException(status_code=500, detail="Xử lý ảnh thất bại") from error
 
 
 @router.post("/add-text")
@@ -81,9 +88,11 @@ async def editor_add_text(
             overlays,
         )
     except image_editor_service.EditorProcessingError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        logger.warning("Editor text overlay rejected: %s", error)
+        raise HTTPException(status_code=400, detail="Dữ liệu chèn chữ không hợp lệ") from error
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Chèn chữ thất bại: {error}") from error
+        logger.exception("Editor text overlay failed")
+        raise HTTPException(status_code=500, detail="Chèn chữ thất bại") from error
 
 
 @router.post("/detect-font")
@@ -102,9 +111,11 @@ async def editor_detect_font(
             sample_text,
         )
     except image_editor_service.EditorProcessingError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        logger.warning("Editor font detection rejected: %s", error)
+        raise HTTPException(status_code=400, detail="Không thể nhận diện font từ vùng đã chọn") from error
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Nhận diện font thất bại: {error}") from error
+        logger.exception("Editor font detection failed")
+        raise HTTPException(status_code=500, detail="Nhận diện font thất bại") from error
 
 
 @router.post("/ai-translate")
@@ -136,9 +147,14 @@ async def editor_ai_translate(
             mode=mode,
         )
     except image_editor_service.EditorProcessingError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        logger.warning("Editor AI translation rejected: %s", error)
+        raise HTTPException(
+            status_code=400,
+            detail="AI không thể xử lý yêu cầu. Vui lòng kiểm tra cấu hình và thử lại.",
+        ) from error
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"AI dịch/chèn chữ thất bại: {error}") from error
+        logger.exception("Editor AI translation failed")
+        raise HTTPException(status_code=500, detail="AI dịch/chèn chữ thất bại") from error
 
 
 @router.post("/ocr-region")
@@ -158,9 +174,11 @@ async def editor_ocr_region(
             languages,
         )
     except image_editor_service.EditorProcessingError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        logger.warning("Editor OCR rejected: %s", error)
+        raise HTTPException(status_code=400, detail="Không thể nhận diện chữ trong vùng đã chọn") from error
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"OCR thất bại: {error}") from error
+        logger.exception("Editor OCR failed")
+        raise HTTPException(status_code=500, detail="OCR thất bại") from error
 
 
 @router.post("/translate-text")
@@ -178,7 +196,9 @@ async def editor_translate_text(
             target_language=target_language,
         )
     except image_editor_service.EditorProcessingError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        logger.warning("Editor text translation rejected: %s", error)
+        raise HTTPException(status_code=400, detail="Không thể dịch đoạn văn bản đã cung cấp") from error
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Dịch văn bản thất bại: {error}") from error
+        logger.exception("Editor text translation failed")
+        raise HTTPException(status_code=500, detail="Dịch văn bản thất bại") from error
 

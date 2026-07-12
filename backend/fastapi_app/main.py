@@ -5,9 +5,11 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from config import config
 from fastapi_app.dependencies import get_supabase_admin, require_admin
 from maintenance import (
@@ -34,10 +36,12 @@ from fastapi_app.routers import (
 )
 from fastapi_app.services import otruyen_service
 from fastapi_app.services.chapter_checker import chapter_check_loop
+from security_runtime import ensure_security_redis_available
 from vip_access import revoke_expired_vips
 
 logging.getLogger("multipart.multipart").setLevel(logging.ERROR)
 logging.getLogger("python_multipart.multipart").setLevel(logging.ERROR)
+logger = logging.getLogger(__name__)
 
 CACHE_REFRESH_INTERVAL = 600  # 10 minutes
 PREWARM_LIST_PAGES = (1, 2)
@@ -240,6 +244,7 @@ async def _vip_expiry_sweep_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle — warm cache + start background tasks."""
+    await asyncio.to_thread(ensure_security_redis_available)
     images.schedule_image_cache_prune(force=True)
     await _warmup_cache_core()
     task = asyncio.create_task(chapter_check_loop())
@@ -279,6 +284,45 @@ app = FastAPI(
     redoc_url="/redoc",
     lifespan=lifespan,
 )
+
+
+def _public_server_error_message(status_code: int) -> str:
+    if status_code in {502, 503, 504}:
+        return "Dịch vụ tạm thời không khả dụng. Vui lòng thử lại sau."
+    return "Đã xảy ra lỗi máy chủ. Vui lòng thử lại sau."
+
+
+@app.exception_handler(StarletteHTTPException)
+async def sanitized_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if exc.status_code < 500:
+        return await http_exception_handler(request, exc)
+
+    logger.error(
+        "Suppressed HTTP error method=%s path=%s status=%s detail=%r",
+        request.method,
+        request.url.path,
+        exc.status_code,
+        str(exc.detail)[:2000],
+    )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": _public_server_error_message(exc.status_code)},
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(Exception)
+async def sanitized_unhandled_exception_handler(request: Request, exc: Exception):
+    logger.error(
+        "Unhandled API error method=%s path=%s",
+        request.method,
+        request.url.path,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": _public_server_error_message(500)},
+    )
 
 _cors_origins = [config.FRONTEND_URL]
 if getattr(config, "CORS_ALLOW_LOCALHOST", False):

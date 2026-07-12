@@ -23,7 +23,7 @@ def run_flask():
     from flask_app import create_app
     app = create_app()
     app.run(
-        host="0.0.0.0",
+        host=config.BACKEND_BIND_HOST,
         port=config.FLASK_PORT,
         debug=config.FLASK_DEBUG,
         use_reloader=False  # Avoid double-start in multiprocessing
@@ -37,10 +37,11 @@ def run_fastapi():
     workers = 1 if reload_enabled else _resolve_fastapi_workers()
     uvicorn.run(
         "fastapi_app.main:app",
-        host="0.0.0.0",
+        host=config.BACKEND_BIND_HOST,
         port=config.FASTAPI_PORT,
         reload=reload_enabled,
         workers=workers,
+        proxy_headers=False,
     )
 
 

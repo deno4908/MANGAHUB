@@ -5,6 +5,7 @@
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const AUTH_BASE = import.meta.env.VITE_AUTH_URL || "http://localhost:5000";
+const AUTH_CSRF_HEADER = "X-MangaHub-CSRF";
 export const FORCE_LOGOUT_EVENT = "mb:force-logout";
 export const FORCE_FORBIDDEN_EVENT = "mb:force-forbidden";
 export const FORCE_MAINTENANCE_EVENT = "mb:force-maintenance";
@@ -892,11 +893,24 @@ function adminResponse(path: string, options?: ApiRequestInit) {
   return apiResponse(path, { ...options, suppressForbiddenRedirect: true });
 }
 
+function withAuthCsrfHeader(options: ApiRequestInit = {}): ApiRequestInit {
+  const method = String(options.method || "GET").toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return options;
+  return {
+    ...options,
+    headers: {
+      ...((options.headers as Record<string, string>) || {}),
+      [AUTH_CSRF_HEADER]: "1",
+    },
+  };
+}
+
 function auth<T>(path: string, options?: ApiRequestInit) {
-  return apiFetch<T>(`${AUTH_BASE}${path}`, options);
+  return apiFetch<T>(`${AUTH_BASE}${path}`, withAuthCsrfHeader(options));
 }
 
 function authRawResponse(path: string, options: ApiRequestInit = {}) {
+  options = withAuthCsrfHeader(options);
   const {
     timeoutMs,
     skipAuth = false,

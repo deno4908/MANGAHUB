@@ -3,6 +3,7 @@ Admin router — dashboard stats, user management, moderation, audit.
 """
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import re
@@ -23,6 +24,7 @@ from maintenance import get_maintenance_state, set_maintenance_state
 from vip_access import revoke_expired_vips
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 COMMENT_IMAGE_BUCKET = "comment-images"
 ANNOUNCEMENT_IMAGE_BUCKET = "announcement-images"
 MAINTENANCE_IMAGE_BUCKET = "maintenance-images"
@@ -403,7 +405,8 @@ def _crop_image_bytes(
     try:
         image = Image.open(BytesIO(content))
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Không đọc được ảnh: {exc}") from exc
+        logger.warning("Admin image decode failed: %s", exc)
+        raise HTTPException(status_code=400, detail="Không đọc được ảnh đã tải lên") from exc
 
     x = max(0, int(crop_x or 0))
     y = max(0, int(crop_y or 0))
@@ -434,7 +437,8 @@ def _crop_image_bytes(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Không thể cắt ảnh: {exc}") from exc
+        logger.warning("Admin image crop failed: %s", exc)
+        raise HTTPException(status_code=400, detail="Không thể cắt ảnh đã tải lên") from exc
 
 
 ANNOUNCEMENT_TYPES = {"system", "maintenance", "event", "warning"}
@@ -901,7 +905,8 @@ async def delete_maintenance_image(
     try:
         db.storage.from_(MAINTENANCE_IMAGE_BUCKET).remove([path])
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Không thể xóa ảnh bảo trì: {exc}")
+        logger.exception("Maintenance image deletion failed")
+        raise HTTPException(status_code=503, detail="Không thể xóa ảnh bảo trì lúc này") from exc
 
     current = await asyncio.to_thread(get_maintenance_state, force=True)
     if str(current.get("image_url") or "").strip() == image_url:
@@ -934,7 +939,8 @@ async def update_site_announcement(
         result = db.table("site_announcements").update(row).eq("id", announcement_id).execute()
         announcement = (result.data or [None])[0]
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Không thể cập nhật thông báo: {exc}")
+        logger.exception("Announcement update failed")
+        raise HTTPException(status_code=503, detail="Không thể cập nhật thông báo lúc này") from exc
     if not announcement:
         raise HTTPException(status_code=404, detail="Không tìm thấy thông báo")
     _log_action(db, admin, "Cập nhật thông báo home", announcement_id)
@@ -961,7 +967,8 @@ async def delete_site_announcement(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Không thể xóa thông báo: {exc}")
+        logger.exception("Announcement deletion failed")
+        raise HTTPException(status_code=503, detail="Không thể xóa thông báo lúc này") from exc
     _log_action(db, admin, "Xóa thông báo home", announcement_id)
     return {"message": "Đã xóa thông báo"}
 
@@ -2781,9 +2788,8 @@ async def broadcast_notification(
         users = query.execute()
         user_ids = [u["id"] for u in (users.data or [])]
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Không thể lấy danh sách user: {str(e)}"
-        )
+        logger.exception("Admin user listing failed")
+        raise HTTPException(status_code=500, detail="Không thể lấy danh sách user lúc này") from e
 
     if not user_ids:
         return {

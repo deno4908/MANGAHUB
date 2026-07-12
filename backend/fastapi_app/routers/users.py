@@ -3,6 +3,7 @@ Users router — profile, settings, stats.
 """
 
 import asyncio
+import logging
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ from fastapi_app.utils.upload_security import IMAGE_EXT_BY_CONTENT_TYPE, read_up
 from vip_access import has_active_vip, normalize_vip_profile
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 AVATAR_BUCKET = "manga-pages"
 AVATAR_FOLDER = "avatars"
@@ -575,7 +577,8 @@ def _crop_avatar_bytes(
     try:
         image = Image.open(src)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Không đọc được ảnh: {str(e)}")
+        logger.warning("Avatar image decode failed: %s", e)
+        raise HTTPException(status_code=400, detail="Không đọc được ảnh đã tải lên") from e
 
     x = max(0, int(crop_x))
     y = max(0, int(crop_y))
@@ -652,7 +655,8 @@ def _crop_avatar_bytes(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Không thể cắt ảnh: {str(e)}")
+        logger.warning("Avatar crop failed: %s", e)
+        raise HTTPException(status_code=400, detail="Không thể cắt ảnh đã tải lên") from e
 
 
 @router.get("/search")
@@ -942,7 +946,8 @@ async def upload_avatar(
         )
         avatar_url = db.storage.from_(AVATAR_BUCKET).get_public_url(path)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload avatar thất bại: {str(e)}")
+        logger.exception("Avatar storage upload failed")
+        raise HTTPException(status_code=500, detail="Upload avatar thất bại") from e
 
     current = (
         db.table("profiles").select("avatar").eq("id", user["id"]).single().execute()
@@ -1058,7 +1063,8 @@ async def update_settings(
             "settings": _settings_for_user(user, result.data[0] if result.data else None),
         }
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Không thể cập nhật cài đặt lúc này: {exc}")
+        logger.exception("User settings update failed")
+        raise HTTPException(status_code=503, detail="Không thể cập nhật cài đặt lúc này") from exc
 
 
 @router.get("/stats")

@@ -2,6 +2,8 @@
 Scanlation Groups router — group management.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from fastapi_app.dependencies import (
@@ -13,6 +15,7 @@ from fastapi_app.dependencies import (
 from fastapi_app.utils.anti_spam import enforce_user_action_limit
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 GROUP_CREATE_LIMIT_PER_HOUR = 5
 GROUP_WRITE_LIMIT_PER_MINUTE = 30
 
@@ -293,7 +296,8 @@ async def add_member(
     except Exception as e:
         if "duplicate" in str(e).lower() or "unique" in str(e).lower():
             return {"message": "Đã là thành viên"}
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Adding scanlation group member failed")
+        raise HTTPException(status_code=500, detail="Không thể thêm thành viên lúc này") from e
 
 
 @router.delete("/{group_id}/members/{target_user_id}")

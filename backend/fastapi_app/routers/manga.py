@@ -130,11 +130,17 @@ _MANGADEX_POPULAR_FILTERED_LOCAL_LOOKUP_LIMIT = _env_int(
 MANGADEX_POPULAR_FILTERED_CACHE_TTL_SECONDS = 90
 VIEW_DEDUP_SECONDS = 15 * 60
 VIEW_DB_DEDUP_SECONDS = 15 * 60
-VIEW_BURST_LIMIT_PER_MINUTE = 180
-VIEW_BURST_LIMIT_PER_10_MINUTES = 1000
+VIEW_BURST_LIMIT_PER_MINUTE = 30
+VIEW_BURST_LIMIT_PER_10_MINUTES = 120
+VIEW_SESSION_START_LIMIT_PER_MINUTE = 30
+VIEW_SESSION_START_LIMIT_PER_10_MINUTES = 120
+VIEW_IP_BURST_LIMIT_PER_MINUTE = 120
+VIEW_IP_BURST_LIMIT_PER_10_MINUTES = 600
 VIEW_MIN_ELAPSED_SECONDS = 12
 VIEW_MIN_PROGRESS_PERCENT = 15
 VIEW_MIN_PAGE_SEEN = 2
+VIEW_CHAPTER_VALID_CACHE_TTL_SECONDS = 6 * 60 * 60
+VIEW_CHAPTER_INVALID_CACHE_TTL_SECONDS = 5 * 60
 
 
 async def _get_hidden_slugs(db) -> dict[str, str]:
@@ -223,7 +229,10 @@ class ViewSessionPayload(BaseModel):
 
 
 def _normalize_view_chapter_id(value: Any) -> str:
-    return str(value or "").strip()[:100]
+    chapter_id = str(value or "").strip()[:100]
+    if not chapter_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", chapter_id):
+        return ""
+    return chapter_id
 
 
 def _normalize_read_session_id(value: Any) -> str:
@@ -248,7 +257,7 @@ def _rpc_json_payload(result: Any) -> dict | None:
     return None
 
 
-def _recent_user_view_exists(db: Any, user_id: str, manga_slug: str, chapter_id: str) -> bool:
+def _recent_user_view_exists(db: Any, user_id: str, manga_slug: str) -> bool:
     if not user_id:
         return False
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=VIEW_DB_DEDUP_SECONDS)).isoformat()
@@ -261,12 +270,87 @@ def _recent_user_view_exists(db: Any, user_id: str, manga_slug: str, chapter_id:
             .gte("created_at", cutoff)
             .limit(1)
         )
-        if chapter_id:
-            query = query.eq("chapter_id", chapter_id)
         result = query.execute()
         return bool(result.data)
     except Exception:
         return False
+
+
+def _view_chapter_validation_cache_key(manga_slug: str, chapter_id: str) -> str:
+    return f"view:chapter-owner:v1:{hash_value(f'{manga_slug}:{chapter_id}')}"
+
+
+async def _validate_view_chapter_owner(db: Any, manga_slug: str, chapter_id: str) -> str:
+    """Return valid, invalid, or unavailable for a chapter/manga relationship."""
+
+    if not manga_slug or not chapter_id:
+        return "invalid"
+
+    cache_key = _view_chapter_validation_cache_key(manga_slug, chapter_id)
+    cached = str(cache.get(cache_key) or "").strip().lower()
+    if cached in {"valid", "invalid"}:
+        return cached
+
+    try:
+        if chapter_id.startswith("upload-"):
+            upload_id = chapter_id[7:].strip()
+            if not _MANGADEX_ID_RE.fullmatch(upload_id):
+                status = "invalid"
+            else:
+                result = await asyncio.to_thread(
+                    lambda: db.table("chapter_uploads")
+                    .select("manga_slug,status")
+                    .eq("id", upload_id)
+                    .eq("status", "published")
+                    .maybe_single()
+                    .execute()
+                )
+                row = getattr(result, "data", None) or {}
+                status = (
+                    "valid"
+                    if _clean_slug(row.get("manga_slug")) == _clean_slug(manga_slug)
+                    else "invalid"
+                )
+        else:
+            mangadex_manga_id = _extract_mangadex_id(manga_slug)
+            if mangadex_manga_id:
+                mangadex_chapter_id = _extract_mangadex_id(chapter_id)
+                if not mangadex_chapter_id:
+                    status = "invalid"
+                else:
+                    payload = await mangadex_service.get_chapter_metadata(mangadex_chapter_id)
+                    chapter = (payload or {}).get("data") or {}
+                    relationships = chapter.get("relationships") or []
+                    owner_ids = {
+                        str(rel.get("id") or "").strip().lower()
+                        for rel in relationships
+                        if isinstance(rel, dict) and rel.get("type") == "manga"
+                    }
+                    status = "valid" if mangadex_manga_id in owner_ids else "invalid"
+            else:
+                payload = await otruyen_service.get_chapter(chapter_id)
+                item = (payload or {}).get("data", {}).get("item") if isinstance(payload, dict) else None
+                if not isinstance(item, dict):
+                    status = "invalid"
+                else:
+                    owner_slug = _extract_otruyen_chapter_manga_slug(item)
+                    status = "valid" if _clean_slug(owner_slug) == _clean_slug(manga_slug) else "invalid"
+    except Exception as exc:
+        logger.debug(
+            "manga.view chapter ownership unavailable: manga=%s chapter=%s error=%s",
+            manga_slug,
+            chapter_id,
+            exc,
+        )
+        return "unavailable"
+
+    ttl = (
+        VIEW_CHAPTER_VALID_CACHE_TTL_SECONDS
+        if status == "valid"
+        else VIEW_CHAPTER_INVALID_CACHE_TTL_SECONDS
+    )
+    cache.set(cache_key, status, ttl)
+    return status
 
 
 def _start_manga_read_session_rpc(
@@ -2777,7 +2861,8 @@ async def otruyen_filtered_manga(
     except Exception as exc:
         if stale_payload is not None:
             return stale_payload
-        raise HTTPException(status_code=502, detail=f"OTruyen filtered catalog unavailable: {exc}") from exc
+        logger.exception("OTruyen filtered catalog request failed")
+        raise HTTPException(status_code=502, detail="Danh mục OTruyen tạm thời không khả dụng") from exc
 
 
 def _safe_query(fn):
@@ -5437,6 +5522,30 @@ async def start_view_session(
     chapter_id = _normalize_view_chapter_id(payload.chapter_id)
     viewer_key = request_fingerprint(request, user.get("id") if user else None)
     client_ip = get_client_ip(request)
+    client_ip_key = hash_value(client_ip)
+
+    for key, limit, window_seconds in (
+        (f"view-session:min:{viewer_key}", VIEW_SESSION_START_LIMIT_PER_MINUTE, 60),
+        (f"view-session:10m:{viewer_key}", VIEW_SESSION_START_LIMIT_PER_10_MINUTES, 10 * 60),
+        (f"view-session-ip:min:{client_ip_key}", VIEW_IP_BURST_LIMIT_PER_MINUTE, 60),
+        (f"view-session-ip:10m:{client_ip_key}", VIEW_IP_BURST_LIMIT_PER_10_MINUTES, 10 * 60),
+    ):
+        allowed, _, reset_after = check_fixed_window(key, limit, window_seconds)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Tạo phiên đọc quá nhanh, thử lại sau {reset_after}s",
+            )
+
+    chapter_validation = await _validate_view_chapter_owner(db, view_slug, chapter_id)
+    if chapter_validation != "valid":
+        reason = (
+            "chapter-validation-unavailable"
+            if chapter_validation == "unavailable"
+            else "chapter-manga-mismatch"
+        )
+        return {"ok": False, "session_started": False, "reason": reason}
+
     result = _start_manga_read_session_rpc(
         db,
         manga_slug=view_slug,
@@ -5448,7 +5557,7 @@ async def start_view_session(
         session_id=session_id,
     )
     if result is None:
-        return {"ok": True, "session_started": False, "reason": "migration-required"}
+        return {"ok": False, "session_started": False, "reason": "tracking-unavailable"}
     return {"ok": bool(result.get("ok", True)), "session_started": bool(result.get("ok", True))}
 
 
@@ -5475,31 +5584,23 @@ async def add_view(
     min_page_seen = 1 if total_pages <= 1 else VIEW_MIN_PAGE_SEEN
     viewer_key = request_fingerprint(request, user.get("id") if user else None)
     client_ip = get_client_ip(request)
+    client_ip_key = hash_value(client_ip)
 
     if not session_id:
         return {"ok": True, "counted": False, "reason": "missing-read-session"}
 
-    allowed, _, reset_after = check_fixed_window(
-        f"view:min:{viewer_key}",
-        VIEW_BURST_LIMIT_PER_MINUTE,
-        60,
-    )
-    if not allowed:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Request view quá nhanh, thử lại sau {reset_after}s",
-        )
-
-    allowed, _, reset_after = check_fixed_window(
-        f"view:10m:{viewer_key}",
-        VIEW_BURST_LIMIT_PER_10_MINUTES,
-        10 * 60,
-    )
-    if not allowed:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Request view quá nhiều, thử lại sau {reset_after}s",
-        )
+    for key, limit, window_seconds in (
+        (f"view:min:{viewer_key}", VIEW_BURST_LIMIT_PER_MINUTE, 60),
+        (f"view:10m:{viewer_key}", VIEW_BURST_LIMIT_PER_10_MINUTES, 10 * 60),
+        (f"view-ip:min:{client_ip_key}", VIEW_IP_BURST_LIMIT_PER_MINUTE, 60),
+        (f"view-ip:10m:{client_ip_key}", VIEW_IP_BURST_LIMIT_PER_10_MINUTES, 10 * 60),
+    ):
+        allowed, _, reset_after = check_fixed_window(key, limit, window_seconds)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Request view quá nhanh, thử lại sau {reset_after}s",
+            )
 
     if elapsed_seconds < VIEW_MIN_ELAPSED_SECONDS:
         return {"ok": True, "counted": False, "reason": "too-short"}
@@ -5507,13 +5608,22 @@ async def add_view(
     if progress < VIEW_MIN_PROGRESS_PERCENT and page_seen < min_page_seen:
         return {"ok": True, "counted": False, "reason": "not-enough-progress"}
 
-    once_key = f"view:once:{viewer_key}:{view_slug}:{chapter_id or '_manga'}:{session_id}"
+    chapter_validation = await _validate_view_chapter_owner(db, view_slug, chapter_id)
+    if chapter_validation != "valid":
+        reason = (
+            "chapter-validation-unavailable"
+            if chapter_validation == "unavailable"
+            else "chapter-manga-mismatch"
+        )
+        return {"ok": False, "counted": False, "reason": reason}
+
+    once_key = f"view:once:{viewer_key}:{view_slug}"
     is_new_view, wait_seconds = check_recent_once(once_key, VIEW_DEDUP_SECONDS, mark=False)
     if not is_new_view:
         return {"ok": True, "counted": False, "reason": "duplicate", "retry_after": wait_seconds}
 
     user_id = user.get("id") if user else None
-    if user_id and _recent_user_view_exists(db, user_id, view_slug, chapter_id):
+    if user_id and _recent_user_view_exists(db, user_id, view_slug):
         return {"ok": True, "counted": False, "reason": "recent-user-view"}
 
     checked_rpc_result = _track_manga_view_checked_rpc(
@@ -5530,49 +5640,18 @@ async def add_view(
         page_seen=page_seen,
         min_page_seen=min_page_seen,
     )
-    if checked_rpc_result is not None:
-        if checked_rpc_result.get("counted"):
-            check_recent_once(once_key, VIEW_DEDUP_SECONDS, mark=True)
-            _bump_manga_views_lookup_cache(view_slug)
-            return {"ok": True, "counted": True}
-        return {
-            "ok": bool(checked_rpc_result.get("ok", True)),
-            "counted": False,
-            "reason": checked_rpc_result.get("reason") or "not-counted",
-        }
+    if checked_rpc_result is None:
+        return {"ok": False, "counted": False, "reason": "tracking-unavailable"}
 
-    try:
-        db.rpc("increment_manga_view", {"p_manga_slug": view_slug}).execute()
-    except Exception:
-        # Fallback when RPC is unavailable: manually upsert counter.
-        try:
-            existing = (
-                db.table("manga_views")
-                .select("manga_slug,views")
-                .eq("manga_slug", view_slug)
-                .maybe_single()
-                .execute()
-            )
-            current = int(((existing.data or {}).get("views") or 0)) if existing else 0
-            db.table("manga_views").upsert(
-                {"manga_slug": view_slug, "views": current + 1},
-                on_conflict="manga_slug",
-            ).execute()
-        except Exception:
-            pass
-    try:
-        db.table("manga_view_events").insert(
-            {
-                "manga_slug": view_slug,
-                "chapter_id": chapter_id or None,
-                "user_id": user_id,
-            }
-        ).execute()
-    except Exception:
-        logger.debug("manga.view event insert skipped: slug=%s ip=%s", view_slug, client_ip)
-    _bump_manga_views_lookup_cache(view_slug)
-    check_recent_once(once_key, VIEW_DEDUP_SECONDS, mark=True)
-    return {"ok": True, "counted": True}
+    if checked_rpc_result.get("counted"):
+        check_recent_once(once_key, VIEW_DEDUP_SECONDS, mark=True)
+        _bump_manga_views_lookup_cache(view_slug)
+        return {"ok": True, "counted": True}
+    return {
+        "ok": bool(checked_rpc_result.get("ok", True)),
+        "counted": False,
+        "reason": checked_rpc_result.get("reason") or "not-counted",
+    }
 
 
 @router.get("/search")

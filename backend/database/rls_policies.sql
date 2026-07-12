@@ -108,20 +108,13 @@ DROP POLICY IF EXISTS "comments_select_all" ON comments;
 CREATE POLICY "comments_select_all" ON comments
     FOR SELECT USING (is_deleted = FALSE);
 
--- Authenticated users can insert
+-- All comment mutations go through FastAPI so content validation, counters,
+-- rate limits, and moderation checks cannot be bypassed through PostgREST.
 DROP POLICY IF EXISTS "comments_insert_auth" ON comments;
-CREATE POLICY "comments_insert_auth" ON comments
-    FOR INSERT WITH CHECK (user_id = auth.uid());
-
--- Users can update/delete own comments
 DROP POLICY IF EXISTS "comments_update_own" ON comments;
-CREATE POLICY "comments_update_own" ON comments
-    FOR UPDATE USING (user_id = auth.uid())
-    WITH CHECK (user_id = auth.uid());
-
 DROP POLICY IF EXISTS "comments_delete_own" ON comments;
-CREATE POLICY "comments_delete_own" ON comments
-    FOR DELETE USING (user_id = auth.uid());
+REVOKE INSERT, UPDATE, DELETE ON TABLE comments FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE comments TO service_role;
 
 -- ============================================================
 -- COMMENT LIKES
@@ -131,12 +124,9 @@ CREATE POLICY "likes_select_all" ON comment_likes
     FOR SELECT USING (TRUE);
 
 DROP POLICY IF EXISTS "likes_insert_own" ON comment_likes;
-CREATE POLICY "likes_insert_own" ON comment_likes
-    FOR INSERT WITH CHECK (user_id = auth.uid());
-
 DROP POLICY IF EXISTS "likes_delete_own" ON comment_likes;
-CREATE POLICY "likes_delete_own" ON comment_likes
-    FOR DELETE USING (user_id = auth.uid());
+REVOKE INSERT, UPDATE, DELETE ON TABLE comment_likes FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE comment_likes TO service_role;
 
 -- ============================================================
 -- COMMENT REACTIONS
@@ -146,17 +136,10 @@ CREATE POLICY "reactions_select_all" ON comment_reactions
     FOR SELECT USING (TRUE);
 
 DROP POLICY IF EXISTS "reactions_insert_own" ON comment_reactions;
-CREATE POLICY "reactions_insert_own" ON comment_reactions
-    FOR INSERT WITH CHECK (user_id = auth.uid());
-
 DROP POLICY IF EXISTS "reactions_update_own" ON comment_reactions;
-CREATE POLICY "reactions_update_own" ON comment_reactions
-    FOR UPDATE USING (user_id = auth.uid())
-    WITH CHECK (user_id = auth.uid());
-
 DROP POLICY IF EXISTS "reactions_delete_own" ON comment_reactions;
-CREATE POLICY "reactions_delete_own" ON comment_reactions
-    FOR DELETE USING (user_id = auth.uid());
+REVOKE INSERT, UPDATE, DELETE ON TABLE comment_reactions FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE comment_reactions TO service_role;
 
 -- ============================================================
 -- NOTIFICATIONS
@@ -192,8 +175,8 @@ CREATE POLICY "ratings_update_own" ON ratings
 -- REPORTS
 -- ============================================================
 DROP POLICY IF EXISTS "reports_insert_auth" ON reports;
-CREATE POLICY "reports_insert_auth" ON reports
-    FOR INSERT WITH CHECK (reporter_id = auth.uid());
+REVOKE INSERT, UPDATE, DELETE ON TABLE reports FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE reports TO service_role;
 
 DROP POLICY IF EXISTS "reports_select_own" ON reports;
 CREATE POLICY "reports_select_own" ON reports
@@ -210,28 +193,21 @@ CREATE POLICY "groups_select_all" ON scanlation_groups
     FOR SELECT USING (TRUE);
 
 DROP POLICY IF EXISTS "groups_insert_auth" ON scanlation_groups;
-CREATE POLICY "groups_insert_auth" ON scanlation_groups
-    FOR INSERT WITH CHECK (owner_id = auth.uid());
-
 DROP POLICY IF EXISTS "groups_update_owner" ON scanlation_groups;
-CREATE POLICY "groups_update_owner" ON scanlation_groups
-    FOR UPDATE USING (owner_id = auth.uid());
-
 DROP POLICY IF EXISTS "groups_delete_owner" ON scanlation_groups;
-CREATE POLICY "groups_delete_owner" ON scanlation_groups
-    FOR DELETE USING (owner_id = auth.uid());
+REVOKE INSERT, UPDATE, DELETE ON TABLE scanlation_groups FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE scanlation_groups TO service_role;
 
 DROP POLICY IF EXISTS "group_members_select_all" ON group_members;
 CREATE POLICY "group_members_select_all" ON group_members
     FOR SELECT USING (TRUE);
 
 DROP POLICY IF EXISTS "group_members_insert_member" ON group_members;
-CREATE POLICY "group_members_insert_member" ON group_members
-    FOR INSERT WITH CHECK (user_id = auth.uid());
-
+-- Membership writes must go through the backend, which verifies group
+-- owner/admin permissions before using the service role.
 DROP POLICY IF EXISTS "group_members_delete_own" ON group_members;
-CREATE POLICY "group_members_delete_own" ON group_members
-    FOR DELETE USING (user_id = auth.uid());
+REVOKE INSERT, UPDATE, DELETE ON TABLE group_members FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE group_members TO service_role;
 
 -- ============================================================
 -- CHAPTER UPLOADS (owner read/write, public read published)
@@ -243,16 +219,10 @@ CREATE POLICY "uploads_select_own_or_published" ON chapter_uploads
     FOR SELECT USING (uploader_id = auth.uid() OR status = 'published');
 
 DROP POLICY IF EXISTS "uploads_insert_own" ON chapter_uploads;
-CREATE POLICY "uploads_insert_own" ON chapter_uploads
-    FOR INSERT WITH CHECK (uploader_id = auth.uid());
-
 DROP POLICY IF EXISTS "uploads_update_own" ON chapter_uploads;
-CREATE POLICY "uploads_update_own" ON chapter_uploads
-    FOR UPDATE USING (uploader_id = auth.uid());
-
 DROP POLICY IF EXISTS "uploads_delete_own" ON chapter_uploads;
-CREATE POLICY "uploads_delete_own" ON chapter_uploads
-    FOR DELETE USING (uploader_id = auth.uid());
+REVOKE INSERT, UPDATE, DELETE ON TABLE chapter_uploads FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE chapter_uploads TO service_role;
 
 -- ============================================================
 -- MANGA UPLOADS
@@ -264,16 +234,10 @@ CREATE POLICY "manga_uploads_select_own_or_published" ON manga_uploads
     FOR SELECT USING (uploader_id = auth.uid() OR status = 'published');
 
 DROP POLICY IF EXISTS "manga_uploads_insert_own" ON manga_uploads;
-CREATE POLICY "manga_uploads_insert_own" ON manga_uploads
-    FOR INSERT WITH CHECK (uploader_id = auth.uid());
-
 DROP POLICY IF EXISTS "manga_uploads_update_own" ON manga_uploads;
-CREATE POLICY "manga_uploads_update_own" ON manga_uploads
-    FOR UPDATE USING (uploader_id = auth.uid());
-
 DROP POLICY IF EXISTS "manga_uploads_delete_own" ON manga_uploads;
-CREATE POLICY "manga_uploads_delete_own" ON manga_uploads
-    FOR DELETE USING (uploader_id = auth.uid());
+REVOKE INSERT, UPDATE, DELETE ON TABLE manga_uploads FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE manga_uploads TO service_role;
 
 -- ============================================================
 -- AUDIT LOG (admin read only, service role writes)

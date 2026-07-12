@@ -4,6 +4,7 @@ FastAPI dependencies — Supabase client, auth, RBAC.
 
 import base64
 import json
+import logging
 from datetime import datetime, timezone
 from time import time
 
@@ -14,6 +15,7 @@ from supabase import Client, create_client
 # Lazy-initialized Supabase clients
 _supabase_admin: Client | None = None
 _supabase_anon: Client | None = None
+logger = logging.getLogger(__name__)
 _AUTH_CACHE_TTL = 3.0
 _auth_cache: dict[str, tuple[float, dict]] = {}
 _profile_cache: dict[str, tuple[float, dict]] = {}
@@ -212,7 +214,8 @@ async def get_current_user(authorization: str = Header(None)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Xác thực thất bại: {str(e)}")
+        logger.exception("FastAPI authentication failed")
+        raise HTTPException(status_code=401, detail="Xác thực thất bại") from e
 
 
 async def get_optional_user(authorization: str = Header(None)):

@@ -2,6 +2,7 @@
 Uploads router — chapter upload CRUD + image upload to Supabase Storage.
 """
 import json
+import logging
 import re
 import time
 import uuid
@@ -16,11 +17,24 @@ from fastapi_app.dependencies import (
 from fastapi_app.utils.upload_security import IMAGE_EXT_BY_CONTENT_TYPE, read_upload_limited
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 BUCKET = "manga-pages"
 MANGA_COVER_FOLDER = "manga-covers"
 DEFAULT_MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB default
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+UPLOADER_SUBMISSION_STATUSES = frozenset({"draft", "pending"})
+
+
+def _normalize_uploader_submission_status(value, *, default: str = "draft") -> str:
+    """Keep publish/reject transitions inside the moderator review endpoints."""
+    status = str(default if value is None else value).strip().lower()
+    if status not in UPLOADER_SUBMISSION_STATUSES:
+        raise HTTPException(
+            status_code=403,
+            detail="Uploader chỉ có thể lưu bản nháp hoặc gửi chờ duyệt",
+        )
+    return status
 
 
 def _get_max_file_size(db) -> int:
@@ -202,8 +216,7 @@ async def create_manga_upload(
     if not author.strip():
         raise HTTPException(status_code=400, detail="Tác giả là bắt buộc")
 
-    if status not in ("draft", "pending"):
-        raise HTTPException(status_code=400, detail="Status chỉ hỗ trợ draft hoặc pending")
+    status = _normalize_uploader_submission_status(status)
 
     if manga_type not in ("manga", "manhwa", "webtoon"):
         raise HTTPException(status_code=400, detail="Loại truyện không hợp lệ")
@@ -244,7 +257,8 @@ async def create_manga_upload(
             file_options={"content-type": cover_content_type},
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload ảnh bìa thất bại: {str(e)}")
+        logger.exception("Manga cover upload failed")
+        raise HTTPException(status_code=500, detail="Upload ảnh bìa thất bại") from e
 
     cover_url = db.storage.from_(BUCKET).get_public_url(cover_path)
 
@@ -307,9 +321,12 @@ async def update_manga_upload(
     if "group_id" in data:
         _validate_user_group_access(db, user["id"], next_group_id)
 
+    if "status" in data:
+        update_data["status"] = _normalize_uploader_submission_status(data.get("status"))
+
     for key in (
         "title", "author", "artist", "manga_type",
-        "publish_status", "description", "genres", "language", "status", "group_id"
+        "publish_status", "description", "genres", "language", "group_id"
     ):
         if key in data:
             update_data[key] = data[key]
@@ -392,7 +409,7 @@ async def create_upload(
         "chapter_title": chapter_title,
         "language": data.get("language", "vi"),
         "pages": data.get("pages", []),
-        "status": data.get("status", "draft"),
+        "status": _normalize_uploader_submission_status(data.get("status")),
         "group_id": data.get("group_id"),
     }
     result = db.table("chapter_uploads").insert(insert).execute()
@@ -419,7 +436,10 @@ async def update_upload(
         _validate_user_group_access(db, user["id"], data.get("group_id"))
 
     update_data = {}
-    for key in ("chapter_title", "pages", "status", "language", "group_id"):
+    if "status" in data:
+        update_data["status"] = _normalize_uploader_submission_status(data.get("status"))
+
+    for key in ("chapter_title", "pages", "language", "group_id"):
         if key in data:
             update_data[key] = data[key]
 

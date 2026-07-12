@@ -28,6 +28,7 @@ class Config:
 
     # Flask
     FLASK_SECRET_KEY: str = os.getenv("FLASK_SECRET_KEY", "")
+    BACKEND_BIND_HOST: str = os.getenv("BACKEND_BIND_HOST", "127.0.0.1")
     FLASK_PORT: int = int(os.getenv("FLASK_PORT", "5000"))
     FLASK_DEBUG: bool = _env_bool("FLASK_DEBUG", False)
     ALLOW_DEV_SECRET_FALLBACK: bool = _env_bool("ALLOW_DEV_SECRET_FALLBACK", FLASK_DEBUG)
@@ -47,6 +48,17 @@ class Config:
         "http://localhost:8080" if FLASK_DEBUG else "",
     )
     CORS_ALLOW_LOCALHOST: bool = _env_bool("CORS_ALLOW_LOCALHOST", FLASK_DEBUG)
+
+    # Reverse proxy / distributed rate-limit security. HTTPS deployments fail
+    # closed when Redis is unavailable; local HTTP development keeps its fallback.
+    TRUSTED_PROXY_CIDRS: str = os.getenv(
+        "TRUSTED_PROXY_CIDRS",
+        "127.0.0.1/32,::1/128",
+    )
+    SECURITY_REQUIRE_REDIS: bool = _env_bool(
+        "SECURITY_REQUIRE_REDIS",
+        FRONTEND_URL.lower().startswith("https://"),
+    )
 
     # Auth
     EMAIL_VERIFY_TIMEOUT_MINUTES: int = int(os.getenv("EMAIL_VERIFY_TIMEOUT_MINUTES", "15"))

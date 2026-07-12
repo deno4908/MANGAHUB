@@ -34,7 +34,7 @@ def run_flask_threaded() -> None:
 
     app = create_app()
     app.run(
-        host="0.0.0.0",
+        host=config.BACKEND_BIND_HOST,
         port=config.FLASK_PORT,
         debug=config.FLASK_DEBUG,
         use_reloader=False,
@@ -48,10 +48,11 @@ def run_fastapi_multiworker() -> None:
     workers = _resolve_fastapi_workers()
     uvicorn.run(
         "fastapi_app.main:app",
-        host="0.0.0.0",
+        host=config.BACKEND_BIND_HOST,
         port=config.FASTAPI_PORT,
         reload=False,
         workers=workers,
+        proxy_headers=False,
     )
 
 

@@ -6,6 +6,7 @@ import re
 import base64
 import hashlib
 import json
+import logging
 import time
 import urllib.parse
 import urllib.request
@@ -16,6 +17,7 @@ from supabase import create_client
 from config import config
 from flask_app.middleware import clear_auth_cache, require_auth, get_current_user_id
 from flask_app import limiter
+from proxy_trust import resolve_client_ip
 from vip_access import normalize_vip_profile
 
 try:
@@ -24,6 +26,7 @@ except Exception:  # pragma: no cover - Redis is optional for local dev.
     redis = None
 
 auth_bp = Blueprint("auth", __name__)
+logger = logging.getLogger(__name__)
 
 _supabase = None
 _supabase_admin = None
@@ -43,6 +46,9 @@ _MIN_PBKDF2_ITERATIONS = 200_000
 _SIGN_OUT_SCOPES = {"local", "global", "others"}
 _REFRESH_COOKIE_NAME = "mh_refresh_token"
 _OAUTH_VERIFIER_COOKIE_NAME = "mh_oauth_code_verifier"
+_AUTH_CSRF_HEADER_NAME = "X-MangaHub-CSRF"
+_AUTH_CSRF_HEADER_VALUE = "1"
+_AUTH_INTERNAL_ERROR_MESSAGE = "Dịch vụ xác thực tạm thời không khả dụng. Vui lòng thử lại sau."
 _REFRESH_COOKIE_MAX_AGE_SECONDS = max(
     60 * 60 * 24,
     int(getattr(config, "REFRESH_COOKIE_MAX_AGE_SECONDS", 60 * 60 * 24 * 365 * 5)),
@@ -114,7 +120,64 @@ def _refresh_cookie_secure() -> bool:
 
 
 def _refresh_cookie_samesite() -> str:
-    return "None" if _refresh_cookie_secure() else "Lax"
+    return "Lax"
+
+
+def _normalize_origin(value: str | None) -> str:
+    try:
+        parsed = urllib.parse.urlparse(str(value or "").strip())
+    except Exception:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+def _trusted_auth_origins() -> set[str]:
+    origins = {_normalize_origin(config.FRONTEND_URL), _normalize_origin(request.host_url)}
+    if getattr(config, "CORS_ALLOW_LOCALHOST", False):
+        origins.update(
+            {
+                "http://localhost:5173",
+                "http://localhost:8080",
+                "http://localhost:3000",
+            }
+        )
+    return {origin for origin in origins if origin}
+
+
+def _auth_csrf_error():
+    if request.headers.get(_AUTH_CSRF_HEADER_NAME, "") != _AUTH_CSRF_HEADER_VALUE:
+        return jsonify({"error": "Yêu cầu xác thực không hợp lệ"}), 403
+
+    trusted_origins = _trusted_auth_origins()
+    origin = _normalize_origin(request.headers.get("Origin"))
+    referer = _normalize_origin(request.headers.get("Referer"))
+    presented_origin = origin or referer
+    if presented_origin and presented_origin not in trusted_origins:
+        logger.warning("Blocked auth request from untrusted origin: %s", presented_origin)
+        return jsonify({"error": "Nguồn yêu cầu không được phép"}), 403
+    return None
+
+
+@auth_bp.before_request
+def enforce_auth_csrf():
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return None
+    return _auth_csrf_error()
+
+
+def _log_auth_exception(context: str, error: Exception) -> None:
+    logger.error(
+        "%s",
+        context,
+        exc_info=(type(error), error, error.__traceback__),
+    )
+
+
+def _auth_internal_error(context: str, error: Exception):
+    _log_auth_exception(context, error)
+    return jsonify({"error": _AUTH_INTERNAL_ERROR_MESSAGE}), 500
 
 
 def _set_refresh_cookie(response, refresh_token: str):
@@ -455,8 +518,7 @@ def _password_candidates(data: dict, field_name: str) -> list[str]:
 
 
 def _client_ip() -> str:
-    forwarded = str(request.headers.get("X-Forwarded-For", "") or "").split(",")[0].strip()
-    return forwarded or str(request.remote_addr or "").strip()
+    return resolve_client_ip(request.remote_addr, request.headers)
 
 
 def _verify_recaptcha_token(token: str) -> tuple[bool, str]:
@@ -962,7 +1024,7 @@ def register():
             or "duplicate" in error_msg_lower
         ):
             return jsonify({"error": "Email đã được đăng ký"}), 409
-        return jsonify({"error": f"Đăng ký thất bại: {error_msg}"}), 500
+        return _auth_internal_error("Registration failed", e)
 
 
 @auth_bp.route("/login", methods=["POST"])
@@ -1054,7 +1116,7 @@ def login():
         error_msg = str(e)
         if "invalid" in error_msg.lower():
             return jsonify({"error": "Email hoặc mật khẩu không đúng"}), 401
-        return jsonify({"error": f"Đăng nhập thất bại: {error_msg}"}), 500
+        return _auth_internal_error("Login failed", e)
 
 
 @auth_bp.route("/logout", methods=["POST"])
@@ -1080,14 +1142,16 @@ def logout():
         revoked, revoke_error = _revoke_supabase_sessions(scope)
     else:
         revoked, revoke_error = False, ""
+    if profile_error:
+        logger.error("Could not persist logout security event: %s", profile_error)
+    if revoke_error:
+        logger.error("Could not revoke Supabase session: %s", revoke_error)
     clear_auth_cache(user_id=user_id, token=str(getattr(g, "access_token", "") or ""))
     return _json({
         "message": "Đăng xuất thành công",
         "scope": scope,
         "revoked": revoked,
-        "revoke_error": revoke_error,
         "session_state_updated": profile_marked,
-        "session_state_error": profile_error,
     }, 200, clear_refresh=True)
 
 @auth_bp.route("/forgot-password", methods=["POST"])
@@ -1111,7 +1175,7 @@ def forgot_password():
             "message": "Email đặt lại mật khẩu đã được gửi. Vui lòng kiểm tra hộp thư."
         }), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _auth_internal_error("Password reset email failed", e)
 
 
 @auth_bp.route("/verify-otp", methods=["POST"])
@@ -1146,7 +1210,8 @@ def verify_otp():
             return jsonify({"error": "OTP không hợp lệ"}), 400
 
     except Exception as e:
-        return jsonify({"error": f"Xác thực thất bại: {str(e)}"}), 400
+        _log_auth_exception("OTP verification failed", e)
+        return jsonify({"error": "OTP không hợp lệ hoặc đã hết hạn"}), 400
 
 
 @auth_bp.route("/reset-password", methods=["POST"])
@@ -1169,17 +1234,19 @@ def reset_password():
         _get_sb_admin().auth.admin.update_user_by_id(user_id, {"password": new_password})
         profile_marked, profile_error = _mark_session_security_event(user_id, password_changed=True)
         revoked, revoke_error = _revoke_supabase_sessions("global")
+        if profile_error:
+            logger.error("Could not persist password reset security event: %s", profile_error)
+        if revoke_error:
+            logger.error("Could not revoke sessions after password reset: %s", revoke_error)
         clear_auth_cache(user_id=user_id, token=str(getattr(g, "access_token", "") or ""))
         return _json({
             "message": "Đổi mật khẩu thành công. Vui lòng đăng nhập lại.",
             "requires_relogin": True,
             "revoked": revoked,
-            "revoke_error": revoke_error,
             "session_state_updated": profile_marked,
-            "session_state_error": profile_error,
         }, 200, clear_refresh=True)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _auth_internal_error("Password reset failed", e)
 
 
 @auth_bp.route("/change-password", methods=["POST"])
@@ -1218,17 +1285,19 @@ def change_password():
         _get_sb_admin().auth.admin.update_user_by_id(user_id, {"password": new_password})
         profile_marked, profile_error = _mark_session_security_event(user_id, password_changed=True)
         revoked, revoke_error = _revoke_supabase_sessions("global")
+        if profile_error:
+            logger.error("Could not persist password change security event: %s", profile_error)
+        if revoke_error:
+            logger.error("Could not revoke sessions after password change: %s", revoke_error)
         clear_auth_cache(user_id=user_id, token=str(getattr(g, "access_token", "") or ""))
         return _json({
             "message": "Đổi mật khẩu thành công. Vui lòng đăng nhập lại.",
             "requires_relogin": True,
             "revoked": revoked,
-            "revoke_error": revoke_error,
             "session_state_updated": profile_marked,
-            "session_state_error": profile_error,
         }, 200, clear_refresh=True)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _auth_internal_error("Password change failed", e)
 
 @auth_bp.route("/me", methods=["GET"])
 @require_auth
@@ -1359,7 +1428,7 @@ def refresh_token():
                 "error": "Refresh token không hợp lệ",
                 "requires_relogin": True,
             }, 401, clear_refresh=True)
-        return jsonify({"error": message}), 500
+        return _auth_internal_error("Token refresh failed", e)
 
 
 @auth_bp.route("/google", methods=["POST"])
@@ -1382,7 +1451,7 @@ def google_login():
             return _json({"url": result.url}, 200, oauth_code_verifier=code_verifier)
         return jsonify({"error": "Không thể tạo link Google"}), 500
     except Exception as e:
-        return jsonify({"error": f"Google login thất bại: {str(e)}"}), 500
+        return _auth_internal_error("Google login failed", e)
 
 
 
@@ -1406,7 +1475,7 @@ def discord_login():
             return _json({"url": result.url}, 200, oauth_code_verifier=code_verifier)
         return jsonify({"error": "Không thể tạo link Discord"}), 500
     except Exception as e:
-        return jsonify({"error": f"Discord login thất bại: {str(e)}"}), 500
+        return _auth_internal_error("Discord login failed", e)
 
 
 @auth_bp.route("/oauth/callback", methods=["POST"])
@@ -1496,7 +1565,7 @@ def oauth_callback():
         }, 200, refresh_token=refresh_token_value)
 
     except Exception as e:
-        return jsonify({"error": f"OAuth callback thất bại: {str(e)}"}), 500
+        return _auth_internal_error("OAuth callback failed", e)
 
 
 @auth_bp.route("/oauth/code", methods=["POST"])
@@ -1601,8 +1670,9 @@ def oauth_exchange_code():
         }, 200, refresh_token=session.refresh_token, clear_oauth_verifier=True)
 
     except Exception as e:
+        _log_auth_exception("OAuth code exchange failed", e)
         return _json({
-            "error": f"Code exchange thất bại: {str(e)}",
+            "error": _AUTH_INTERNAL_ERROR_MESSAGE,
         }, 500, clear_oauth_verifier=True)
 
 

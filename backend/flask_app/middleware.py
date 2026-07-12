@@ -1,6 +1,7 @@
 """
 JWT middleware for Flask routes — with role support.
 """
+import logging
 import jwt
 from functools import wraps
 from flask import request, jsonify, g
@@ -10,6 +11,7 @@ from time import time
 from datetime import datetime, timezone
 
 _supabase = None
+logger = logging.getLogger(__name__)
 _AUTH_CACHE_TTL = 3.0
 _auth_cache = {}
 _profile_cache = {}
@@ -145,7 +147,8 @@ def require_auth(f):
                 return jsonify({"error": "Phiên đăng nhập đã hết hạn"}), 401
 
         except Exception as e:
-            return jsonify({"error": f"Xác thực thất bại: {str(e)}"}), 401
+            logger.exception("Flask authentication failed")
+            return jsonify({"error": "Xác thực thất bại"}), 401
 
         return f(*args, **kwargs)
     return decorated

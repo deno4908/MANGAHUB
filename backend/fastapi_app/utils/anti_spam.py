@@ -14,6 +14,7 @@ from threading import Lock
 from typing import Deque
 
 from fastapi import HTTPException, Request
+from proxy_trust import resolve_client_ip
 
 try:
     import redis  # type: ignore
@@ -38,17 +39,9 @@ _redis_error_count = 0
 _REDIS_DISABLE_SECONDS = 30.0
 
 
-def _clean_header_ip(value: str) -> str:
-    return str(value or "").split(",", 1)[0].strip()
-
-
 def get_client_ip(request: Request) -> str:
-    headers = request.headers
-    for header in ("cf-connecting-ip", "x-real-ip", "x-forwarded-for"):
-        value = _clean_header_ip(headers.get(header, ""))
-        if value:
-            return value
-    return request.client.host if request.client else "unknown"
+    peer_ip = request.client.host if request.client else ""
+    return resolve_client_ip(peer_ip, request.headers)
 
 
 def request_fingerprint(request: Request, user_id: str | None = None) -> str:
@@ -147,6 +140,12 @@ def check_fixed_window(key: str, limit: int, window_seconds: int) -> tuple[bool,
     redis_result = _redis_fixed_window(key, max(1, int(limit)), max(1, int(window_seconds)))
     if redis_result is not None:
         return redis_result
+
+    if bool(getattr(config, "SECURITY_REQUIRE_REDIS", False)):
+        raise HTTPException(
+            status_code=503,
+            detail="Dịch vụ chống spam tạm thời không khả dụng",
+        )
 
     global _counter_calls
     now = time.monotonic()

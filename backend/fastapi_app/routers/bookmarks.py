@@ -1,12 +1,15 @@
 """
 Bookmarks & Follows router.
 """
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi_app.dependencies import get_current_user, get_supabase
 from fastapi_app.models.schemas import MangaAction
 from fastapi_app.utils.anti_spam import enforce_user_action_limit
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 LIBRARY_WRITE_LIMIT_PER_MINUTE = 40
 LIBRARY_WRITE_LIMIT_PER_10_MINUTES = 180
 
@@ -70,7 +73,8 @@ async def add_bookmark(
     except Exception as e:
         if "duplicate" in str(e).lower() or "unique" in str(e).lower():
             return {"message": "Đã bookmark trước đó"}
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Bookmark creation failed")
+        raise HTTPException(status_code=500, detail="Không thể lưu truyện lúc này") from e
 
 
 @router.delete("/{manga_slug}")
@@ -138,7 +142,8 @@ async def add_follow(
     except Exception as e:
         if "duplicate" in str(e).lower() or "unique" in str(e).lower():
             return {"message": "Đã theo dõi trước đó"}
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Follow creation failed")
+        raise HTTPException(status_code=500, detail="Không thể theo dõi truyện lúc này") from e
 
 
 @router.delete("/follows/{manga_slug}")
