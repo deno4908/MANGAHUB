@@ -1,7 +1,7 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Menu, X, User, Home, Compass, History, Bell, Shuffle, Settings, LogOut, LogIn, Bookmark, Trophy, LifeBuoy, Heart } from 'lucide-react';
+import { Search, Menu, X, User, Home, Compass, History, Bell, Shuffle, Settings, LogOut, LogIn, Bookmark, Trophy, LifeBuoy, Heart, ShieldCheck, Upload } from 'lucide-react';
 import { useUserStore } from '@/store/userStore';
 import { mangaApi } from '@/lib/api';
 import { adaptMangaItem } from '@/lib/adapters';
@@ -65,7 +65,7 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
   const suggestionCacheRef = useRef<Map<string, Manga[]>>(new Map());
   const location = useLocation();
   const navigate = useNavigate();
-  const { isLoggedIn, notifications, markNotificationRead, markAllNotificationsRead, logout } = useUserStore();
+  const { isLoggedIn, user, notifications, markNotificationRead, markAllNotificationsRead, logout } = useUserStore();
   const unreadCount = notifications.filter(n => !n.read).length;
 
   const handleSearch = (e: React.FormEvent) => {
@@ -230,6 +230,14 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
     { to: '/support', label: 'Hỗ trợ', icon: LifeBuoy },
   ];
 
+  const currentRole = String(user?.role || 'reader').toLowerCase();
+  const canUpload = ['uploader', 'moderator', 'admin'].includes(currentRole);
+  const canManage = ['moderator', 'admin'].includes(currentRole);
+  const privilegedProfileLinks = [
+    ...(canManage ? [{ to: '/admin', label: 'Quản trị', icon: ShieldCheck }] : []),
+    ...(canUpload ? [{ to: '/upload', label: 'Đăng truyện', icon: Upload }] : []),
+  ];
+
   const isActive = (path: string) => location.pathname === path;
 
   if (maintenanceMode) {
@@ -380,6 +388,19 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
                     {showProfileMenu && (
                       <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}
                         className="absolute top-full right-0 mt-2 w-48 bg-card rounded-lg border border-border p-1 shadow-elevated z-50">
+                        {privilegedProfileLinks.length > 0 && (
+                          <>
+                            {privilegedProfileLinks.map(link => (
+                              <Link key={link.to} to={link.to}
+                                className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                                  isActive(link.to) ? 'text-primary bg-primary/5' : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+                                }`}>
+                                <link.icon className="w-4 h-4" />{link.label}
+                              </Link>
+                            ))}
+                            <div className="border-t border-border my-1" />
+                          </>
+                        )}
                         {profileLinks.map(link => (
                           <Link key={link.to} to={link.to}
                             className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
@@ -468,6 +489,14 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
                 <Shuffle className="w-4 h-4" /> {loadingRandom ? 'Đang chọn...' : 'Ngẫu nhiên'}
               </button>
               <div className="border-t border-border my-1" />
+              {isLoggedIn && privilegedProfileLinks.map(link => (
+                <Link key={link.to} to={link.to}
+                  className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                    isActive(link.to) ? 'text-primary bg-primary/5' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}`}>
+                  <link.icon className="w-4 h-4" />{link.label}
+                </Link>
+              ))}
+              {isLoggedIn && privilegedProfileLinks.length > 0 && <div className="border-t border-border my-1" />}
               {profileLinks.map(link => (
                 <Link key={link.to} to={link.to}
                   className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${

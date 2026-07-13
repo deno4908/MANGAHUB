@@ -4,14 +4,18 @@ FastAPI application — main REST API service.
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from config import config
-from fastapi_app.dependencies import get_supabase_admin, require_admin
+from fastapi_app.dependencies import (
+    authorize_api_request,
+    get_supabase_admin,
+    require_admin,
+)
 from maintenance import (
     get_maintenance_state,
     is_admin_authorized,
@@ -335,6 +339,36 @@ if getattr(config, "CORS_ALLOW_LOCALHOST", False):
     )
 _cors_origins = list(dict.fromkeys(origin for origin in _cors_origins if origin))
 
+_PUBLIC_ADMIN_PATHS = frozenset({"/api/admin/announcements/active"})
+_PUBLIC_UPLOAD_PATH_PREFIXES = ("/api/uploads/published/",)
+
+
+def _minimum_api_role_for_path(path: str) -> str | None:
+    """Return the role floor for privileged API namespaces.
+
+    Individual endpoints still enforce their exact roles. This is a defensive
+    boundary so a future endpoint cannot accidentally expose an admin, upload,
+    or editor operation just because it missed a dependency declaration.
+    """
+    if path.startswith("/api/admin/"):
+        return None if path in _PUBLIC_ADMIN_PATHS else "moderator"
+    if path.startswith("/api/uploads/"):
+        if path.startswith(_PUBLIC_UPLOAD_PATH_PREFIXES):
+            return None
+        return "uploader"
+    if path.startswith("/api/editor/"):
+        return "uploader"
+    return None
+
+
+def _api_auth_error_headers(request: Request) -> dict[str, str]:
+    headers = {"Cache-Control": "no-store, max-age=0"}
+    origin = request.headers.get("Origin")
+    if origin in _cors_origins:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+    return headers
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
@@ -381,6 +415,27 @@ async def enforce_maintenance_mode(request: Request, call_next):
         content=maintenance_payload(state),
         headers=headers,
     )
+
+
+@app.middleware("http")
+async def enforce_api_access_policy(request: Request, call_next):
+    """Reject banned/invalid supplied tokens and protect privileged namespaces."""
+    if request.method == "OPTIONS" or not request.url.path.startswith("/api/"):
+        return await call_next(request)
+
+    try:
+        await authorize_api_request(
+            request.headers.get("Authorization"),
+            minimum_role=_minimum_api_role_for_path(request.url.path),
+        )
+    except HTTPException as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=_api_auth_error_headers(request),
+        )
+
+    return await call_next(request)
 
 
 @app.get("/api/maintenance")

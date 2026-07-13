@@ -88,7 +88,8 @@ For complete origin protection, allow SSH first, then restrict public ports
 ## 4. Apply the Supabase security migration
 
 Run `backend/database/migration_v22_view_proxy_rls_security.sql` in the Supabase
-SQL Editor, or with a direct database connection:
+SQL Editor, or with a direct database connection. Migrations v6, v15, v19, and
+v21 must already be applied first:
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \

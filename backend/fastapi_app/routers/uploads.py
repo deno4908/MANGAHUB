@@ -9,7 +9,6 @@ import uuid
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from fastapi_app.dependencies import (
-    get_current_user,
     get_supabase,
     get_supabase_public,
     require_role,
@@ -288,7 +287,7 @@ async def create_manga_upload(
 @router.get("/manga/{upload_id}")
 async def get_manga_upload(
     upload_id: str,
-    user=Depends(get_current_user),
+    user=Depends(require_role("uploader", "moderator", "admin")),
     db=Depends(get_supabase),
 ):
     """Chi tiết manga upload."""
@@ -367,7 +366,7 @@ async def delete_manga_upload(
 @router.get("/{upload_id}")
 async def get_upload(
     upload_id: str,
-    user=Depends(get_current_user),
+    user=Depends(require_role("uploader", "moderator", "admin")),
     db=Depends(get_supabase),
 ):
     """Chi tiết upload."""

@@ -136,6 +136,23 @@ ROLE_HIERARCHY = {
     "moderator": 2,
     "admin": 3,
 }
+BANNED_ACCOUNT_DETAIL = "Tài khoản đã bị cấm"
+TOKEN_REQUIRED_DETAIL = "Token không được cung cấp"
+SESSION_REVOKED_DETAIL = "Phiên đăng nhập đã hết hạn"
+
+
+def invalidate_auth_cache(user_id: str | None = None) -> None:
+    """Drop cached auth/profile data after a role, ban, or session change."""
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_user_id:
+        _auth_cache.clear()
+        _profile_cache.clear()
+        return
+
+    _profile_cache.pop(normalized_user_id, None)
+    for token, (_expires_at, payload) in tuple(_auth_cache.items()):
+        if str(payload.get("id") or "") == normalized_user_id:
+            _auth_cache.pop(token, None)
 
 
 async def get_current_user(authorization: str = Header(None)):
@@ -146,7 +163,7 @@ async def get_current_user(authorization: str = Header(None)):
     """
     global _cleanup_counter
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Token không được cung cấp")
+        raise HTTPException(status_code=401, detail=TOKEN_REQUIRED_DETAIL)
 
     token = authorization[7:]
     _init_clients()
@@ -161,9 +178,9 @@ async def get_current_user(authorization: str = Header(None)):
     if cached_auth and cached_auth[0] > now:
         cached_user = cached_auth[1]
         if cached_user.get("is_banned"):
-            raise HTTPException(status_code=403, detail="Tài khoản đã bị cấm")
+            raise HTTPException(status_code=403, detail=BANNED_ACCOUNT_DETAIL)
         if cached_user.get("is_revoked"):
-            raise HTTPException(status_code=401, detail="Phiên đăng nhập đã hết hạn")
+            raise HTTPException(status_code=401, detail=SESSION_REVOKED_DETAIL)
         return {
             "id": cached_user["id"],
             "email": cached_user.get("email"),
@@ -184,7 +201,9 @@ async def get_current_user(authorization: str = Header(None)):
             profile_data = _fetch_auth_profile(user_id)
             _profile_cache[user_id] = (now + _AUTH_CACHE_TTL, profile_data)
 
-        role = profile_data.get("role", "reader")
+        role = str(profile_data.get("role", "reader") or "reader").strip().lower()
+        if role not in ROLE_HIERARCHY:
+            role = "reader"
         is_banned = bool(profile_data.get("is_banned"))
         is_revoked = _is_token_revoked(token, profile_data)
         cache_payload = {
@@ -201,10 +220,10 @@ async def get_current_user(authorization: str = Header(None)):
             _profile_cache.pop(user_id, None)
 
         if is_banned:
-            raise HTTPException(status_code=403, detail="Tài khoản đã bị cấm")
+            raise HTTPException(status_code=403, detail=BANNED_ACCOUNT_DETAIL)
 
         if is_revoked:
-            raise HTTPException(status_code=401, detail="Phiên đăng nhập đã hết hạn")
+            raise HTTPException(status_code=401, detail=SESSION_REVOKED_DETAIL)
 
         return {
             "id": user_id,
@@ -226,8 +245,45 @@ async def get_optional_user(authorization: str = Header(None)):
         return None
     try:
         return await get_current_user(authorization)
-    except HTTPException:
+    except HTTPException as exc:
+        # A banned bearer token must never silently become an anonymous visitor.
+        if exc.status_code == 403 and str(exc.detail) == BANNED_ACCOUNT_DETAIL:
+            raise
         return None
+
+
+async def authorize_api_request(
+    authorization: str | None,
+    *,
+    minimum_role: str | None = None,
+):
+    """Validate a supplied API token and optionally enforce a minimum role.
+
+    Public endpoints remain available without a token. Once a client supplies a
+    token, however, it must be valid and not banned so a banned session cannot
+    downgrade itself to anonymous access by hitting an optional-user endpoint.
+    """
+    required_role = str(minimum_role or "").strip().lower()
+    if required_role and required_role not in ROLE_HIERARCHY:
+        raise ValueError(f"Unknown minimum role: {required_role}")
+
+    if not authorization:
+        if required_role:
+            raise HTTPException(status_code=401, detail=TOKEN_REQUIRED_DETAIL)
+        return None
+
+    user = await get_current_user(authorization)
+    if not required_role:
+        return user
+
+    user_role = str(user.get("role", "reader") or "reader").strip().lower()
+    user_level = ROLE_HIERARCHY.get(user_role, ROLE_HIERARCHY["reader"])
+    if user_level < ROLE_HIERARCHY[required_role]:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Yêu cầu quyền {required_role}. Bạn là {user_role}.",
+        )
+    return user
 
 
 def require_role(*allowed_roles: str):
@@ -238,7 +294,7 @@ def require_role(*allowed_roles: str):
     """
 
     async def _check(user=Depends(get_current_user)):
-        user_role = user.get("role", "reader")
+        user_role = str(user.get("role", "reader") or "reader").strip().lower()
         user_level = ROLE_HIERARCHY.get(user_role, 0)
 
         # Check if user role is in allowed roles OR higher

@@ -144,7 +144,7 @@ async def update_group(
     request: Request,
     group_id: str,
     data: dict,
-    user=Depends(get_current_user),
+    user=Depends(require_role("uploader", "moderator", "admin")),
     db=Depends(get_supabase),
 ):
     """Cập nhật thông tin nhóm (chỉ owner/admin)."""
@@ -211,7 +211,7 @@ async def update_group(
 async def delete_group(
     request: Request,
     group_id: str,
-    user=Depends(get_current_user),
+    user=Depends(require_role("uploader", "moderator", "admin")),
     db=Depends(get_supabase),
 ):
     """Xóa nhóm (chỉ owner hoặc admin)."""
@@ -249,7 +249,7 @@ async def add_member(
     request: Request,
     group_id: str,
     data: dict,
-    user=Depends(get_current_user),
+    user=Depends(require_role("uploader", "moderator", "admin")),
     db=Depends(get_supabase),
 ):
     """Thêm thành viên vào nhóm."""
@@ -305,7 +305,7 @@ async def remove_member(
     request: Request,
     group_id: str,
     target_user_id: str,
-    user=Depends(get_current_user),
+    user=Depends(require_role("uploader", "moderator", "admin")),
     db=Depends(get_supabase),
 ):
     """Xóa thành viên khỏi nhóm."""

@@ -16,7 +16,12 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from fastapi_app.dependencies import get_supabase, require_admin, require_role
+from fastapi_app.dependencies import (
+    get_supabase,
+    invalidate_auth_cache,
+    require_admin,
+    require_role,
+)
 from fastapi_app.models.schemas import BanUser, ChangeRole, NotifyRequest, VipUpdate
 from fastapi_app.services import mangadex_service, otruyen_service
 from fastapi_app.utils.upload_security import IMAGE_EXT_BY_CONTENT_TYPE, read_upload_limited
@@ -2344,8 +2349,10 @@ async def ban_user(
         {
             "is_banned": True,
             "ban_reason": data.ban_reason,
+            "session_revoked_at": datetime.now(timezone.utc).isoformat(),
         }
     ).eq("id", data.user_id).execute()
+    invalidate_auth_cache(data.user_id)
 
     _log_action(db, admin, "Ban user", data.user_id)
     return {"message": "Đã cấm user"}
@@ -2362,6 +2369,8 @@ async def unban_user(
             "ban_reason": None,
         }
     ).eq("id", user_id).execute()
+    # Keep the prior session_revoked_at value: the user must sign in again.
+    invalidate_auth_cache(user_id)
     _log_action(db, admin, "Unban user", user_id)
     return {"message": "Đã bỏ cấm user"}
 
@@ -2384,6 +2393,7 @@ async def change_role(
             "role": data.role.value,
         }
     ).eq("id", data.user_id).execute()
+    invalidate_auth_cache(data.user_id)
 
     _log_action(db, admin, "Đổi role", f"{data.user_id} → {data.role.value}")
     return {"message": f"Đã đổi role thành {data.role.value}"}
