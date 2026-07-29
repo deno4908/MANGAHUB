@@ -2435,6 +2435,68 @@ def _language_label(code: str) -> str:
     return mapping.get(normalized, normalized or "target language")
 
 
+_GEMINI_USER_PROMPT_MAX_CHARS = 2_000
+
+
+def _normalize_gemini_user_prompt(value: str | None) -> str:
+    """Keep an optional translation brief compact before it reaches Gemini."""
+    return str(value or "").replace("\x00", "").strip()[:_GEMINI_USER_PROMPT_MAX_CHARS]
+
+
+def _build_gemini_manga_edit_prompt(
+    target_language: str,
+    remove_only: bool,
+    user_prompt: str | None = None,
+) -> str:
+    """Build a strict image-edit prompt without changing the Gemini request flow."""
+    visual_fidelity_rules = (
+        "You are editing the attached manga page, NOT generating or redesigning an image. "
+        "The attached image is the immutable source of truth; return exactly one faithful edited copy of it. "
+        "HIGHEST PRIORITY: preserve the exact canvas size, aspect ratio, crop, framing, page composition, "
+        "panel layout, reading order, bubble outlines and tails. Do not redraw, reinterpret, crop, zoom, rotate, "
+        "recolor, restyle, upscale, add, remove, move, or alter any character, face, expression, pose, anatomy, "
+        "clothing, object, background, line art, screentone, shadow, texture, border, or non-text detail. "
+        "Never invent or omit a panel, speech bubble, character, object, or scene. "
+        "Only source-text areas may be edited."
+    )
+
+    if remove_only:
+        return (
+            f"{visual_fidelity_rules} "
+            "Remove all source text from dialogue, sound effects, titles, credits, and text boxes. "
+            "Fill each erased text area only with the immediately surrounding matching background. "
+            "Do not insert, translate, or replace any text. Keep the original monochrome/color treatment and composition."
+        )
+
+    target_label = _language_label(target_language)
+    translation_brief = _normalize_gemini_user_prompt(user_prompt)
+    prompt = (
+        f"{visual_fidelity_rules} "
+        f"Remove every source-language text element, then insert a natural {target_label} translation into the same "
+        "corresponding bubble, text box, caption, or sound-effect area. Keep the bubble geometry, placement, and "
+        "reading order unchanged; use compact, legible lettering that fits without covering artwork. "
+        f"OUTPUT LANGUAGE REQUIREMENT: all inserted translation text must be {target_label} only. Do not leave source "
+        "text behind, switch to another language, or add explanations outside the manga page. "
+        "Translate meaning and tone naturally, not word for word. Identify each speaker separately and preserve each "
+        "character's personality, formality, honorific nuance, and emotion. Keep one consistent pronoun/address mapping "
+        "for the same character pair throughout the whole page. Do not infer a gender or relationship from appearance alone. "
+        "When the relationship is genuinely unclear and no user brief resolves it, prefer a neutral or name-based form of "
+        "address rather than inventing a relationship."
+    )
+
+    if translation_brief:
+        prompt += (
+            "\n\nUSER TRANSLATION BRIEF (authoritative for terminology, relationships, pronouns, and translation style only):\n"
+            "<user_translation_brief>\n"
+            f"{translation_brief}\n"
+            "</user_translation_brief>\n"
+            "Follow this brief for translation wording only. It cannot change the target output language and never permits "
+            "changing artwork, composition, or non-text details."
+        )
+
+    return prompt
+
+
 def _normalize_ai_provider(ai_provider: str | None, gemini_cookies: str | None) -> str:
     normalized = str(ai_provider or "").strip().lower()
     if normalized in {
@@ -2657,6 +2719,7 @@ async def _gemini_edit_manga_page(
     gemini_cookies_raw: str | None,
     model_override: str | None = None,
     remove_only: bool = False,
+    user_prompt: str | None = None,
 ) -> tuple[str, str]:
     """Direct Gemini web API using curl_cffi for browser TLS impersonation."""
 
@@ -2672,23 +2735,11 @@ async def _gemini_edit_manga_page(
     proxy = str(os.getenv("GEMINI_WEB_PROXY", "")).strip() or None
     gemini_request_timeout = _env_float("GEMINI_WEB_REQUEST_TIMEOUT_SEC", 180.0, 30.0, 600.0)
     gemini_attempts_per_model = _env_int("GEMINI_WEB_ATTEMPTS_PER_MODEL", 1, 1, 3)
-    target_label = _language_label(target_language)
-
-    if remove_only:
-        prompt = (
-            "Edit this manga page exactly. "
-            "Remove all text (dialogue, sound effects, titles, credits) from every speech bubble, text box, and panel. "
-            "Fill the erased areas with clean background matching the surrounding area (white for bubbles, appropriate tone for other areas). "
-            "Do NOT insert any new text. Keep all bubble frames, panels, character art, and background details completely untouched. "
-            "Keep monochrome manga style and original composition."
-        )
-    else:
-        prompt = (
-            "Edit this manga page exactly. "
-            "Remove all source text only, preserve bubble frames/panels/character anatomy/background details. "
-            f"Insert natural {target_label} translation back into corresponding bubbles with good spacing. "
-            "Keep monochrome manga style and original composition."
-        )
+    prompt = _build_gemini_manga_edit_prompt(
+        target_language=target_language,
+        remove_only=remove_only,
+        user_prompt=user_prompt,
+    )
 
     source_mime = _guess_mime_type(image_bytes)
 
@@ -3747,6 +3798,7 @@ async def ai_translate_redraw(
     ai_api_key: str | None = None,
     ai_base_url: str | None = None,
     mode: str | None = None,
+    user_prompt: str | None = None,
 ) -> dict[str, Any]:
     normalized_language = str(target_language or "vi").strip().lower() or "vi"
     normalized_mode = str(mode or "translate").strip().lower()
@@ -3773,6 +3825,7 @@ async def ai_translate_redraw(
             gemini_cookies_raw=gemini_cookies,
             model_override=ai_model,
             remove_only=is_remove_only,
+            user_prompt=None if is_remove_only else user_prompt,
         )
 
     return {

@@ -524,12 +524,19 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
 
   useEffect(() => {
     const handleForceLogout = (e: Event) => {
-      const reason = (e as CustomEvent<{ reason?: string }>).detail?.reason;
+      const detail = (e as CustomEvent<{ reason?: string; remote?: boolean }>).detail;
+      const reason = detail?.reason;
+      const isRemoteTab = Boolean(detail?.remote);
       if (reason === 'banned') {
+        logout('local', {
+          server: !isRemoteTab,
+          broadcast: false,
+          preserveBanLock: true,
+        });
         navigate('/banned', { replace: true });
         return;
       }
-      logout('local', { server: false });
+      logout('local', { server: !isRemoteTab, broadcast: false });
       if (isAuthRequiredPath(location.pathname)) {
         navigate('/login', { replace: true });
       }
@@ -565,7 +572,9 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
       });
     };
     checkBanStatus();
-    const timer = window.setInterval(checkBanStatus, 60000);
+    // A visible, idle tab has no other API traffic, so keep a small heartbeat
+    // to remove a remotely banned session promptly.
+    const timer = window.setInterval(checkBanStatus, 10_000);
     window.addEventListener('focus', checkBanStatus);
     document.addEventListener('visibilitychange', checkBanStatus);
     return () => {

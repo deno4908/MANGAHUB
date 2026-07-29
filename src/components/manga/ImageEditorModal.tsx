@@ -144,6 +144,7 @@ const ImageEditorModal = ({
   const [aiModel, setAiModel] = useState(GEMINI_DEFAULT_MODEL);
   const [openaiApiKey, setOpenaiApiKey] = useState("");
   const [openaiBaseUrl, setOpenaiBaseUrl] = useState("");
+  const [aiUserPrompt, setAiUserPrompt] = useState("");
   const [compareImageUrl, setCompareImageUrl] = useState<string | null>(null);
   const [showCompare, setShowCompare] = useState(false);
   const [imageHistory, setImageHistory] = useState<string[]>([]);
@@ -818,6 +819,7 @@ const ImageEditorModal = ({
       const apiKeyRaw = openaiApiKey.trim();
       const modelRaw = aiModel.trim();
       const baseUrlRaw = openaiBaseUrl.trim();
+      const userPrompt = aiUserPrompt.trim();
 
       if (aiProvider === "gemini" && !cookiesRaw) {
         throw new Error("Vui lòng dán cookie Gemini trước khi chạy AI");
@@ -835,6 +837,7 @@ const ImageEditorModal = ({
         aiModel: modelRaw,
         aiApiKey: aiProvider === "openai-compatible" ? apiKeyRaw : "",
         aiBaseUrl: aiProvider === "openai-compatible" ? baseUrlRaw : "",
+        userPrompt: aiProvider === "gemini" ? userPrompt : "",
         regions: regions.map((region) => ({
           x: region.x,
           y: region.y,
@@ -1349,6 +1352,20 @@ const ImageEditorModal = ({
                     placeholder="Dán cookie header hoặc JSON cookie export"
                     className="w-full bg-secondary border border-border rounded-md px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 resize-y"
                   />
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-muted-foreground">
+                      Yêu cầu dịch thêm <span className="font-normal">(tùy chọn)</span>
+                    </label>
+                    <textarea
+                      value={aiUserPrompt}
+                      onChange={(event) => setAiUserPrompt(event.target.value)}
+                      rows={4}
+                      maxLength={2000}
+                      placeholder="Ví dụ: Minh là nam, An là nữ; Minh xưng anh - em với An. Dịch tự nhiên, gần gũi."
+                      className="w-full resize-y rounded-md border border-border bg-secondary px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-primary/20"
+                    />
+                    <p className="text-right text-[10px] text-muted-foreground">{aiUserPrompt.length}/2000</p>
+                  </div>
                   <p className="text-[11px] text-muted-foreground leading-relaxed">
                     Cần tối thiểu __Secure-1PSID. Nếu có __Secure-1PSIDTS thì dán cùng để ổn định hơn.
                   </p>

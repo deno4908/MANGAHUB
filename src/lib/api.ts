@@ -148,6 +148,8 @@ type AuthTokenMessage = {
   type: "token" | "request-token" | "logout";
   source?: string;
   accessToken?: string;
+  logoutReason?: "banned" | "session-expired" | "logout";
+  banData?: Record<string, unknown>;
 };
 
 function getAuthTokenChannel() {
@@ -171,7 +173,11 @@ function getAuthTokenChannel() {
       }
 
       if (message.type === "logout") {
+        if (message.logoutReason === "banned") {
+          setBanLock(message.banData || {});
+        }
         clearTokens({ broadcast: false });
+        emitForceLogout(message.logoutReason || "logout", true);
       }
     };
   }
@@ -219,7 +225,13 @@ export function setTokens(access: string, _refresh?: string, options: { broadcas
   }
 }
 
-export function clearTokens(options: { broadcast?: boolean } = {}) {
+export function clearTokens(
+  options: {
+    broadcast?: boolean;
+    logoutReason?: "banned" | "session-expired" | "logout";
+    banData?: Record<string, unknown>;
+  } = {},
+) {
   accessToken = null;
   refreshBlockedUntil = 0;
   lastRefreshFailureHard = false;
@@ -234,7 +246,11 @@ export function clearTokens(options: { broadcast?: boolean } = {}) {
     // Ignore unavailable storage.
   }
   if (options.broadcast !== false) {
-    postAuthTokenMessage({ type: "logout" });
+    postAuthTokenMessage({
+      type: "logout",
+      logoutReason: options.logoutReason,
+      banData: options.banData,
+    });
   }
 }
 
@@ -359,10 +375,19 @@ function setRefreshRetryableBackoff() {
   refreshBlockedUntil = Math.max(refreshBlockedUntil, Date.now() + REFRESH_RETRYABLE_BACKOFF_MS);
 }
 
-function emitForceLogout(reason: string) {
+function emitForceLogout(reason: string, remote = false) {
   window.dispatchEvent(
-    new CustomEvent(FORCE_LOGOUT_EVENT, { detail: { reason } }),
+    new CustomEvent(FORCE_LOGOUT_EVENT, { detail: { reason, remote } }),
   );
+}
+
+function forceBanLogout(body: Record<string, unknown>) {
+  setBanLock(body);
+  clearTokens({
+    logoutReason: "banned",
+    banData: body,
+  });
+  emitForceLogout("banned");
 }
 
 function emitForceForbidden() {
@@ -788,8 +813,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
       if (retry.status === 403) {
         const body = await retry.json().catch(() => ({}));
         if (isBannedResponse(body)) {
-          setBanLock(body);
-          emitForceLogout("banned");
+          forceBanLogout(body);
           throw new Error("BANNED");
         }
         const message = body.error || body.detail || `Không có quyền truy cập`;
@@ -811,7 +835,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
     // Stop retry storms only after repeated hard failures. A single refresh race
     // should not sign the user out.
     if (shouldStopRestoringSession()) {
-      clearTokens();
+      clearTokens({ logoutReason: "session-expired" });
       emitForceLogout("session-expired");
       throw new Error("Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại");
     }
@@ -822,8 +846,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
   if (res.status === 403) {
     const body = await res.json().catch(() => ({}));
     if (isBannedResponse(body)) {
-      setBanLock(body);
-      emitForceLogout("banned");
+      forceBanLogout(body);
       throw new Error("BANNED");
     }
     const message = body.error || body.detail || `Không có quyền truy cập`;
@@ -952,6 +975,7 @@ type AuthRefreshOptions = {
 type AuthRefreshResult = {
   ok: boolean;
   data?: any;
+  banned?: boolean;
 };
 
 async function performAuthRefresh(options: AuthRefreshOptions = {}): Promise<AuthRefreshResult> {
@@ -990,6 +1014,12 @@ async function performAuthRefresh(options: AuthRefreshOptions = {}): Promise<Aut
           markRefreshFailure("refresh failed", false);
           setRefreshBackoff("refresh failed");
           return { ok: false, data };
+        }
+
+        if (response.status === 403 && isBannedResponse(data)) {
+          markRefreshFailure("BANNED", true);
+          forceBanLogout(data);
+          return { ok: false, data, banned: true };
         }
 
         const message = String(
@@ -1454,8 +1484,8 @@ export const authApi = {
   },
   refresh: async (options: AuthRefreshOptions = {}) => {
     const result = await performAuthRefresh(options);
-    if (!result.ok && shouldStopRestoringSession()) {
-      clearTokens();
+    if (!result.ok && !result.banned && shouldStopRestoringSession()) {
+      clearTokens({ logoutReason: "session-expired" });
       emitForceLogout("session-expired");
     }
     return result.ok;
@@ -1999,6 +2029,7 @@ export const imageEditorApi = {
       aiModel?: string;
       aiApiKey?: string;
       aiBaseUrl?: string;
+      userPrompt?: string;
     },
   ) => {
     const formData = new FormData();
@@ -2011,6 +2042,7 @@ export const imageEditorApi = {
     formData.append("ai_model", options?.aiModel || "");
     formData.append("ai_api_key", options?.aiApiKey || "");
     formData.append("ai_base_url", options?.aiBaseUrl || "");
+    formData.append("user_prompt", options?.userPrompt || "");
     return api<any>("/api/editor/ai-translate", {
       method: "POST",
       body: formData,

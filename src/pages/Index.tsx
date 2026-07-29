@@ -20,6 +20,7 @@ import {
 } from '@/lib/adapters';
 import { isEcchiManga, isMatureManga } from '@/lib/contentFilter';
 import { normalizeMangaDexId } from '@/lib/mangaLinks';
+import { applyBatchRatingsPayload } from '@/lib/mangaRatings';
 import type { Manga } from '@/types/manga';
 
 const SkeletonGrid = ({ count = 6 }: { count?: number }) => (
@@ -1500,30 +1501,7 @@ const Index = () => {
   });
 
   const applyBatchRatings = useMemo(() => {
-    const ratingMap = (homeBatchRatingData as any)?.ratings || {};
-    const myScoreMap = (homeBatchRatingData as any)?.my_scores || {};
-    return (items: Manga[]) =>
-      items.map((m) => {
-        const rawId = String(m.id || '').trim();
-        const normId = rawId.toLowerCase();
-        const agg = ratingMap[rawId] || ratingMap[normId] || ratingMap[`mdx-${normId}`];
-        const myScoreRaw =
-          myScoreMap[rawId] ??
-          myScoreMap[normId] ??
-          myScoreMap[`mdx-${normId}`];
-        const hasMyScore = myScoreRaw !== null && myScoreRaw !== undefined && Number.isFinite(Number(myScoreRaw));
-        const aggAverage = Number(agg?.average ?? 0);
-        const aggCount = Number(agg?.count ?? 0);
-        const hasAggregate = Number.isFinite(aggAverage) && Number.isFinite(aggCount) && (aggCount > 0 || aggAverage > 0);
-        if (!hasAggregate && !hasMyScore) return m;
-
-        return {
-          ...m,
-          rating: hasAggregate ? aggAverage : Number(m.rating || 0),
-          ratingCount: hasAggregate ? aggCount : Number(m.ratingCount || 0),
-          myRating: hasMyScore ? Number(myScoreRaw) : (m.myRating ?? null),
-        };
-      });
+    return (items: Manga[]) => applyBatchRatingsPayload(items, homeBatchRatingData);
   }, [homeBatchRatingData]);
 
   const latestMergedRated = useMemo(
@@ -1961,17 +1939,47 @@ const Index = () => {
     () => mergeUniqueMangaById(popularFromTrending, popular, HOME_POPULAR_LIMIT),
     [popularFromTrending, popular],
   );
+  const popularRatingSlugs = useMemo(
+    () => Array.from(new Set(
+      popularVisible
+        .map((item) => String(item.id || '').trim().toLowerCase())
+        .filter(Boolean),
+    )),
+    [popularVisible],
+  );
+  const { data: popularBatchRatingData } = useQuery({
+    queryKey: ['rating', 'batch', 'home-popular', ratingViewerKey, popularRatingSlugs],
+    queryFn: async () => {
+      if (!popularRatingSlugs.length) return { ratings: {}, my_scores: {} };
+      try {
+        return await fetchBatchRatingsParallel(popularRatingSlugs);
+      } catch {
+        return { ratings: {}, my_scores: {} };
+      }
+    },
+    enabled: canRunHomeDeferredQueries && popularRatingSlugs.length > 0,
+    staleTime: 30 * 1000,
+    refetchInterval: 60 * 1000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: 'always',
+    retry: 1,
+    placeholderData: (previousData) => previousData,
+  });
+  const popularRatedVisible = useMemo(
+    () => applyBatchRatingsPayload(popularVisible, popularBatchRatingData),
+    [popularVisible, popularBatchRatingData],
+  );
   const popularMangaDexIds = useMemo(() => {
     const ids = new Set<string>();
 
-    for (const item of popularVisible) {
+    for (const item of popularRatedVisible) {
       const detailId = toMangaDexDetailId(String(item.id || ''));
       if (!detailId) continue;
       ids.add(detailId);
     }
 
     return Array.from(ids);
-  }, [popularVisible]);
+  }, [popularRatedVisible]);
 
   const { data: popularMangaDexChapterMap = {} } = useQuery({
     queryKey: ['manga', 'index', 'popular-mangadex-latest-chapter-v2', popularMangaDexIds],
@@ -1983,8 +1991,8 @@ const Index = () => {
   });
 
   const popularDisplay = useMemo(
-    () => syncMangaDexLatestChapters(popularVisible, popularMangaDexChapterMap as Record<string, MangaDexLatestChapterMeta>),
-    [popularVisible, popularMangaDexChapterMap],
+    () => syncMangaDexLatestChapters(popularRatedVisible, popularMangaDexChapterMap as Record<string, MangaDexLatestChapterMeta>),
+    [popularRatedVisible, popularMangaDexChapterMap],
   );
 
   const topRatedBase = canUseUserRatings

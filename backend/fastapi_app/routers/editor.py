@@ -130,6 +130,7 @@ async def editor_ai_translate(
     ai_api_key: str = Form(""),
     ai_base_url: str = Form(""),
     mode: str = Form("translate"),
+    user_prompt: str = Form(""),
     _user=Depends(require_uploader),
 ):
     image_bytes = await _read_editor_image(image)
@@ -145,6 +146,7 @@ async def editor_ai_translate(
             ai_api_key=ai_api_key,
             ai_base_url=ai_base_url,
             mode=mode,
+            user_prompt=user_prompt,
         )
     except image_editor_service.EditorProcessingError as error:
         logger.warning("Editor AI translation rejected: %s", error)

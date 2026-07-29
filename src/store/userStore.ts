@@ -32,7 +32,14 @@ interface UserStore {
   // Auth
   login: (email: string, password: string, recaptchaToken?: string) => Promise<{ success: boolean; error?: string }>;
   register: (email: string, password: string, username: string, recaptchaToken?: string) => Promise<{ success: boolean; error?: string }>;
-  logout: (scope?: 'local' | 'global' | 'others', options?: { server?: boolean }) => void;
+  logout: (
+    scope?: 'local' | 'global' | 'others',
+    options?: {
+      server?: boolean;
+      broadcast?: boolean;
+      preserveBanLock?: boolean;
+    },
+  ) => void;
   loadUser: (options?: { force?: boolean }) => Promise<void>;
 
   // Notifications
@@ -160,8 +167,10 @@ export const useUserStore = create<UserStore>((set, get) => ({
     if (options.server !== false) {
       authApi.logout(scope).catch(() => {});
     }
-    clearTokens();
-    clearBanLock();
+    clearTokens({ broadcast: options.broadcast });
+    if (!options.preserveBanLock) {
+      clearBanLock();
+    }
     set({
       user: null,
       isLoggedIn: false,
@@ -206,6 +215,20 @@ export const useUserStore = create<UserStore>((set, get) => ({
         const refreshResult = await authApi.refreshDetailed({ force: true });
         const refreshed = Boolean(refreshResult?.ok);
         if (!refreshed) {
+          if (refreshResult?.banned) {
+            clearRestoreRetry();
+            set({
+              user: null,
+              isLoggedIn: false,
+              notifications: [],
+              unreadCount: 0,
+              hasCheckedSession: true,
+              isLoading: false,
+              isRestoringSession: false,
+              lastAuthRestoreError: null,
+            });
+            return;
+          }
           if (!shouldRetryRefreshRestore()) {
             clearRestoreRetry();
             clearTokens();
@@ -282,9 +305,14 @@ export const useUserStore = create<UserStore>((set, get) => ({
       }
     } catch (e: any) {
       if (e?.message === 'BANNED') {
-        // Keep isLoggedIn true so BannedPage shows
+        // The API client has already dropped the local token and broadcast the
+        // ban. Never rebuild an authenticated state after that response.
+        clearRestoreRetry();
         set({
-          isLoggedIn: true,
+          user: null,
+          isLoggedIn: false,
+          notifications: [],
+          unreadCount: 0,
           hasCheckedSession: true,
           isRestoringSession: false,
           lastAuthRestoreError: null,
