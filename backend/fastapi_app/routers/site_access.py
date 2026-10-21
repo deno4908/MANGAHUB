@@ -25,7 +25,12 @@ async def access_status(request: Request, response: Response):
         state = await asyncio.to_thread(policy.get_state)
         allowed = await asyncio.to_thread(policy.is_allowed, state, user)
     except policy.AccessUnavailable as error:
-        raise HTTPException(503, str(error), headers={"Cache-Control": "no-store"}) from error
+        if not user or user.get("role") != "admin":
+            raise HTTPException(503, str(error), headers={"Cache-Control": "no-store"}) from error
+        # The gateway has verified the token and current database role. Match its
+        # admin recovery rule without opening access for any other account.
+        state = {"enabled": True, "message": policy.DEFAULT_MESSAGE}
+        allowed = True
     authorization = request.headers.get("authorization", "")
     policy.set_asset_cookie(response, authorization[7:] if state["enabled"] and allowed and user else None)
     response.headers["Cache-Control"] = "private, no-store"

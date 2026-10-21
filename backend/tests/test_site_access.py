@@ -231,6 +231,14 @@ def test_policy_database_failure_fails_closed_but_admin_can_reach_management(cli
     assert 'private database' not in response.text
     assert client.get('/api/_site-access-test', headers=auth('admin')).status_code == 200
     assert client.get('/api/site-access').status_code == 503
+    for token in ['reader', 'moderator', 'uploader']:
+        assert client.get('/api/site-access', headers=auth(token)).status_code == 503
+    admin_status = client.get('/api/site-access', headers=auth('admin'))
+    assert admin_status.status_code == 200
+    assert admin_status.json()['allowed'] is True
+    assert admin_status.json()['is_admin'] is True
+    assert admin_status.json()['enabled'] is True
+    assert 'private database' not in admin_status.text
 
 
 def test_missing_policy_is_public_by_default_but_malformed_policy_is_not(isolated_policy):

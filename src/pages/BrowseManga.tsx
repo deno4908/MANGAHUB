@@ -2238,27 +2238,28 @@ const BrowseManga = () => {
     refetchOnReconnect: false,
   });
 
-  const otruyenFilteredServerQuery = useQuery({
+  const qqPageOptions = useCallback((requestedPage: number) => ({
     queryKey: [
       'manga',
       'otruyen-filtered',
       directOTruyenFilterGenreSlugs,
       filters.status,
       filters.sort,
-      page,
+      requestedPage,
       showMatureContent,
     ],
-    queryFn: async () => {
+    queryFn: async ({ signal }: { signal: AbortSignal }) => {
       const requestPage = async (sort: SortOption | string) => {
         const payload = await mangaApi.getOTruyenFiltered({
           genreSlugs: directOTruyenFilterGenreSlugs,
           status: filters.status,
           sort,
-          page,
+          page: requestedPage,
           limit: BROWSE_PAGE_SIZE,
           showMature: showMatureContent,
           baseSlug: directOTruyenFilterGenreSlugs[0] || activeCategorySlug,
           attachRatings: filters.sort === 'rating' && sort === filters.sort,
+          signal,
         });
         assertOTruyenPayload(payload);
         return adaptListData(payload);
@@ -2266,15 +2267,26 @@ const BrowseManga = () => {
 
       return requestPage(filters.sort);
     },
-    enabled: browseUrlReady && useOTruyenFilteredServerMode,
     staleTime: 10 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
     refetchOnMount: true,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     retry: 1,
+  }), [directOTruyenFilterGenreSlugs, filters.status, filters.sort, showMatureContent, activeCategorySlug]);
+  const otruyenFilteredServerQuery = useQuery({
+    ...qqPageOptions(page),
+    enabled: browseUrlReady && useOTruyenFilteredServerMode,
     placeholderData: (previousData) => previousData,
   });
+  const qqPrefetchBusy = useRef(false);
+  const prefetchQQPage = useCallback((target: number) => {
+    const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
+    if (!browseUrlReady || !useOTruyenFilteredServerMode || otruyenFilteredServerQuery.isFetching || qqPrefetchBusy.current || connection?.saveData || /(^|-)2g$/.test(connection?.effectiveType || '')) return;
+    qqPrefetchBusy.current = true;
+    // Only warm an intended page, with the exact same filters/key as navigation.
+    void queryClient.prefetchQuery(qqPageOptions(target)).finally(() => { qqPrefetchBusy.current = false; });
+  }, [browseUrlReady, useOTruyenFilteredServerMode, otruyenFilteredServerQuery.isFetching, queryClient, qqPageOptions]);
 
   const otruyenStatusFillQuery = useQuery({
     queryKey: [
@@ -5397,7 +5409,7 @@ const BrowseManga = () => {
               <MangaGridSkeleton count={18} />
               <div className="h-10 rounded-xl bg-muted/40 animate-pulse" />
               {isMangaDexDemandPagePending && totalPages > 1 && (
-                <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} />
+                <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} onPageIntent={prefetchQQPage} />
               )}
             </div>
           ) : (
@@ -5440,14 +5452,14 @@ const BrowseManga = () => {
                     batchStep={6}
                     batchDelayMs={120}
                   />
-                  <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} />
+                  <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} onPageIntent={prefetchQQPage} />
                 </>
               ) : !activeBrowseQuery.isError ? (
                 <div className="text-center py-20">
                   <BookOpen className="w-10 h-10 text-muted-foreground/30 mx-auto mb-3" />
                   {totalPages > 1 && (
                     <div className="mb-6">
-                      <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} />
+                      <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} onPageIntent={prefetchQQPage} />
                     </div>
                   )}
                   <p className="text-muted-foreground font-medium">Không tìm thấy truyện nào phù hợp.</p>

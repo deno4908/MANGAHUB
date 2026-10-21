@@ -57,7 +57,7 @@ it("blocks anonymous readers and provides a login link without mounting content 
   vi.mocked(siteAccessApi.getStatus).mockResolvedValue(deny);
   show("/chapter/private-chapter");
   expect(
-    await screen.findByText("Bạn không nằm trong whitelist của website"),
+    await screen.findByText("Bạn chưa được cấp quyền truy cập."),
   ).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Đăng nhập" })).toHaveAttribute(
     "href",
@@ -101,7 +101,7 @@ it("does not trust an old admin role after the server denies access", async () =
   });
   show();
   expect(
-    await screen.findByText("Bạn không nằm trong whitelist của website"),
+    await screen.findByText("Bạn chưa được cấp quyền truy cập."),
   ).toBeInTheDocument();
   expect(screen.queryByText("Private reader content")).toBeNull();
 });
@@ -160,4 +160,25 @@ it("does not render an old cached public grant before the current policy is chec
   expect(screen.queryByText("Private reader content")).toBeNull();
   expect(screen.queryByTestId("catalog-stream")).toBeNull();
   expect(screen.getByText("Đang kiểm tra quyền truy cập…")).toBeInTheDocument();
+});
+
+it("recovers automatically from a transient policy failure without opening content early", async () => {
+  vi.mocked(siteAccessApi.getStatus).mockRejectedValueOnce(new Error("network"))
+    .mockResolvedValueOnce({ ...deny, enabled: false, allowed: true });
+  show();
+  expect(screen.queryByText("Private reader content")).toBeNull();
+  expect(await screen.findByText("Private reader content")).toBeInTheDocument();
+  expect(siteAccessApi.getStatus).toHaveBeenCalledTimes(2);
+});
+
+it("offers admin recovery after a network failure while keeping reader content closed", async () => {
+  session.user = { id: "admin", role: "admin" };
+  session.isLoggedIn = true;
+  vi.mocked(siteAccessApi.getStatus).mockRejectedValue(new Error("network"));
+  const view = show();
+  expect(await screen.findByRole("link", { name: "Vào trang quản trị" })).toHaveAttribute("href", "/admin");
+  expect(screen.queryByText("Private reader content")).toBeNull();
+  view.unmount();
+  show("/admin");
+  expect(await screen.findByText("Private reader content")).toBeInTheDocument();
 });

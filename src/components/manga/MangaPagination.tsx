@@ -1,15 +1,25 @@
-import { useEffect, useId, useState, type FormEvent } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, ChevronLeft, ChevronRight } from 'lucide-react';
 
 interface MangaPaginationProps {
   currentPage: number;
   totalPages: number;
   onPageChange: (page: number) => void;
+  onPageIntent?: (page: number) => void;
 }
 
-const MangaPagination = ({ currentPage, totalPages, onPageChange }: MangaPaginationProps) => {
+const MangaPagination = ({ currentPage, totalPages, onPageChange, onPageIntent }: MangaPaginationProps) => {
   const pageInputId = useId();
   const [pageInput, setPageInput] = useState(String(currentPage));
+  const intentTimer = useRef<ReturnType<typeof setTimeout>>();
+  const clearIntent = () => clearTimeout(intentTimer.current);
+  const intendPage = (target: number) => {
+    clearIntent();
+    if (onPageIntent && target !== currentPage && target >= 1 && target <= totalPages) {
+      intentTimer.current = setTimeout(() => onPageIntent(target), 150);
+    }
+  };
+  useEffect(() => clearIntent, [currentPage, totalPages, onPageIntent]);
 
   useEffect(() => {
     setPageInput(String(currentPage));
@@ -57,6 +67,7 @@ const MangaPagination = ({ currentPage, totalPages, onPageChange }: MangaPaginat
           type="button"
           disabled={currentPage === 1}
           onClick={() => onPageChange(currentPage - 1)}
+          onPointerEnter={() => intendPage(currentPage - 1)} onFocus={() => intendPage(currentPage - 1)} onPointerLeave={clearIntent} onBlur={clearIntent}
           className="p-2 rounded-md bg-secondary text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
           aria-label="Trang trước"
           title="Trang trước"
@@ -71,6 +82,7 @@ const MangaPagination = ({ currentPage, totalPages, onPageChange }: MangaPaginat
               type="button"
               key={p}
               onClick={() => onPageChange(p)}
+              onPointerEnter={() => intendPage(p)} onFocus={() => intendPage(p)} onPointerLeave={clearIntent} onBlur={clearIntent}
               className={`w-9 h-9 rounded-md text-sm font-medium transition-all ${
                 currentPage === p
                   ? 'bg-primary text-primary-foreground'
@@ -87,6 +99,7 @@ const MangaPagination = ({ currentPage, totalPages, onPageChange }: MangaPaginat
           type="button"
           disabled={currentPage === totalPages}
           onClick={() => onPageChange(currentPage + 1)}
+          onPointerEnter={() => intendPage(currentPage + 1)} onFocus={() => intendPage(currentPage + 1)} onPointerLeave={clearIntent} onBlur={clearIntent}
           className="p-2 rounded-md bg-secondary text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
           aria-label="Trang sau"
           title="Trang sau"

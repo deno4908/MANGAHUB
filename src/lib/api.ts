@@ -1220,6 +1220,7 @@ export const mangaApi = {
     showMature?: boolean;
     baseSlug?: string;
     attachRatings?: boolean;
+    signal?: AbortSignal;
   }) => {
     const query = new URLSearchParams({
       page: String(Math.max(1, Math.floor(Number(options.page) || 1))),
@@ -1241,6 +1242,7 @@ export const mangaApi = {
     return publicApi<any>(`/api/manga/truyenqq-filtered?${query.toString()}`, {
       timeoutMs: 20_000,
       skipAuth: true,
+      signal: options.signal,
     });
   },
   getDetail: (slug: string, signal?: AbortSignal) => publicApi<any>(`/api/manga/detail/${slug}`, { signal }),
