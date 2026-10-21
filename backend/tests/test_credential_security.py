@@ -168,6 +168,12 @@ def test_banned_login_revokes_new_session_without_returning_tokens(auth_client, 
 
 def test_new_password_policy_is_enforced_server_side():
     assert c.password_strength_error("weak")
+    assert c.password_strength_error("x" * 7)
+    assert c.password_strength_error("x" * 8) is None
+    assert c.password_strength_error("x" * 14) is None
+    assert c.password_strength_error("x" * 128) is None
+    assert c.password_strength_error("😀" * 7)
+    assert c.password_strength_error("😀" * 8) is None
     assert c.password_strength_error("x" * 129)
     assert c.password_strength_error(PASSWORD) is None
 

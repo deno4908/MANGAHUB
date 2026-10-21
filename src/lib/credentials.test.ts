@@ -21,6 +21,12 @@ describe('credential encryption', () => {
   it('rejects incomplete challenges and enforces the password length policy', async () => {
     await expect(sealCredentials({ password: 'secret' }, 'register', { nonce: '', public_key: {}, expires_in: 0 })).rejects.toThrow();
     expect(passwordStrengthError('weak')).toBeTruthy();
+    expect(passwordStrengthError('x'.repeat(7))).toBeTruthy();
+    expect(passwordStrengthError('x'.repeat(8))).toBeNull();
+    expect(passwordStrengthError('x'.repeat(14))).toBeNull();
+    expect(passwordStrengthError('x'.repeat(128))).toBeNull();
+    expect(passwordStrengthError('😀'.repeat(7))).toBeTruthy();
+    expect(passwordStrengthError('😀'.repeat(8))).toBeNull();
     expect(passwordStrengthError('x'.repeat(129))).toBeTruthy();
     expect(passwordStrengthError('a long memorable passphrase')).toBeNull();
   });

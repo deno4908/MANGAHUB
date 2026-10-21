@@ -176,6 +176,6 @@ def legacy_passwords(password):
 
 
 def password_strength_error(password):
-    if not isinstance(password, str) or not 15 <= len(password) <= 128:
-        return "Mật khẩu mới phải từ 15 đến 128 ký tự. Có thể dùng một cụm từ dài."
+    if not isinstance(password, str) or not 8 <= len(password) <= 128:
+        return "Mật khẩu mới phải từ 8 đến 128 ký tự."
     return None

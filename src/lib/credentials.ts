@@ -21,6 +21,6 @@ export async function sealCredentials(
 
 export function passwordStrengthError(password: string): string | null {
   const length = Array.from(password).length;
-  return length >= 15 && length <= 128 ? null
-    : 'Mật khẩu mới phải từ 15 đến 128 ký tự. Có thể dùng một cụm từ dài.';
+  return length >= 8 && length <= 128 ? null
+    : 'Mật khẩu mới phải từ 8 đến 128 ký tự.';
 }

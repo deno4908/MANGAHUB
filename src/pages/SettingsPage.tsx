@@ -521,8 +521,8 @@ const SecuritySection = () => {
 
   const handleChangePassword = async () => {
     if (!currentPw) { toast.error('Vui lòng nhập mật khẩu hiện tại'); return; }
-    if (Array.from(newPw).length < 15 || Array.from(newPw).length > 128) {
-      toast.error('Mật khẩu mới phải từ 15 đến 128 ký tự. Có thể dùng một cụm từ dài.');
+    if (Array.from(newPw).length < 8 || Array.from(newPw).length > 128) {
+      toast.error('Mật khẩu mới phải từ 8 đến 128 ký tự.');
       return;
     }
     if (newPw !== confirmPw) { toast.error('Mật khẩu xác nhận không khớp'); return; }
