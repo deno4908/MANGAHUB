@@ -148,3 +148,14 @@ def test_edge_fallback_does_not_relay_other_hosts_or_other_posts(browser, url, m
         assert browser.request.call_count == 1
     finally:
         client.close()
+
+
+def test_browser_recovery_hint_contains_only_public_source_fields():
+    request = httpx.Request('POST', 'https://truyenqqko.com/frontend/search/search',
+                            headers={'Authorization': 'private-token', 'Cookie': 'private-cookie'},
+                            data={'search': 'one piece', 'type': '0', 'csrf': 'private-csrf'})
+    error = httpx.HTTPStatusError('blocked', request=request, response=httpx.Response(403))
+    hints = _source_error_headers(error)
+    assert hints['X-TruyenQQ-Source-Path'] == '/frontend/search/search'
+    assert hints['X-TruyenQQ-Search'] == 'one%20piece'
+    assert 'private' not in str(hints)

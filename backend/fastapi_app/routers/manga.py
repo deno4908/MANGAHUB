@@ -5745,6 +5745,7 @@ async def search(
     mangadex_attach_latest: bool = Query(True),
     user=Depends(get_optional_user),
     db=Depends(get_supabase_public),
+    response: Response = None,
 ):
     """Tìm kiếm truyện."""
     otruyen_task = truyenqq_service.search_manga(keyword, page=page)
@@ -5812,7 +5813,10 @@ async def search(
     if include_mangadex and isinstance(mdx_result, Exception):
         unavailable_sources.append("mangadex")
     if not uploaded_items and len(unavailable_sources) == (2 if include_mangadex else 1):
-        raise HTTPException(503, "Các nguồn tìm kiếm tạm thời không khả dụng. Vui lòng thử lại.")
+        raise HTTPException(503, "Các nguồn tìm kiếm tạm thời không khả dụng. Vui lòng thử lại.",
+                            headers=data_result.headers if isinstance(data_result, HTTPException) else None)
+    if isinstance(data_result, HTTPException) and response is not None and data_result.headers:
+        response.headers.update(data_result.headers)
     data.setdefault("meta", {})["unavailable_sources"] = unavailable_sources
     merged_items = [*uploaded_items, *base_items, *mdx_items]
     seen: set[str] = set()

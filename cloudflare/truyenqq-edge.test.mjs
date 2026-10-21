@@ -76,3 +76,33 @@ test('the existing MangaDex chapter endpoint still uses its original API and cac
     assert.equal(cached, true);
   } finally { globalThis.caches = previousCaches; }
 });
+
+test('a valid reader fetch is shared with the backend; blocked pages never poison that cache', async () => {
+  const previousCaches = globalThis.caches;
+  const pages = new Map();
+  globalThis.caches = { default: {
+    match: async request => pages.get(request.url)?.clone(),
+    put: async (request, response) => { pages.set(request.url, response.clone()); },
+  } };
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches++;
+    return new Response('<div class="list_grid">QQ records</div>');
+  };
+  try {
+    const url = edge + '/tim-kiem-nang-cao/trang-60?sort=4';
+    assert.equal((await worker.fetch(new Request(url))).headers.get('X-TruyenQQ-Cache'), 'MISS');
+    globalThis.fetch = async () => { throw new Error('Source rejects backend IP'); };
+    const cached = await worker.fetch(new Request(url));
+    assert.equal(cached.status, 200);
+    assert.equal(cached.headers.get('X-TruyenQQ-Cache'), 'HIT');
+    assert.equal(cached.headers.get('Access-Control-Allow-Origin'), '*');
+    assert.match(await cached.text(), /QQ records/);
+    assert.equal(fetches, 1);
+    assert.equal((await worker.fetch(new Request(edge + '/doc-truyen'))).status, 502);
+    assert.equal(pages.size, 1);
+    globalThis.fetch = async () => new Response('<html>Challenge</html>');
+    await worker.fetch(new Request(edge + '/doc-truyen'));
+    assert.equal(pages.size, 1);
+  } finally { globalThis.caches = previousCaches; }
+});

@@ -1,4 +1,5 @@
 import { fetchWithTimeout } from "./http";
+import { fetchWithTruyenQQRelay } from "./truyenqqRelay";
 /**
  * API client — centralized HTTP calls to backend.
  * FastAPI: http://localhost:8000  |  Flask Auth: http://localhost:5000
@@ -678,7 +679,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
 
   let res: Response;
   try {
-    res = await fetchWithTimeout(url, { ...requestOptions, headers }, requestTimeoutMs);
+    res = await fetchWithTruyenQQRelay(url, { ...requestOptions, headers }, requestTimeoutMs);
   } catch (err: any) {
     if (err?.name === "AbortError") {
       throw new Error("Yêu cầu quá thời gian, vui lòng thử lại");

@@ -8,6 +8,10 @@ async function qqSource(request, url) {
   const search = path === "/frontend/search/search";
   const listing = QQ_PAGES.test(path) || /^\/sitemap(?:-[a-zA-Z0-9-]+)?\.xml$/.test(path);
   if ((!search && !listing) || url.search.length > 2048) return json({ error: "Not found" }, 404);
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: {
+    "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type", "Access-Control-Max-Age": "86400",
+  } });
   if (request.method !== (search ? "POST" : "GET")) return json({ error: "Method not allowed" }, 405);
 
   let body;
@@ -33,6 +37,20 @@ async function qqSource(request, url) {
     body = new URLSearchParams({ search: keyword, type: "0" }).toString();
   }
 
+  const cache = globalThis.caches?.default;
+  const cacheUrl = new URL(url);
+  if (search) cacheUrl.searchParams.set("qq_search", new URLSearchParams(body).get("search"));
+  const cacheKey = new Request(cacheUrl, { method: "GET" });
+  const serve = (response, hit) => {
+    const headers = new Headers(response.headers);
+    headers.set("Cache-Control", "no-store");
+    headers.set("Access-Control-Allow-Origin", "*");
+    headers.set("X-TruyenQQ-Cache", hit ? "HIT" : "MISS");
+    return new Response(response.body, { status: response.status, headers });
+  };
+  const cached = cache && await cache.match(cacheKey);
+  if (cached) return serve(cached, true);
+
   try {
     const upstream = await fetch(QQ_SOURCE + path + url.search, {
       method: request.method, redirect: "manual", body,
@@ -45,11 +63,22 @@ async function qqSource(request, url) {
       signal: AbortSignal.timeout(15000),
     });
     const headers = new Headers(upstream.headers);
-    headers.set("Cache-Control", "no-store");
+    headers.set("Cache-Control", "public, max-age=120");
     headers.set("X-TruyenQQ-Relay", "1");
     headers.set("X-TruyenQQ-Colo", request.cf?.colo || "-");
     headers.delete("Set-Cookie");
-    return new Response(upstream.body, { status: upstream.status, headers });
+    headers.delete("Expires");
+    headers.delete("Pragma");
+    headers.delete("Content-Encoding");
+    headers.delete("Content-Length");
+    const html = await upstream.text();
+    const value = new Response(html, { status: upstream.status, headers });
+    const valid = search ? /search_info|no_result/.test(html)
+      : /list_grid|book_info|chapter_content|<sitemapindex|<urlset/.test(html);
+    // A browser and the backend can share valid public source pages. Never
+    // preserve a challenge/error page, an authenticated response, or cookies.
+    if (cache && upstream.status === 200 && valid) await cache.put(cacheKey, value.clone());
+    return serve(value, false);
   } catch {
     return json({ error: "Source unavailable" }, 502, { "Cache-Control": "no-store" });
   }

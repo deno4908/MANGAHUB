@@ -104,6 +104,17 @@ def _source_error_headers(error):
         colo = response.headers.get("x-truyenqq-colo", "")
         if re.fullmatch(r"[A-Z]{3}", colo):
             headers["X-TruyenQQ-Colo"] = colo
+    request = getattr(error, "request", None) if isinstance(error, httpx.HTTPStatusError) else None
+    if request is not None and request.url.host == "truyenqqko.com" and code == "http-403":
+        path = request.url.raw_path.decode("ascii")
+        if len(path) <= 2048 and request.method == "GET":
+            headers["X-TruyenQQ-Source-Path"] = path
+        elif request.method == "POST" and request.url.path == "/frontend/search/search":
+            from urllib.parse import parse_qs
+            keyword = (parse_qs(request.content.decode("utf-8")).get("search") or [""])[0]
+            if 0 < len(keyword) <= 200:
+                headers["X-TruyenQQ-Source-Path"] = request.url.path
+                headers["X-TruyenQQ-Search"] = quote(keyword, safe="")
     return headers
 
 
@@ -208,6 +219,7 @@ def _page(value: dict) -> dict:
     pages = int(value.get("total_pages") or 1)
     size = max(len(items), 1)
     return {"status": "success", "data": {"items": items, "source": "truyenqq",
+            "source_url": value.get("source_url"),
             "params": {"pagination": {"currentPage": page, "totalItemsPerPage": size,
                 "totalItems": value.get("total"), "totalPages": pages,
                 "hasNext": value.get("has_next", page < pages)}},
@@ -272,7 +284,7 @@ def _overlay_latest(payload, *, page=1, genres=(), status=None, latest_order=Fal
 
 async def _catalog_page(method, *args, **kwargs):
     digest = hashlib.sha256(json.dumps([method, args, kwargs], sort_keys=True).encode()).hexdigest()
-    key = "truyenqq:page-snapshot:v1:" + digest
+    key = "truyenqq:page-snapshot:v2:" + digest
     snapshot = await asyncio.to_thread(_json_cached, key)
     if not isinstance(snapshot, dict) or not isinstance(snapshot.get("payload"), dict):
         snapshot = None
@@ -288,7 +300,8 @@ async def _catalog_page(method, *args, **kwargs):
                         for section in raw["sections"]:
                             for item in section["items"]:
                                 seen.setdefault(item["id"], item)
-                        raw = {"items": list(seen.values()), "fetched_at": raw.get("fetched_at")}
+                        raw = {"items": list(seen.values()), "fetched_at": raw.get("fetched_at"),
+                               "source_url": raw.get("source_url")}
                     value = await asyncio.to_thread(_page, raw)
                     await asyncio.to_thread(cache.set, key, json.dumps({"payload": value, "fresh_until": time.time() + 45}), ttl=1800)
                     return value

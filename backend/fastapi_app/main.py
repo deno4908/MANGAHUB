@@ -394,6 +394,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-TruyenQQ-Error", "X-TruyenQQ-Source-Path", "X-TruyenQQ-Search"],
 )
 
 

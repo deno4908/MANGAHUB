@@ -80,3 +80,20 @@ def test_search_outage_is_not_reported_as_no_matching_books(monkeypatch):
             mangadex_limit=24, mangadex_timeout_ms=0, mangadex_translated_language="vi", mangadex_attach_latest=False,
             user=None, db=EmptyDB()))
     assert error.value.status_code == 503
+
+
+def test_partial_combined_search_preserves_qq_recovery_instructions(monkeypatch):
+    from fastapi.responses import Response
+    isolate(monkeypatch)
+    hints = {'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/frontend/search/search',
+             'X-TruyenQQ-Search': 'one%20piece'}
+    monkeypatch.setattr(manga.truyenqq_service, 'search_manga', AsyncMock(side_effect=HTTPException(502, 'blocked', headers=hints)))
+    monkeypatch.setattr(manga.mangadex_service, 'search_manga', AsyncMock(return_value=page([{'slug': 'mdx-1'}], 1)))
+    response = Response()
+    result = asyncio.run(manga.search(keyword='one piece', page=1, include_mangadex=True, attach_ratings=False,
+        mangadex_limit=24, mangadex_timeout_ms=0, mangadex_translated_language='vi', mangadex_attach_latest=False,
+        user=None, db=EmptyDB(), response=response))
+    assert result['data']['items'][0]['slug'] == 'mdx-1'
+    assert result['meta']['unavailable_sources'] == ['truyenqq']
+    assert response.headers['X-TruyenQQ-Source-Path'] == '/frontend/search/search'
+    assert response.headers['X-TruyenQQ-Search'] == 'one%20piece'
