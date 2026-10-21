@@ -1658,7 +1658,7 @@ const Index = () => {
     }
 
     const visible = showMatureContent ? output : output.filter((item) => !isMatureManga(item));
-    return visible.sort(compareByPopular).slice(0, HOME_POPULAR_LIMIT);
+    return visible.sort(compareByPopular).slice(0, HOME_POPULAR_LIMIT * 2);
   }, [trendingRows, topRatedKnownLookup, guestTopRatedLookup, showMatureContent]);
 
   const popular = useMemo(
@@ -1666,7 +1666,7 @@ const Index = () => {
     [featuredRated, latestMergedRated, ongoingMergedRated],
   );
   const popularVisible = useMemo(
-    () => mergeUniqueMangaById(popularFromTrending, popular, HOME_POPULAR_LIMIT),
+    () => mergeUniqueMangaById(popularFromTrending, popular, HOME_POPULAR_LIMIT * 2),
     [popularFromTrending, popular],
   );
   const popularRatingSlugs = useMemo(
@@ -1778,7 +1778,7 @@ const Index = () => {
 
   const topRatedDisplay = useMemo(() => {
     const candidates = isMangaDexUnavailable
-      ? dedupeById([...topRated, ...[...popular].sort((a, b) => b.rating - a.rating)]).slice(0, 6)
+      ? dedupeById([...topRated, ...[...popular].sort((a, b) => b.rating - a.rating)])
       : topRated;
     return syncMangaDexLatestChapters(candidates, topRatedMangaDexChapterMap as Record<string, MangaDexLatestChapterMeta>);
   }, [topRated, topRatedMangaDexChapterMap, isMangaDexUnavailable, popular]);
@@ -1828,13 +1828,13 @@ const Index = () => {
         <Section title="Phổ biến nhất" link="/manga?sort=popular">
           {isHomeSynchronizedLoading || (isTrendingLoading && !popularVisible.length)
             ? <SkeletonGrid count={12} />
-            : <MangaGrid manga={popularDisplay} lazyBatch initialBatchSize={6} batchStep={6} batchDelayMs={240} />}
+            : <MangaGrid manga={popularDisplay} maxItems={HOME_POPULAR_LIMIT} lazyBatch initialBatchSize={6} batchStep={6} batchDelayMs={240} />}
         </Section>
 
         <Section title="Đánh giá cao" link="/manga?sort=rating">
           {isTopRatedSectionLoading
             ? <SkeletonGrid />
-            : <MangaGrid manga={topRatedDisplay.slice(0, 6)} lazyBatch initialBatchSize={4} batchStep={2} batchDelayMs={220} />}
+            : <MangaGrid manga={topRatedDisplay} maxItems={6} lazyBatch initialBatchSize={4} batchStep={2} batchDelayMs={220} />}
         </Section>
 
         <Section title="Mới thêm gần đây" link="/manga">

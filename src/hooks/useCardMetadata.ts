@@ -40,13 +40,13 @@ const recordId = (record: MangaRecord) => {
 
 /** Saved cards share the same batched metadata and never rewrite saved IDs or reading progress. */
 export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | undefined,
-  { enabled = true, fillMissingCovers = false } = {}): T[] | undefined {
+  { enabled = true, fillMissingCovers = false, requireQQMatch = false } = {}): T[] | undefined {
   const client = useQueryClient();
   const ids = useMemo(() => enabled ? [...new Set((records || []).filter(record => {
     const id = recordId(record);
     const title = record.manga_title || record.title || record.name;
     const cover = record.manga_thumb || record.cover || record.cover_url || record.thumb;
-    return record.source !== 'uploaded' && /^[a-z0-9]+(?:-+[a-z0-9]+)*$/.test(id)
+    return record.source !== 'uploaded' && !record.is_user_upload && /^[a-z0-9]+(?:-+[a-z0-9]+)*$/.test(id)
       && (isLegacyQQIdentifier(id) || needsCanonicalTitle(id, title) || (fillMissingCovers && !cover));
   }).map(recordId))] : [], [records, enabled, fillMissingCovers]);
   const metadata = useQueries({
@@ -56,11 +56,17 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
   return useMemo(() => {
     if (!records) return records;
     const byId = new Map(ids.map((id, index) => [id, metadata[index]]));
-    return records.filter(record => record.source === 'uploaded' || !isLegacyQQIdentifier(recordId(record))
-      || byId.get(recordId(record)) !== null).map(record => {
+    return records.filter(record => record.source === 'uploaded' || record.is_user_upload
+      || !isLegacyQQIdentifier(recordId(record))
+      || (requireQQMatch && enabled ? Boolean(byId.get(recordId(record))) : byId.get(recordId(record)) !== null)).map(record => {
       const id = recordId(record);
       const item = byId.get(id);
-      if (!item || record.source === 'uploaded') return record;
+      if (!item || record.source === 'uploaded' || record.is_user_upload) return record;
+      if (requireQQMatch && 'cover' in record && 'chapters' in record) {
+        return applyCardMetadata(record as unknown as Manga, {
+          ...item, title: needsCanonicalTitle(id, record.title) ? item.title : record.title,
+        }) as unknown as T;
+      }
       const next: MangaRecord = { ...record };
       if (!('manga_title' in record || 'title' in record || 'name' in record)) {
         next['manga_slug' in record ? 'manga_title' : 'title'] = item.title;
@@ -76,5 +82,5 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
       }
       return next as T;
     });
-  }, [records, ids, metadata, fillMissingCovers]);
+  }, [records, ids, metadata, fillMissingCovers, requireQQMatch, enabled]);
 }

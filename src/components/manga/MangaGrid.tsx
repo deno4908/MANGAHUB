@@ -3,6 +3,8 @@ import { Manga } from '@/types/manga';
 import MangaCard from './MangaCard';
 import { useSettingsStore } from '@/store/settingsStore';
 import { isMatureManga } from '@/lib/contentFilter';
+import { useCanonicalMangaRecords } from '@/hooks/useCardMetadata';
+import { repairMojibakeText } from '@/lib/adapters';
 
 interface MangaGridProps {
   manga: Manga[];
@@ -13,6 +15,7 @@ interface MangaGridProps {
   initialBatchSize?: number;
   batchStep?: number;
   batchDelayMs?: number;
+  maxItems?: number;
 }
 
 const MANGADEX_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -62,10 +65,10 @@ const isReservedPublicMangaSlug = (value: unknown): boolean => {
 };
 
 const normalizeCardText = (value: unknown): string =>
-  String(value || '')
+  repairMojibakeText(value)
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(/Ä‘/g, 'd')
+    .replace(/đ/gi, 'd')
     .toLowerCase()
     .replace(/[^a-z0-9\s-]+/g, ' ')
     .replace(/\s+/g, ' ')
@@ -89,6 +92,7 @@ const isGenericPlaceholderTitle = (value: unknown): boolean => {
 };
 
 const shouldHideInvalidMangaCard = (item: Manga): boolean => {
+  if (item.source !== 'uploaded' && isGenericPlaceholderTitle(item.title)) return true;
   if (item.source !== 'uploaded' && item.source !== 'mangadex'
       && !MANGADEX_ID_RE.test(item.id.replace(/^mdx-/, '')) && item.chapterAvailability === 'unavailable') return true;
   if (isReservedPublicMangaSlug(item.id)) return true;
@@ -116,13 +120,16 @@ const MangaGrid = React.forwardRef<HTMLDivElement, MangaGridProps>(
     initialBatchSize = 8,
     batchStep = 4,
     batchDelayMs = 180,
+    maxItems,
   }, ref) => {
     const showMatureContent = useSettingsStore((s) => s.settings.privacy.showMatureContent);
+    const verifiedManga = useCanonicalMangaRecords(manga, { requireQQMatch: true, fillMissingCovers: true });
     const safeManga = React.useMemo(
-      () => (Array.isArray(manga) ? manga.filter((item) => !shouldHideInvalidMangaCard(item)) : []),
-      [manga],
+      () => (Array.isArray(verifiedManga) ? verifiedManga.filter((item) => !shouldHideInvalidMangaCard(item)) : []),
+      [verifiedManga],
     );
-    const visibleManga = showMatureContent ? safeManga : safeManga.filter((item) => !isMatureManga(item));
+    const eligibleManga = showMatureContent ? safeManga : safeManga.filter((item) => !isMatureManga(item));
+    const visibleManga = maxItems === undefined ? eligibleManga : eligibleManga.slice(0, maxItems);
     const shouldBatch = lazyBatch && variant === 'default';
     const safeInitialBatch = Math.max(1, initialBatchSize);
     const safeBatchStep = Math.max(1, batchStep);

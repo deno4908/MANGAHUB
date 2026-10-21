@@ -1587,7 +1587,7 @@ const RankingsPage = () => {
       })
       .slice(0, RANKINGS_TRENDING_LIMIT);
   }, [hasTrendingRows, trendingData, canUseFallbackTrending, fallbackTrendingItems]);
-  const trendingItems = useCanonicalMangaRecords(rawTrendingItems, { enabled: activeTab === 'trending' }) || rawTrendingItems;
+  const trendingItems = useCanonicalMangaRecords(rawTrendingItems, { enabled: activeTab === 'trending', requireQQMatch: true }) || rawTrendingItems;
 
   const isLoading =
     (activeTab === "trending" &&

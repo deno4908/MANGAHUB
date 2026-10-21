@@ -10,7 +10,8 @@ import { adaptListData } from '@/lib/adapters';
 
 vi.mock('@/store/userStore', () => ({ useUserStore: (select: (state: unknown) => unknown) =>
   select({ isLoggedIn: false, user: null, isRestoringSession: false }) }));
-vi.mock('@/hooks/useCardMetadata', () => ({ useCardMetadata: (item: unknown) => item }));
+vi.mock('@/hooks/useCardMetadata', () => ({ useCardMetadata: (item: unknown) => item,
+  useCanonicalMangaRecords: (items: unknown) => items }));
 vi.mock('@/hooks/useCardChapter', () => ({ useCardChapter: (item: unknown) => item }));
 vi.mock('@/components/manga/GenreCloud', () => ({ default: () => null }));
 vi.mock('framer-motion', async () => {
