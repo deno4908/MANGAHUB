@@ -122,6 +122,8 @@ async def _mdx_metadata(identifiers):
         asyncio.to_thread(cache.set_many, fresh, ttl=mdx.MANGA_DETAIL_TTL),
         asyncio.to_thread(cache.set_many, {key + ":stale": value for key, value in fresh.items()}, ttl=mdx.STALE_TTL),
         asyncio.to_thread(cache.set_many, labels, ttl=3600),
+        asyncio.to_thread(mdx._cache_stale_cover_urls,
+                          {identifier: item["cover_url"] for identifier, item in found.items() if item.get("cover_url")}, cache),
     )
     return found
 

@@ -118,6 +118,8 @@ MANGA_DETAIL_CACHE_VERSION = 3
 CHAPTER_PAGES_TTL = 120
 TOTAL_COUNT_TTL = 600
 STALE_TTL = 3600
+COVER_URL_STALE_TTL = 7 * 24 * 60 * 60
+SEARCH_SNAPSHOT_TTL = 24 * 60 * 60
 VI_CATALOG_LOOKUP_INDEX_TTL = 90
 LATEST_CHAPTER_CACHE_VERSION = 4
 LATEST_CHAPTER_LOW_CONFIDENCE_FALLBACK_MAX = _env_int(
@@ -1025,16 +1027,77 @@ def _extract_manga_id_from_cover_relationships(relationships: list[dict[str, Any
 
 
 async def _fetch_cover_url_by_manga_id(manga_id: str) -> str:
-    try:
-        payload = await _request_json(
-            f"/manga/{manga_id}",
-            {"includes[]": "cover_art"},
-        )
-    except RuntimeError:
-        return ""
+    payload = await _request_json(
+        f"/manga/{manga_id}",
+        {"includes[]": "cover_art"},
+    )
     data = payload.get("data") or {}
     relationships = data.get("relationships") or []
     return _extract_cover_url(manga_id, relationships)
+
+
+def _valid_cover_url(manga_id: str, value: Any) -> str:
+    value = str(value or "").strip()
+    prefix = f"https://uploads.mangadex.org/covers/{manga_id}/"
+    return value if value.startswith(prefix) and len(value) > len(prefix) else ""
+
+
+def _cache_stale_cover_urls(values: dict[str, str], cache_client=None) -> None:
+    # Only newly resolved/observed URLs call this; reading an old hint must not
+    # extend its lifetime indefinitely. Store URLs, never account credentials.
+    target = cache if cache_client is None else cache_client
+    target.set_many({f"mangadex:cover-url:v2:{mid}:stale": url
+                     for mid, url in values.items() if _valid_cover_url(mid, url)},
+                    ttl=COVER_URL_STALE_TTL)
+
+
+def _cached_cover_url(manga_id: str) -> str:
+    key = f"mangadex:cover-url:v2:{manga_id}"
+    card_key = f"catalog:card-metadata:v1:{manga_id}"
+    values = cache.get_many([key, key + ":stale", card_key])
+    for candidate in [values.get(key), values.get(key + ":stale")]:
+        if url := _valid_cover_url(manga_id, candidate):
+            return url
+    try:
+        card = json.loads(values.get(card_key) or "{}")
+    except (ValueError, TypeError):
+        card = {}
+    if isinstance(card, dict) and (url := _valid_cover_url(manga_id, card.get("cover_url"))):
+        return url
+
+    revision = _live_revision(manga_id)
+    bases = [f"mangadex:metadata:{manga_id}:rev={revision}",
+             f"mangadex:lookup:{manga_id}:rev={revision}"]
+    keys = [base + suffix for base in bases for suffix in ("", ":stale")]
+    snapshots = cache.get_many(keys)
+    for key in keys:
+        try:
+            payload = json.loads(snapshots.get(key) or "{}")
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        manga = payload.get("manga") or payload.get("data") or {}
+        if not isinstance(manga, dict):
+            continue
+        candidate = manga.get("cover_url") or _extract_cover_url(manga_id, manga.get("relationships") or [])
+        if url := _valid_cover_url(manga_id, candidate):
+            return url
+    catalog = _get_cached_vi_catalog_manga(manga_id) or {}
+    return _valid_cover_url(manga_id, catalog.get("cover_url"))
+
+
+@coalesce_reads
+async def get_cover_url(manga_id: str) -> str:
+    # Redis/catalog reads must not block all the other images on the event loop.
+    cached = await asyncio.to_thread(_cached_cover_url, manga_id)
+    if cached:
+        return cached
+    cover_url = await _fetch_cover_url_by_manga_id(manga_id)
+    if cover_url:
+        await asyncio.to_thread(cache.set, f"mangadex:cover-url:v2:{manga_id}", cover_url, ttl=3600)
+        await asyncio.to_thread(_cache_stale_cover_urls, {manga_id: cover_url})
+    return cover_url
 
 
 async def _fetch_cover_urls_for_manga_ids(manga_ids: list[str]) -> dict[str, str]:
@@ -1104,6 +1167,9 @@ async def _fetch_cover_urls_for_manga_ids(manga_ids: list[str]) -> dict[str, str
     await asyncio.to_thread(cache.set_many,
         {f"mangadex:cover-url:v2:{manga_id}": url for manga_id, url in mapping.items()
          if manga_id not in warm_ids and not manga_id.startswith("cover:")}, ttl=3600)
+    await asyncio.to_thread(_cache_stale_cover_urls,
+        {manga_id: url for manga_id, url in mapping.items()
+         if manga_id not in warm_ids and not manga_id.startswith("cover:")})
     return mapping
 
 
@@ -2508,6 +2574,10 @@ async def search_manga(
         f"orig_lang={','.join(normalized_original_languages)}:"
         f"sort={normalized_sort}:rating={','.join(normalized_content_ratings)}:ids={manga_ids_key}:rev={_live_revision()}"
     )
+    # Keep an exact query snapshot outside the short-lived invalidation namespace.
+    snapshot_key = "mangadex:search-fallback:v1:" + hashlib.sha256(
+        cache_key.rsplit(":rev=", 1)[0].encode("utf-8")
+    ).hexdigest()
     cached = cache.get(cache_key)
     if cached:
         try:
@@ -2570,6 +2640,8 @@ async def search_manga(
     try:
         payload = await _request_json("/manga", params)
     except RuntimeError as error:
+        if stale_payload is None:
+            stale_payload = await asyncio.to_thread(_load_json_cache_payload, snapshot_key)
         if stale_payload is not None:
             logger.warning(
                 "MangaDex search using stale cache for '%s' (page=%s, limit=%s): %s",
@@ -2642,6 +2714,10 @@ async def search_manga(
         }
     }
     _cache_payload(cache_key, result, ttl=VI_CATALOG_TTL)
+    if items:
+        await asyncio.to_thread(cache.set, snapshot_key, json.dumps(result, ensure_ascii=False), ttl=SEARCH_SNAPSHOT_TTL)
+        await asyncio.to_thread(_cache_stale_cover_urls,
+            {item["id"]: item["cover_url"] for item in parsed_items if item.get("cover_url")})
     return result
 
 
@@ -2654,6 +2730,9 @@ async def _get_manga_metadata(manga_id: str) -> dict[str, Any]:
     payload = await _request_json(f"/manga/{manga_id}", {"includes[]": ["author", "artist", "cover_art"]})
     if payload.get("data"):
         _cache_payload(key, payload, ttl=MANGA_DETAIL_TTL)
+        cover_url = _extract_cover_url(manga_id, payload["data"].get("relationships") or [])
+        if cover_url:
+            await asyncio.to_thread(_cache_stale_cover_urls, {manga_id: cover_url})
     return payload
 
 

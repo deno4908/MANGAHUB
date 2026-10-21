@@ -121,7 +121,7 @@ def auth(token): return {'Authorization': 'Bearer ' + token}
 
 
 @pytest.mark.parametrize('token', [None, 'reader', 'moderator', 'uploader'])
-@pytest.mark.parametrize('path', ['/api/_site-access-test', '/api/images/_site-access-test', '/api/manga/detail/private-book', '/api/manga/mangadex/chapter/private-chapter', '/api/uploads/published/private-book'])
+@pytest.mark.parametrize('path', ['/api/_site-access-test', '/api/images/_site-access-test', '/api/manga/detail/private-book', '/api/manga/mangadex/chapter/private-chapter', '/api/uploads/published/private-book', '/api/manga/mangadex-cover/' + ADMIN])
 def test_every_content_namespace_denies_nonmembers(client, token, path):
     response = client.get(path, headers=auth(token) if token else {})
     assert response.status_code == 403

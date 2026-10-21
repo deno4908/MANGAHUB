@@ -18,7 +18,7 @@ from typing import Any, Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 from config import config
@@ -84,6 +84,13 @@ def _mangadex_upstream_http_exception(error: RuntimeError) -> HTTPException:
         except Exception:
             pass
     return HTTPException(status_code=status_code, detail=detail, headers=headers or None)
+
+
+def _mangadex_unavailable_response() -> JSONResponse:
+    return JSONResponse(status_code=503, content={
+        "code": "MANGADEX_UNAVAILABLE",
+        "detail": "Nguồn MangaDex đang tạm thời không khả dụng. Vui lòng thử lại sau.",
+    }, headers={"Cache-Control": "no-store", "Retry-After": "30"})
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -5930,7 +5937,8 @@ async def mangadex_search(
                 content_ratings=content_ratings,
             )
     except RuntimeError as error:
-        raise _mangadex_upstream_http_exception(error) from error
+        logger.warning("MangaDex search source unavailable (%s)", type(error).__name__)
+        return _mangadex_unavailable_response()
 
     items = ((data.get("data") or {}).get("items") or [])
     if not isinstance(items, list):
@@ -7467,29 +7475,20 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
 async def mangadex_cover(manga_id: str):
     """Resolve MangaDex cover image URL by manga ID and redirect through the local proxy."""
     manga_id = manga_id.strip()
-    if not manga_id or len(manga_id) > 64:
+    if not mangadex_service._MANGADEX_UUID_RE.fullmatch(manga_id):
         raise HTTPException(status_code=400, detail="Invalid manga ID")
-
-    # Check cache first
-    cache_key = f"mangadex:cover-url:v2:{manga_id}"
-    cached = cache.get(cache_key)
-    if cached:
-        return RedirectResponse(
-            url=f"/api/images/img?url={quote(str(cached), safe='')}",
-            status_code=302,
-        )
-
-    # Fetch from MangaDex API
+    manga_id = manga_id.lower()
     try:
-        cover_url = await mangadex_service._fetch_cover_url_by_manga_id(manga_id)
-    except Exception:
-        cover_url = ""
+        cover_url = await mangadex_service.get_cover_url(manga_id)
+    except RuntimeError as error:
+        if getattr(error, "status_code", None) in {404, 410}:
+            raise HTTPException(status_code=404, detail="Cover not found") from error
+        logger.warning("MangaDex cover source unavailable for %s (%s)", manga_id, type(error).__name__)
+        return _mangadex_unavailable_response()
 
     if not cover_url:
         raise HTTPException(status_code=404, detail="Cover not found")
 
-    # Cache for 1 hour
-    cache.set(cache_key, cover_url, ttl=3600)
     return RedirectResponse(url=f"/api/images/img?url={quote(cover_url, safe='')}", status_code=302)
 
 
