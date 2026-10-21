@@ -1,6 +1,7 @@
 name = "mangahub-mangadex-edge"
-main = "mangadex-edge-worker.js"
+main = "worker-entry.js"
 compatibility_date = "2026-06-10"
+compatibility_flags = ["enable_ctx_exports"]
 workers_dev = true
 
 routes = [

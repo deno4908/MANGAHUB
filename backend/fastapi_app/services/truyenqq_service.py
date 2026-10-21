@@ -104,6 +104,9 @@ def _source_error_headers(error):
         colo = response.headers.get("x-truyenqq-colo", "")
         if re.fullmatch(r"[A-Z]{3}", colo):
             headers["X-TruyenQQ-Colo"] = colo
+        block = response.headers.get("x-truyenqq-block")
+        if block in {"challenge", "cloudflare-block", "origin-forbidden", "source-denied"}:
+            headers["X-TruyenQQ-Block"] = block
     request = getattr(error, "request", None) if isinstance(error, httpx.HTTPStatusError) else None
     if request is not None and request.url.host == "truyenqqko.com" and code == "http-403":
         path = request.url.raw_path.decode("ascii")

@@ -3,7 +3,32 @@ const QQ_PREFIX = "/api/truyenqq-edge";
 const QQ_SOURCE = "https://truyenqqko.com";
 const QQ_PAGES = /^\/(?:doc-truyen|tim-kiem-nang-cao|truyen-moi-cap-nhat|truyen-tranh-moi|truyen-hoan-thanh|truyen-yeu-thich|truyen-dich-qq|top-ngay|top-tuan|top-thang|the-loai|tac-gia|truyen-tranh)(?:\/[a-zA-Z0-9._-]+)*$/;
 
-async function qqSource(request, url) {
+export async function fetchQQOrigin(path, query, body) {
+  const search = path === "/frontend/search/search";
+  const validPath = QQ_PAGES.test(path) || /^\/sitemap(?:-[a-zA-Z0-9-]+)?\.xml$/.test(path);
+  if ((!search && !validPath) || query.length > 2048 || (query && !query.startsWith("?")) ||
+      (body && (!search || body.length > 2048))) throw new Error("Invalid QQ source request");
+  const upstream = await fetch(QQ_SOURCE + path + query, {
+    method: search ? "POST" : "GET", redirect: "manual", body,
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      "Accept-Language": "vi,en;q=0.7", Referer: QQ_SOURCE + "/",
+      ...(search ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
+    },
+    signal: AbortSignal.timeout(15000),
+  });
+  const html = await upstream.text();
+  const headers = new Headers(upstream.headers);
+  if (upstream.status === 403) {
+    const blocked = /cf-chl-|challenge-platform|Just a moment/i.test(html) ? "challenge"
+      : /cf-error-details|Attention Required|Cloudflare Ray ID/i.test(html) ? "cloudflare-block"
+        : /403 Forbidden/i.test(html) ? "origin-forbidden" : "source-denied";
+    headers.set("X-TruyenQQ-Block", blocked);
+  }
+  return { status: upstream.status, headers: [...headers], body: html };
+}
+
+async function qqSource(request, url, origin) {
   const path = url.pathname.slice(QQ_PREFIX.length);
   const search = path === "/frontend/search/search";
   const listing = QQ_PAGES.test(path) || /^\/sitemap(?:-[a-zA-Z0-9-]+)?\.xml$/.test(path);
@@ -52,16 +77,8 @@ async function qqSource(request, url) {
   if (cached) return serve(cached, true);
 
   try {
-    const upstream = await fetch(QQ_SOURCE + path + url.search, {
-      method: request.method, redirect: "manual", body,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept-Language": "vi,en;q=0.7",
-        Referer: QQ_SOURCE + "/",
-        ...(search ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
-      },
-      signal: AbortSignal.timeout(15000),
-    });
+    const result = origin ? await origin.load(path, url.search, body) : await fetchQQOrigin(path, url.search, body);
+    const upstream = new Response(result.body, { status: result.status, headers: result.headers });
     const headers = new Headers(upstream.headers);
     headers.set("Cache-Control", "public, max-age=120");
     headers.set("X-TruyenQQ-Relay", "1");
@@ -98,9 +115,9 @@ function json(payload, status = 200, extraHeaders = {}) {
 }
 
 export default {
-  async fetch(request) {
+  async fetch(request, env = {}) {
     const url = new URL(request.url);
-    if (url.pathname.startsWith(QQ_PREFIX + "/")) return qqSource(request, url);
+    if (url.pathname.startsWith(QQ_PREFIX + "/")) return qqSource(request, url, env.QQ_ORIGIN);
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
