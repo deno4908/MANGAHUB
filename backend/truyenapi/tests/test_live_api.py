@@ -1,6 +1,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from urllib.parse import parse_qs
 
 import httpx
@@ -173,6 +174,35 @@ def test_legacy_lookup_does_not_guess_between_books_with_the_same_title():
         assert error.value.status_code == 404
         assert len(calls) == 1
     finally:
+        service.close()
+
+
+def test_nested_catalog_batch_and_image_workers_keep_request_context():
+    authorization = ContextVar("verified_source_authorization", default=None)
+    seen = []
+    expected = "verified-reader"
+
+    def handler(request):
+        seen.append((request.url.path, authorization.get()))
+        assert authorization.get() == expected
+        if request.url.host == "img.example":
+            return httpx.Response(200, content=b"image", headers={"content-type": "image/jpeg"})
+
+    service, calls = setup_service(handler)
+    token = authorization.set("verified-reader")
+    try:
+        assert service.catalog()["total"] == 2
+        assert service.batch([SLUG])["items"][0]["error"] is None
+        assert service.image(["https://img.example/cover.jpg"], BASE)[0] == b"image"
+        assert len(seen) == 5
+        authorization.reset(token)
+        token = None
+        expected = None
+        assert service.image(["https://img.example/public.jpg"], BASE)[0] == b"image"
+        assert seen[-1] == ("/public.jpg", None)  # worker reuse must not retain a previous reader's token
+    finally:
+        if token is not None:
+            authorization.reset(token)
         service.close()
 
 

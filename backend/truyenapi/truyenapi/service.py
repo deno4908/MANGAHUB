@@ -5,6 +5,7 @@ import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from contextvars import copy_context
 from datetime import datetime, timezone
 from urllib.parse import urlencode, urljoin, urlsplit
 from decimal import Decimal
@@ -89,7 +90,8 @@ class LiveService:
             if not maps:
                 raise ValueError("No comic sitemaps found in source index")
             with ThreadPoolExecutor(max_workers=self.settings.catalog_concurrency) as pool:
-                pages = list(pool.map(self.xml, maps))
+                tasks = [pool.submit(copy_context().run, self.xml, url) for url in maps]
+                pages = [task.result() for task in tasks]
             comics = {}
             for page_kind, urls in pages:
                 if page_kind != "urlset":
@@ -374,7 +376,8 @@ class LiveService:
                         "detail": "Website nguồn trả lỗi", "source_status": status}}
             except (ValueError, httpx.HTTPError) as error:
                 return {"id": identifier, "data": None, "error": {"status": 504 if isinstance(error, httpx.TimeoutException) else 502, "detail": str(error)}}
-        items = list(self.fetch_pool.map(load, identifiers))
+        tasks = [self.fetch_pool.submit(copy_context().run, load, identifier) for identifier in identifiers]
+        items = [task.result() for task in tasks]
         return {"items": items, "count": len(items), "partial": any(item["error"] for item in items)}
 
     def chapters(self, identifier, order="desc", q=""):
@@ -416,7 +419,7 @@ class LiveService:
         def load():
             if not targets:
                 raise HTTPException(502, "Chương chưa có máy chủ ảnh")
-            tasks = [self.image_pool.submit(fetch, targets[0])]
+            tasks = [self.image_pool.submit(copy_context().run, fetch, targets[0])]
             origins = {tasks[0]: targets[0]}
             def successful(task):
                 value = task.result()
@@ -430,7 +433,7 @@ class LiveService:
                 # A stalled original must not consume its full timeout before
                 # another source-provided CDN can deliver the same page.
                 for url in targets[1:]:
-                    task = self.image_pool.submit(fetch, url)
+                    task = self.image_pool.submit(copy_context().run, fetch, url)
                     tasks.append(task)
                     origins[task] = url
                 remaining = set(tasks)
