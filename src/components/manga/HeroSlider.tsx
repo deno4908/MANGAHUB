@@ -72,7 +72,9 @@ const HeroSlider = ({ manga }: { manga: Manga[] }) => {
     return () => clearInterval(timer);
   }, [items.length]);
 
-  const m = items[current];
+  // A source fallback can replace five slides with a smaller QQ selection.
+  const activeIndex = current < items.length ? current : 0;
+  const m = items[activeIndex];
   if (!m) return null;
 
   const mangaDexId = normalizeMangaDexId(m.id);
@@ -187,7 +189,7 @@ const HeroSlider = ({ manga }: { manga: Manga[] }) => {
         {items.map((_, i) => (
           <button key={i} onClick={() => setCurrent(i)}
             className={`h-1 rounded-full transition-all duration-400 ${
-              i === current ? 'w-8 bg-primary' : 'w-2.5 bg-background/40 hover:bg-background/60'
+              i === activeIndex ? 'w-8 bg-primary' : 'w-2.5 bg-background/40 hover:bg-background/60'
             }`} />
         ))}
       </div>

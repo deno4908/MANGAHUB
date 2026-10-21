@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect, useCallback, memo } from 'react';
+import { useState, useRef, useEffect, useCallback, useContext, memo } from 'react';
+import { ImageFailureContext } from './ImageFailureContext';
 import { motion } from 'framer-motion';
 import { ImageOff, RefreshCw } from 'lucide-react';
 import { useThemeStore } from '@/store/themeStore';
@@ -50,6 +51,7 @@ const OptimizedImage = memo(({
   draggable,
   style,
 }: OptimizedImageProps) => {
+  const reportUnavailable = useContext(ImageFailureContext);
   const mode = useThemeStore((s) => s.mode);
   const themedFallbackSrc = mode === 'dark' ? DARK_FALLBACK_SRC : LIGHT_FALLBACK_SRC;
 
@@ -119,11 +121,13 @@ const OptimizedImage = memo(({
       setError(false);
 
       if (isPrimarySource && normalizedFallbackSrc && activeSrc !== normalizedFallbackSrc) {
+        if (isNoCoverSrc(normalizedFallbackSrc)) reportUnavailable?.(normalizedSrc);
         setActiveSrc(normalizedFallbackSrc);
         return;
       }
 
       if (activeSrc !== themedFallbackSrc) {
+        reportUnavailable?.(normalizedSrc);
         if (hasRemoteCandidate) setNeedsRecover(true);
         setActiveSrc(themedFallbackSrc);
       }
@@ -140,6 +144,7 @@ const OptimizedImage = memo(({
     fallbackSwitchDelayMs,
     themedFallbackSrc,
     hasRemoteCandidate,
+    reportUnavailable,
   ]);
 
   // ── Reset when src prop changes ────────────────────────────────────────────
@@ -183,13 +188,15 @@ const OptimizedImage = memo(({
   const handleError = useCallback(() => {
     loadedRef.current = false;
     // Primary failed; switch to the fallback source if available.
-    if (normalizedFallbackSrc && activeSrc !== normalizedFallbackSrc) {
+    if (activeSrc === normalizedSrc && normalizedFallbackSrc && activeSrc !== normalizedFallbackSrc) {
+      if (isNoCoverSrc(normalizedFallbackSrc)) reportUnavailable?.(normalizedSrc);
       setLoaded(false);
       setActiveSrc(normalizedFallbackSrc);
       return;
     }
     // Final local fallback when upstream sources fail.
     if (activeSrc !== themedFallbackSrc) {
+      reportUnavailable?.(normalizedSrc);
       setLoaded(false);
       if (hasRemoteCandidate) setNeedsRecover(true);
       setActiveSrc(themedFallbackSrc);
@@ -198,7 +205,7 @@ const OptimizedImage = memo(({
     // Both sources failed
     if (hasRemoteCandidate) setNeedsRecover(true);
     setError(true);
-  }, [normalizedFallbackSrc, activeSrc, themedFallbackSrc, hasRemoteCandidate]);
+  }, [normalizedSrc, normalizedFallbackSrc, activeSrc, themedFallbackSrc, hasRemoteCandidate, reportUnavailable]);
 
   const handleManualRetry = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();

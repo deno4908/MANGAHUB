@@ -1,4 +1,6 @@
-import { useMemo, useEffect, useState } from 'react';
+import { useMemo, useEffect, useState, useCallback } from 'react';
+import { ImageFailureContext } from '@/components/ui/ImageFailureContext';
+import { isMangaDexCoverUrl } from '@/lib/homeSourceFallback';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -1042,6 +1044,10 @@ const syncMangaDexLatestChapters = (
 
 const Index = () => {
   const queryClient = useQueryClient();
+  const [hasMangaDexCoverFailure, setHasMangaDexCoverFailure] = useState(false);
+  const reportHomeImageFailure = useCallback((src: string) => {
+    if (isMangaDexCoverUrl(src)) setHasMangaDexCoverFailure(true);
+  }, []);
   const showMatureContent = useSettingsStore((s) => s.settings.privacy.showMatureContent);
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
   const authUser = useUserStore((s) => s.user);
@@ -1076,9 +1082,33 @@ const Index = () => {
     },
     staleTime: 30 * 1000,
     gcTime: 15 * 60 * 1000,
-    retry: 1,
+    retry: 0,
     refetchOnWindowFocus: false,
     placeholderData: (previousData) => previousData,
+  });
+  const isMangaDexUnavailable = isHomeBannerError || hasMangaDexCoverFailure;
+  const isHomeSourceAvailable = useCallback((item: Manga) =>
+    !isMangaDexUnavailable || (item.source !== 'mangadex' && !normalizeMangaDexId(item.id)),
+  [isMangaDexUnavailable]);
+  const hasQQHomeItems = [data?.latest, data?.ongoing]
+    .some(section => section?.items?.some(item => item.source !== 'mangadex' && !normalizeMangaDexId(item.id)
+      && (showMatureContent || !isMatureManga(item))));
+  const needsQQFallback = !hasQQHomeItems && (isHomepageError || isMangaDexUnavailable);
+  const { data: qqFallbackData, isLoading: isQQFallbackLoading, refetch: refetchQQFallback } = useQuery({
+    queryKey: ['manga', 'home', 'qq-fallback', showMatureContent],
+    queryFn: async ({ signal }) => {
+      const payload = await mangaApi.getOTruyenFiltered({
+        page: 1, limit: 24, sort: 'latest', showMature: showMatureContent, attachRatings: false, signal,
+      });
+      const result = adaptListData(payload);
+      if (!result.items.length) throw new Error('QQ home data unavailable');
+      return result;
+    },
+    enabled: needsQQFallback,
+    staleTime: 60_000,
+    gcTime: 15 * 60_000,
+    retry: 0,
+    refetchOnWindowFocus: false,
   });
   const { data: announcementData } = useQuery({
     queryKey: ['site-announcements', 'active-home-popup'],
@@ -1102,12 +1132,12 @@ const Index = () => {
   }, [refetchHomepageCombined]);
 
   const featured = data?.featured?.items || [];
-  const latest = data?.latest?.items || [];
-  const ongoing = data?.ongoing?.items || [];
+  const latest = [...(data?.latest?.items || []), ...(qqFallbackData?.items || [])];
+  const ongoing = [...(data?.ongoing?.items || []), ...(qqFallbackData?.items || [])];
   const hasOTruyenHomeItems = latest.length > 0 || ongoing.length > 0 || featured.length > 0;
   const [homeDeferredWorkReady, setHomeDeferredWorkReady] = useState(false);
   // Render whichever source arrives first; late MangaDex data remains live.
-  const isHomePrimaryReady = Boolean(data || homeBannerData);
+  const isHomePrimaryReady = Boolean(data || homeBannerData || qqFallbackData);
   useEffect(() => {
     if (!isHomePrimaryReady) {
       setHomeDeferredWorkReady(false);
@@ -1127,7 +1157,7 @@ const Index = () => {
 
   const canRunHomeDeferredQueries = isHomePrimaryReady && homeDeferredWorkReady;
 
-  const mangaDexItems = homeBannerData?.items || [];
+  const mangaDexItems = isMangaDexUnavailable ? [] : (homeBannerData?.items || []);
 
   const visibleMangaDexItems = useMemo(
     () => (showMatureContent ? mangaDexItems : mangaDexItems.filter((m) => !isMatureManga(m))),
@@ -1135,23 +1165,23 @@ const Index = () => {
   );
 
   const visibleLatest = useMemo(
-    () => (showMatureContent ? latest : latest.filter((m) => !isMatureManga(m))),
-    [latest, showMatureContent],
+    () => latest.filter(m => isHomeSourceAvailable(m) && (showMatureContent || !isMatureManga(m))),
+    [latest, showMatureContent, isHomeSourceAvailable],
   );
 
   const visibleOngoing = useMemo(
-    () => (showMatureContent ? ongoing : ongoing.filter((m) => !isMatureManga(m))),
-    [ongoing, showMatureContent],
+    () => ongoing.filter(m => isHomeSourceAvailable(m) && (showMatureContent || !isMatureManga(m))),
+    [ongoing, showMatureContent, isHomeSourceAvailable],
   );
 
   const visibleFeatured = useMemo(
-    () => (showMatureContent ? featured : featured.filter((m) => !isMatureManga(m))),
-    [featured, showMatureContent],
+    () => featured.filter(m => isHomeSourceAvailable(m) && (showMatureContent || !isMatureManga(m))),
+    [featured, showMatureContent, isHomeSourceAvailable],
   );
 
   const homeBannerItemsCandidate = useMemo(
     () => {
-      const items = homeBannerData?.items || [];
+      const items = isMangaDexUnavailable ? [] : (homeBannerData?.items || []);
       const visible = showMatureContent ? items : items.filter((m) => !isMatureManga(m));
       return visible.filter((m) => {
         const title = String(m.title || '').trim();
@@ -1159,7 +1189,7 @@ const Index = () => {
         return title && cover && !cover.includes('no-cover');
       });
     },
-    [homeBannerData?.items, showMatureContent],
+    [homeBannerData?.items, showMatureContent, isMangaDexUnavailable],
   );
   const homeBannerItems = homeBannerItemsCandidate;
 
@@ -1214,6 +1244,7 @@ const Index = () => {
 
     for (const row of rows) {
       const slug = String(row.manga_slug || '').trim().toLowerCase();
+      if (isMangaDexUnavailable && normalizeMangaDexId(slug)) continue;
       if (!slug || seen.has(slug)) continue;
       seen.add(slug);
 
@@ -1306,7 +1337,7 @@ const Index = () => {
     }
 
     return overlays.slice(0, MY_RATED_HOME_LIMIT);
-  }, [myRatedHomeData, latestMerged, ongoingMerged, visibleMangaDexItems]);
+  }, [myRatedHomeData, latestMerged, ongoingMerged, visibleMangaDexItems, isMangaDexUnavailable]);
 
   const ratingSlugs = useMemo(() => {
     const slugs = new Set<string>();
@@ -1378,8 +1409,9 @@ const Index = () => {
   });
 
   const guestTopRatedRows = useMemo<TopRatedGlobalItem[]>(
-    () => (((guestTopRatedData as any)?.items || []) as TopRatedGlobalItem[]),
-    [guestTopRatedData],
+    () => (((guestTopRatedData as any)?.items || []) as TopRatedGlobalItem[])
+      .filter(row => !isMangaDexUnavailable || !normalizeMangaDexId(row.manga_slug)),
+    [guestTopRatedData, isMangaDexUnavailable],
   );
 
   const topRatedKnownLookup = useMemo(() => {
@@ -1590,8 +1622,9 @@ const Index = () => {
   });
 
   const trendingRows = useMemo<TrendingMangaItem[]>(
-    () => (((trendingPayload as any)?.trending || []) as TrendingMangaItem[]),
-    [trendingPayload],
+    () => (((trendingPayload as any)?.trending || []) as TrendingMangaItem[])
+      .filter(row => !isMangaDexUnavailable || !normalizeMangaDexId(row.slug)),
+    [trendingPayload, isMangaDexUnavailable],
   );
 
   const popularFromTrending = useMemo<Manga[]>(() => {
@@ -1786,10 +1819,14 @@ const Index = () => {
   });
 
   const topRatedDisplay = useMemo(() => {
-    return syncMangaDexLatestChapters(topRated, topRatedMangaDexChapterMap as Record<string, MangaDexLatestChapterMeta>);
-  }, [topRated, topRatedMangaDexChapterMap]);
+    const candidates = isMangaDexUnavailable
+      ? dedupeById([...topRated, ...[...popular].sort((a, b) => b.rating - a.rating)]).slice(0, 6)
+      : topRated;
+    return syncMangaDexLatestChapters(candidates, topRatedMangaDexChapterMap as Record<string, MangaDexLatestChapterMeta>);
+  }, [topRated, topRatedMangaDexChapterMap, isMangaDexUnavailable, popular]);
 
-  const isHomeSynchronizedLoading = !isHomePrimaryReady && (isInitialMergedLoading || isHomeBannerLoading);
+  const isHomeSynchronizedLoading = !heroBannerItems.length &&
+    (isInitialMergedLoading || (!isMangaDexUnavailable && isHomeBannerLoading) || (needsQQFallback && isQQFallbackLoading));
   const isTopRatedSectionLoading = isHomeSynchronizedLoading;
 
   const homeCoverWarmupUrls = useMemo(() => {
@@ -1823,6 +1860,7 @@ const Index = () => {
   const isHeroBannerLoading = isHomeSynchronizedLoading;
 
   return (
+    <ImageFailureContext.Provider value={reportHomeImageFailure}>
     <div className="min-h-screen">
       <HomeAnnouncementPopup key={activeAnnouncement?.id || 'none'} announcement={activeAnnouncement} />
       <section className="container mx-auto px-4 pt-5">
@@ -1835,7 +1873,7 @@ const Index = () => {
             {isHomepageError && isHomeBannerError ? (
               <div className="text-center space-y-3">
                 <p className="text-muted-foreground font-medium">Chưa tải được truyện. Vui lòng thử lại.</p>
-                <button className="px-4 py-2 rounded-lg bg-primary text-primary-foreground" onClick={() => { void refetchHomepageCombined(); void refetchHomeBanner(); }}>Thử lại</button>
+                <button className="px-4 py-2 rounded-lg bg-primary text-primary-foreground" onClick={() => { void refetchHomepageCombined(); void refetchHomeBanner(); if (needsQQFallback) void refetchQQFallback(); }}>Thử lại</button>
               </div>
             ) : <p className="text-muted-foreground font-medium">Chưa có truyện để hiển thị.</p>}
           </div>
@@ -1884,6 +1922,7 @@ const Index = () => {
         </section>
       </div>
     </div>
+    </ImageFailureContext.Provider>
   );
 };
 
