@@ -4,6 +4,7 @@ import { useUserStore } from '@/store/userStore';
 import { useNavigate } from 'react-router-dom';
 import { getBanLock } from '@/lib/api';
 import { supportMailto } from '@/lib/support';
+import LegalLinks from '@/components/LegalLinks';
 
 const BannedPage = () => {
   const { user, logout } = useUserStore();
@@ -144,6 +145,7 @@ const BannedPage = () => {
           Nếu bạn cho rằng đây là nhầm lẫn, vui lòng liên hệ hỗ trợ để được xem xét lại.
         </p>
 
+        <LegalLinks className="justify-center" />
         {/* Logout Button */}
         <motion.div
           initial={{ opacity: 0 }}

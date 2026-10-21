@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import { Facebook } from 'lucide-react';
+import LegalLinks from '@/components/LegalLinks';
 
 const DiscordIcon = ({ className }: { className?: string }) => (
   <svg className={className} viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
@@ -60,7 +61,8 @@ const Footer = () => (
         </div>
       </div>
 
-      <p className="mt-8 border-t border-border/60 pt-5 text-center text-xs text-muted-foreground/50">
+      <LegalLinks className="mt-8 justify-center" />
+      <p className="mt-5 border-t border-border/60 pt-5 text-center text-xs text-muted-foreground/50">
         © 2026 MangaHub
       </p>
     </div>

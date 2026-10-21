@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion';
+import LegalLinks from '@/components/LegalLinks';
 import { ShieldX, ArrowLeft, Mail, Info } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 
@@ -63,6 +64,7 @@ const ForbiddenPage = () => {
             </Link>
           </div>
         </div>
+        <LegalLinks className="justify-center" />
       </motion.div>
     </div>
   );

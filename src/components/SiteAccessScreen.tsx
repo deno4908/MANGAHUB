@@ -1,5 +1,6 @@
 import { ArrowRight, BookOpen, Loader2, LogIn, LogOut, RefreshCw, ShieldCheck, WifiOff } from "lucide-react";
 import { Link } from "react-router-dom";
+import LegalLinks from "./LegalLinks";
 
 type Props = {
   loading: boolean;
@@ -73,7 +74,7 @@ export default function SiteAccessScreen({ loading, failed, fetching, loggedIn, 
           </svg>
         </div>
       </section>
-      <footer className="mx-auto flex w-full max-w-6xl items-center justify-between gap-4 border-t border-border py-6 text-[11px] text-muted-foreground"><span>MangaHub · Thế giới truyện của bạn</span><span className="inline-flex items-center gap-1.5"><ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />Bảo vệ quyền truy cập</span></footer>
+      <footer className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-4 border-t border-border py-6 text-[11px] text-muted-foreground"><span>MangaHub · Thế giới truyện của bạn</span><LegalLinks /><span className="inline-flex items-center gap-1.5"><ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />Bảo vệ quyền truy cập</span></footer>
     </main>
   );
 }

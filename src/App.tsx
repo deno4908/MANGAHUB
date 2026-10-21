@@ -49,6 +49,7 @@ const FaqPage = lazy(() => import("./pages/FaqPage"));
 const BannedPage = lazy(() => import("./pages/BannedPage"));
 const ForbiddenPage = lazy(() => import("./pages/ForbiddenPage"));
 const NotFound = lazy(() => import("./pages/NotFound"));
+const LegalPage = lazy(() => import("./pages/LegalPage"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -558,10 +559,12 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
   useEffect(() => {
     if (maintenanceLocked || !isLoggedIn || !user || isRestoringSession) return;
     let isChecking = false;
+    let active = true;
     const checkBanStatus = () => {
       if (isChecking || !getAccessToken() || document.hidden) return;
       isChecking = true;
       authApi.ping().then(() => {
+        if (!active) return;
         if (hasBanLock()) {
           clearBanLock();
           loadUser();
@@ -580,6 +583,7 @@ const AuthLoader = ({ maintenanceLocked = false }: { maintenanceLocked?: boolean
     window.addEventListener('focus', checkBanStatus);
     document.addEventListener('visibilitychange', checkBanStatus);
     return () => {
+      active = false;
       window.clearInterval(timer);
       window.removeEventListener('focus', checkBanStatus);
       document.removeEventListener('visibilitychange', checkBanStatus);
@@ -790,13 +794,30 @@ const AppContent = () => {
   );
 };
 
+// Public documents have their own shell and mount no authentication, maintenance
+// or catalog effects. Only these exact routes bypass the application gates.
+export const AppRouter = () => {
+  const location = useLocation();
+  return (
+    <RouteErrorBoundary resetKey={location.pathname}>
+      <Suspense fallback={<PageLoader />}>
+        <Routes>
+          <Route path="/privacy" element={<LegalPage document="privacy" />} />
+          <Route path="/terms" element={<LegalPage document="terms" />} />
+          <Route path="*" element={<AppContent />} />
+        </Routes>
+      </Suspense>
+    </RouteErrorBoundary>
+  );
+};
+
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <Toaster />
       <Sonner />
       <BrowserRouter>
-        <AppContent />
+        <AppRouter />
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>
