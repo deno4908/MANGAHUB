@@ -7,7 +7,6 @@ routes = [
   { pattern = "mangahub.art/api/mangadex-edge/*", zone_name = "mangahub.art" }
 ]
 
-# QQ rejects the default egress used by some Cloudflare locations.
-# Keep source fetches near Singapore, where the live relay has been verified.
+# Keep browser and backend fetches on the same local source cache.
 [placement]
 region = "aws:ap-southeast-1"
