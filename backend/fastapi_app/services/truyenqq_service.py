@@ -7,6 +7,7 @@ import asyncio
 from serverless_runtime import create_task
 import hashlib
 import json
+import logging
 import random
 import re
 import threading
@@ -19,12 +20,16 @@ from urllib.parse import quote, urlsplit
 import httpx
 from fastapi import HTTPException
 from truyenapi.truyenapi.config import Settings
+from truyenapi.truyenapi.client import SourceClient
 from truyenapi.truyenapi.parsers import identity, optional_integer
 from truyenapi.truyenapi.service import LiveService
 from truyenapi.truyenapi.updates import update_interval
 
 from fastapi_app.services.cache_service import cache
 from fastapi_app.services.request_coalescing import coalesce_reads
+from fastapi_app.services.truyenqq_transport import TruyenQQTransport
+
+logger = logging.getLogger(__name__)
 
 _live: LiveService | None = None
 _lock = threading.Lock()
@@ -44,7 +49,8 @@ def get_live() -> LiveService:
     global _live
     with _lock:
         if _live is None:
-            _live = LiveService(Settings())
+            settings = Settings()
+            _live = LiveService(settings, SourceClient(settings, transport=TruyenQQTransport()))
         return _live
 
 
@@ -61,13 +67,31 @@ async def run_live(method: str, *args, **kwargs):
     except HTTPException:
         raise
     except httpx.TimeoutException as error:
+        _log_source_error(method, error)
         raise HTTPException(504, "TruyenQQ phản hồi quá chậm, vui lòng thử lại.") from error
     except httpx.HTTPStatusError as error:
+        _log_source_error(method, error)
         status = error.response.status_code
         raise HTTPException(404 if status == 404 else 503 if status == 429 else 502,
                             "Không tải được dữ liệu từ TruyenQQ.") from error
     except (httpx.RequestError, ValueError) as error:
+        _log_source_error(method, error)
         raise HTTPException(502, "Không tải được dữ liệu từ TruyenQQ.") from error
+
+
+def _log_source_error(method, error):
+    try:
+        request = getattr(error, "request", None)
+    except RuntimeError:
+        request = None
+    response = getattr(error, "response", None)
+    # Exclude query strings, request bodies, headers, and response content.
+    logger.warning(
+        "TruyenQQ source failed operation=%s error=%s host=%s path=%s status=%s reason=%s",
+        method, type(error).__name__, request.url.host if request else "-",
+        request.url.path if request else "-", response.status_code if response is not None else "-",
+        re.sub(r"https?://[^\s;]+", "[source URL]", str(error))[:160] if isinstance(error, ValueError) else "-",
+    )
 
 
 def full_slug(value: dict) -> str:

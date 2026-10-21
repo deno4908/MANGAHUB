@@ -8,11 +8,11 @@ from .config import Settings
 
 
 class SourceClient:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, transport=None):
         self.settings = settings
         self.rate_lock = threading.Lock()
         self.rate_states = {}
-        self.http = httpx.Client(http2=settings.http2,
+        self.http = httpx.Client(http2=settings.http2, transport=transport,
                                  timeout=httpx.Timeout(settings.timeout, connect=settings.connect_timeout, pool=settings.connect_timeout),
                                  limits=httpx.Limits(max_connections=settings.max_connections,
                                                     max_keepalive_connections=settings.max_connections,

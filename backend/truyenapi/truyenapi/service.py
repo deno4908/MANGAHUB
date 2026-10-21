@@ -221,7 +221,13 @@ class LiveService:
             url += "?" + urlencode(sorted(params.items()))
         ttl = self.settings.cache_ttl if ttl is None else ttl
         def load():
-            value = parse_listing(self.html(url, ttl=ttl, refresh=refresh), url)
+            try:
+                value = parse_listing(self.html(url, ttl=ttl, refresh=refresh), url)
+            except ValueError:
+                # A blocked/invalid source page is not a usable snapshot. Let a
+                # reader's retry fetch the source again instead of replaying it.
+                self.html_cache.invalidate(url)
+                raise
             if page > value["total_pages"]:
                 raise HTTPException(404, "Trang vượt quá số trang nguồn cung cấp")
             self.remember_cards(value["items"], self.html_lifetime(url, ttl))

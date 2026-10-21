@@ -2810,6 +2810,22 @@ const BrowseManga = () => {
     otruyenStatusFillQuery.isLoading &&
     otruyenStatusFillItems.length === 0;
 
+  const activeBrowseQuery = useGlobalClientSortMode
+    ? globalSortedListQuery
+    : useOTruyenStatusFillMode
+      ? otruyenStatusFillQuery
+      : useMangaDexServerSearchMode
+        ? mangaDexServerSearchQuery
+        : useMangaDexLatestFeedMode
+          ? mangaDexLatestFeedQuery
+          : useCombinedList
+            ? combinedListQuery
+            : isMangaDexSourceTab
+              ? mangadexCatalogQuery
+              : useOTruyenFilteredServerMode
+                ? otruyenFilteredServerQuery
+                : useOTruyenCategory ? categoryQuery : listQuery;
+
   const isLoading =
     (useMangaDexServerSearchMode
       ? mangaDexServerSearchQuery.isLoading
@@ -5462,7 +5478,22 @@ const BrowseManga = () => {
                   <Loader2 className="w-4 h-4 animate-spin text-primary" />
                 </div>
               )}
-              <p className="text-sm text-muted-foreground mb-4 font-medium">
+              {activeBrowseQuery.isError && (
+                <div role="alert" className="rounded-xl border border-border bg-secondary/40 p-5 mb-4 text-center space-y-3">
+                  <p className="text-muted-foreground font-medium">
+                    Chưa tải được danh sách truyện từ {isMangaDexSourceTab ? 'MangaDex' : 'TruyenQQ'}. Vui lòng thử lại.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={activeBrowseQuery.isFetching}
+                    onClick={() => { void activeBrowseQuery.refetch(); }}
+                    className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-50"
+                  >
+                    {activeBrowseQuery.isFetching ? 'Đang tải...' : 'Thử lại'}
+                  </button>
+                </div>
+              )}
+              {(!activeBrowseQuery.isError || displayItems.length > 0) && <p className="text-sm text-muted-foreground mb-4 font-medium">
                 {displayItems.length} kết quả trang này
                 {isClientPaginationMode &&
                   !useMangaDexServerSearchMode &&
@@ -5470,7 +5501,7 @@ const BrowseManga = () => {
                   stableMergedFiltered.length > pageSize && (
                   <span className="ml-1 opacity-60">/ {stableMergedFiltered.length} tổng</span>
                 )}
-              </p>
+              </p>}
               {displayItems.length > 0 ? (
                 <>
                   <MangaGrid
@@ -5482,7 +5513,7 @@ const BrowseManga = () => {
                   />
                   <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} />
                 </>
-              ) : (
+              ) : !activeBrowseQuery.isError ? (
                 <div className="text-center py-20">
                   <BookOpen className="w-10 h-10 text-muted-foreground/30 mx-auto mb-3" />
                   {totalPages > 1 && (
@@ -5492,7 +5523,7 @@ const BrowseManga = () => {
                   )}
                   <p className="text-muted-foreground font-medium">Không tìm thấy truyện nào phù hợp.</p>
                 </div>
-              )}
+              ) : null}
 
             </>
           )}
