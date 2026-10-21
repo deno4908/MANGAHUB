@@ -1,31 +1,16 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Menu, X, User, Home, Compass, History, Bell, Shuffle, Settings, LogOut, LogIn, Bookmark, Trophy, LifeBuoy, Heart, ShieldCheck, Upload } from 'lucide-react';
+import { Search, Menu, X, User, Home, Compass, History, Bell, Shuffle, Settings, LogOut, LogIn, Bookmark, Trophy, LifeBuoy, Heart, ShieldCheck, Upload, Loader2 } from 'lucide-react';
 import { useUserStore } from '@/store/userStore';
 import { mangaApi } from '@/lib/api';
 import { adaptMangaItem } from '@/lib/adapters';
+import { useMangaSuggestions } from '@/hooks/useMangaSuggestions';
+import { useSettingsStore } from '@/store/settingsStore';
 import { Manga } from '@/types/manga';
 import OptimizedImage from '@/components/ui/OptimizedImage';
 import { getMangaDetailPath } from '@/lib/mangaLinks';
 import BrandLogo from '@/components/manga/BrandLogo';
-
-const MAX_SUGGESTIONS = 6;
-const MAX_SUGGESTION_CACHE = 60;
-
-const normalizeSearchKey = (value: string) => String(value || '').trim().toLowerCase();
-
-const dedupeMangaSuggestions = (items: Manga[]): Manga[] => {
-  const seen = new Set<string>();
-  const deduped: Manga[] = [];
-  for (const item of items) {
-    const key = String(item?.id || '').trim().toLowerCase();
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    deduped.push(item);
-  }
-  return deduped;
-};
 
 function compactAuthorText(author: string): string {
   const parts = String(author || '')
@@ -54,18 +39,26 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearch, setShowSearch] = useState(false);
-  const [suggestions, setSuggestions] = useState<Manga[]>([]);
+  const [dismissedSearch, setDismissedSearch] = useState(false);
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const profileRef = useRef<HTMLDivElement>(null);
   const [showNotifications, setShowNotifications] = useState(false);
   const [loadingRandom, setLoadingRandom] = useState(false);
   const searchRef = useRef<HTMLDivElement>(null);
+  const mobileSearchRef = useRef<HTMLDivElement>(null);
   const notifRef = useRef<HTMLDivElement>(null);
-  const searchRequestSeqRef = useRef(0);
-  const suggestionCacheRef = useRef<Map<string, Manga[]>>(new Map());
   const location = useLocation();
   const navigate = useNavigate();
   const { isLoggedIn, user, notifications, markNotificationRead, markAllNotificationsRead, logout } = useUserStore();
+  const showMature = useSettingsStore(s => s.settings.privacy.showMatureContent);
+  const search = useMangaSuggestions(searchQuery, { enabled: !maintenanceMode && !dismissedSearch,
+    showMature, viewerKey: isLoggedIn ? user?.id || 'restoring' : 'guest' });
+  const suggestions = search.items;
+  const showSuggestions = suggestions.length > 0 || search.loading || search.settled;
+  const searchMessage = search.loading ? 'Đang tìm truyện…'
+    : search.failed ? 'Chưa tải được gợi ý. Vui lòng thử lại.' : 'Không tìm thấy truyện phù hợp.';
+  const clearSuggestions = () => setDismissedSearch(true);
+  const changeSearch = (value: string) => { setDismissedSearch(false); setSearchQuery(value); };
   const unreadCount = notifications.filter(n => !n.read).length;
 
   const handleSearch = (e: React.FormEvent) => {
@@ -73,122 +66,13 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
     if (maintenanceMode) return;
     if (searchQuery.trim()) {
       navigate(`/search?q=${encodeURIComponent(searchQuery)}`);
-      setSearchQuery(''); setShowSearch(false); setSuggestions([]);
+      setSearchQuery(''); setShowSearch(false); clearSuggestions();
     }
   };
 
   useEffect(() => {
-    if (maintenanceMode) {
-      setSuggestions([]);
-      return;
-    }
-    const keyword = searchQuery.trim();
-    const normalizedKeyword = normalizeSearchKey(keyword);
-    if (keyword.length > 1) {
-      const requestSeq = searchRequestSeqRef.current + 1;
-      searchRequestSeqRef.current = requestSeq;
-
-      const cachedExact = suggestionCacheRef.current.get(normalizedKeyword);
-      if (cachedExact?.length) {
-        setSuggestions(cachedExact.slice(0, MAX_SUGGESTIONS));
-      } else {
-        let bestPrefixItems: Manga[] = [];
-        let bestPrefixLen = 0;
-        for (const [cacheKey, cacheItems] of suggestionCacheRef.current.entries()) {
-          if (cacheKey.length < 2) continue;
-          if (!normalizedKeyword.startsWith(cacheKey)) continue;
-          if (cacheKey.length <= bestPrefixLen) continue;
-          bestPrefixLen = cacheKey.length;
-          bestPrefixItems = cacheItems;
-        }
-
-        if (bestPrefixItems.length > 0) {
-          const quickFromPrefix = bestPrefixItems.filter((item) => {
-            const title = String(item?.title || '').toLowerCase();
-            const author = String(item?.author || '').toLowerCase();
-            const id = String(item?.id || '').toLowerCase();
-            return (
-              title.includes(normalizedKeyword) ||
-              author.includes(normalizedKeyword) ||
-              id.includes(normalizedKeyword)
-            );
-          });
-          if (quickFromPrefix.length > 0) {
-            setSuggestions(quickFromPrefix.slice(0, MAX_SUGGESTIONS));
-          }
-        }
-      }
-
-      const timer = setTimeout(async () => {
-        const updateCache = (key: string, items: Manga[]) => {
-          const map = suggestionCacheRef.current;
-          map.set(key, items.slice(0, 12));
-          if (map.size > MAX_SUGGESTION_CACHE) {
-            const oldestKey = map.keys().next().value;
-            if (oldestKey) map.delete(oldestKey);
-          }
-        };
-
-        const mapItems = (payload: any): Manga[] =>
-          dedupeMangaSuggestions(((payload?.data?.items || []) as any[]).map(adaptMangaItem));
-
-        let quickItems: Manga[] = [];
-        try {
-          const quickPayload = await mangaApi.search(keyword, 1, {
-            includeMangaDex: false,
-            attachRatings: false,
-            skipAuth: true,
-            timeoutMs: 1800,
-          });
-          quickItems = mapItems(quickPayload);
-
-          if (requestSeq === searchRequestSeqRef.current) {
-            if (quickItems.length > 0) {
-              setSuggestions(quickItems.slice(0, MAX_SUGGESTIONS));
-            }
-            updateCache(normalizedKeyword, quickItems);
-          }
-        } catch {
-          // best effort
-        }
-
-        try {
-          const enrichedPayload = await mangaApi.search(keyword, 1, {
-            includeMangaDex: true,
-            attachRatings: false,
-            mangaDexLimit: 8,
-            mangaDexTimeoutMs: 2600,
-            skipAuth: true,
-            timeoutMs: 3600,
-          });
-          const enrichedItems = mapItems(enrichedPayload);
-          const mergedItems = dedupeMangaSuggestions([...enrichedItems, ...quickItems]);
-
-          if (requestSeq === searchRequestSeqRef.current) {
-            if (mergedItems.length > 0) {
-              setSuggestions(mergedItems.slice(0, MAX_SUGGESTIONS));
-            } else if (!quickItems.length) {
-              setSuggestions([]);
-            }
-            updateCache(normalizedKeyword, mergedItems.length ? mergedItems : quickItems);
-          }
-        } catch {
-          if (requestSeq === searchRequestSeqRef.current && !quickItems.length) {
-            setSuggestions([]);
-          }
-        }
-      }, 90);
-      return () => {
-        clearTimeout(timer);
-      };
-    }
-    searchRequestSeqRef.current += 1;
-    setSuggestions([]);
-  }, [searchQuery, maintenanceMode]);
-
-  useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (searchRef.current && !searchRef.current.contains(e.target as Node)) setSuggestions([]);
+      if (searchRef.current && !searchRef.current.contains(e.target as Node) && !mobileSearchRef.current?.contains(e.target as Node)) clearSuggestions();
       if (notifRef.current && !notifRef.current.contains(e.target as Node)) setShowNotifications(false);
       if (profileRef.current && !profileRef.current.contains(e.target as Node)) setShowProfileMenu(false);
     };
@@ -302,17 +186,17 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
             <form onSubmit={handleSearch}>
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                <input type="text" value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+                <input type="text" value={searchQuery} onChange={e => changeSearch(e.target.value)} onFocus={() => setDismissedSearch(false)}
                   placeholder="Tìm truyện, tác giả..."
                   className="w-full pl-9 pr-4 py-1.5 rounded-lg bg-muted border border-border text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all" />
               </div>
             </form>
             <AnimatePresence>
-              {suggestions.length > 0 && (
+              {showSuggestions && (
                 <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}
                   className="absolute top-full left-0 right-0 mt-1.5 bg-card rounded-lg border border-border p-1 shadow-elevated z-50">
                   {suggestions.map(m => (
-                    <Link key={m.id} to={getMangaDetailPath(m.id)} onClick={() => { setSearchQuery(''); setSuggestions([]); }}
+                    <Link key={m.id} to={getMangaDetailPath(m.id)} onClick={() => { setSearchQuery(''); clearSuggestions(); }}
                       className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-muted transition-colors">
                       <OptimizedImage src={m.cover} alt="" className="w-8 h-11 rounded object-cover border border-border" />
                       <div className="min-w-0">
@@ -321,6 +205,11 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
                       </div>
                     </Link>
                   ))}
+                  {(search.loading || !suggestions.length) && (
+                    <p role="status" className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
+                      {search.loading && <Loader2 className="h-3 w-3 animate-spin" />}{searchMessage}
+                    </p>
+                  )}
                   <button
                     type="button"
                     onPointerDown={(e) => {
@@ -328,7 +217,7 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
                       const q = searchQuery.trim();
                       if (!q) return;
                       setSearchQuery('');
-                      setSuggestions([]);
+                      clearSuggestions();
                       navigate(`/search?q=${encodeURIComponent(q)}`);
                     }}
                     className="block w-full text-center text-xs text-primary font-semibold py-2 rounded-md hover:bg-primary/5 transition-colors"
@@ -342,7 +231,7 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
 
           {/* Right actions */}
           <div className="flex items-center gap-1">
-            <button className="sm:hidden p-2 hover:bg-muted rounded-lg transition-colors" onClick={() => setShowSearch(!showSearch)}>
+            <button aria-label="Mở tìm kiếm" className="sm:hidden p-2 hover:bg-muted rounded-lg transition-colors" onClick={() => setShowSearch(!showSearch)}>
               <Search className="w-4 h-4 text-muted-foreground" />
             </button>
             {isLoggedIn ? (
@@ -433,16 +322,16 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
       {/* Mobile search */}
       <AnimatePresence>
         {showSearch && (
-          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
+          <motion.div ref={mobileSearchRef} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
             className="sm:hidden border-t border-border bg-card">
             <form onSubmit={handleSearch} className="p-3">
-              <input type="text" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Tìm truyện..."
+              <input type="text" value={searchQuery} onChange={e => changeSearch(e.target.value)} onFocus={() => setDismissedSearch(false)} placeholder="Tìm truyện..."
                 className="w-full px-4 py-2 rounded-lg bg-muted border border-border text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20" autoFocus />
             </form>
-            {suggestions.length > 0 && (
+            {showSuggestions && (
               <div className="border-t border-border max-h-72 overflow-y-auto">
                 {suggestions.map(m => (
-                  <Link key={m.id} to={getMangaDetailPath(m.id)} onClick={() => { setSearchQuery(''); setSuggestions([]); setShowSearch(false); }}
+                  <Link key={m.id} to={getMangaDetailPath(m.id)} onClick={() => { setSearchQuery(''); clearSuggestions(); setShowSearch(false); }}
                     className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted transition-colors">
                     <OptimizedImage src={m.cover} alt="" className="w-8 h-11 rounded object-cover border border-border" />
                     <div className="min-w-0">
@@ -451,6 +340,11 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
                     </div>
                   </Link>
                 ))}
+                {(search.loading || !suggestions.length) && (
+                  <p role="status" className="flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground">
+                    {search.loading && <Loader2 className="h-3 w-3 animate-spin" />}{searchMessage}
+                  </p>
+                )}
                 <button
                   type="button"
                   onPointerDown={(e) => {
@@ -458,7 +352,7 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
                     const q = searchQuery.trim();
                     if (!q) return;
                     setSearchQuery('');
-                    setSuggestions([]);
+                    clearSuggestions();
                     setShowSearch(false);
                     navigate(`/search?q=${encodeURIComponent(q)}`);
                   }}

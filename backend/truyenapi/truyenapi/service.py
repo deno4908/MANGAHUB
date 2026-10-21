@@ -135,6 +135,35 @@ class LiveService:
             return self.source_url(known["url"])
         if not identifier.isdigit() and re.search(r"-\d+$", identifier):
             return self.source_url("/truyen-tranh/" + identifier)
+        cached_catalog = self.cache.peek("catalog")
+        if cached_catalog:
+            comic = cached_catalog["by_id"].get(identifier) or cached_catalog["by_slug"].get(identifier)
+            if comic:
+                return comic["url"]
+        if not identifier.isdigit():
+            # Legacy OTruyen routes have no QQ numeric ID. A targeted search
+            # avoids downloading every sitemap (and recovering each blocked
+            # sitemap separately). Accept only an exact slug/title match.
+            terms = identifier.replace("-", " ").split()
+            queries = list(dict.fromkeys([" ".join(terms[-6:]), " ".join(terms)]))
+            for query in queries:
+                try:
+                    candidates = self.search(query)["items"]
+                except httpx.HTTPStatusError as error:
+                    if error.response.status_code == 404:
+                        break
+                    raise
+                matches = {}
+                for candidate in candidates:
+                    stem, cid, chapter = identity(candidate["url"])
+                    if chapter is None and (stem == identifier or normalized(candidate.get("title", "")) == normalized(identifier)):
+                        matches[cid] = candidate
+                if len(matches) == 1:
+                    comic = next(iter(matches.values()))
+                    self.reference_cache.put(identifier, self.settings.catalog_ttl, comic)
+                    return self.source_url(comic["url"])
+                if len(matches) > 1:
+                    raise HTTPException(404, "Không thể xác định duy nhất truyện QQ cho slug cũ")
         bundle = self.catalog_bundle()
         comic = bundle["by_id"].get(identifier) or bundle["by_slug"].get(identifier)
         if comic:

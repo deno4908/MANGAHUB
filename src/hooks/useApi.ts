@@ -559,7 +559,10 @@ export function useSearch(keyword: string, page = 1, enabled = true) {
         };
       const data = await mangaApi.search(normalizedKeyword, page, {
         skipAuth: true,
-        timeoutMs: 15_000,
+        attachRatings: false,
+        mangaDexAttachLatest: false,
+        mangaDexTimeoutMs: 10_000,
+        timeoutMs: 20_000,
         signal,
       });
       return adaptListData(data);

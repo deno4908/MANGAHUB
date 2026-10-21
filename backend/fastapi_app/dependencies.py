@@ -2,6 +2,7 @@
 FastAPI dependencies — Supabase client, auth, RBAC.
 """
 
+import asyncio
 import base64
 import json
 import logging
@@ -11,6 +12,8 @@ from time import time
 from config import config
 from fastapi import Depends, Header, HTTPException
 from supabase import Client, create_client
+from gotrue.errors import AuthApiError
+from fastapi_app.services.request_coalescing import coalesce_reads
 
 # Lazy-initialized Supabase clients
 _supabase_admin: Client | None = None
@@ -155,7 +158,7 @@ def invalidate_auth_cache(user_id: str | None = None) -> None:
             _auth_cache.pop(token, None)
 
 
-async def get_current_user(authorization: str = Header(None)):
+def _get_current_user_sync(authorization: str | None):
     """
     Extract and verify current user from Bearer token.
     Always fetches role from profiles table.
@@ -232,9 +235,21 @@ async def get_current_user(authorization: str = Header(None)):
         }
     except HTTPException:
         raise
+    except AuthApiError as e:
+        if e.status in {400, 401, 403, 422}:
+            raise HTTPException(status_code=401, detail="Token không hợp lệ hoặc đã hết hạn") from e
+        logger.warning("Authentication provider unavailable status=%s", e.status)
+        raise HTTPException(status_code=503, detail="Dịch vụ xác thực tạm thời không khả dụng") from e
     except Exception as e:
         logger.exception("FastAPI authentication failed")
-        raise HTTPException(status_code=401, detail="Xác thực thất bại") from e
+        raise HTTPException(status_code=503, detail="Dịch vụ xác thực tạm thời không khả dụng") from e
+
+
+@coalesce_reads
+async def get_current_user(authorization: str = Header(None)):
+    # Supabase auth/profile clients are synchronous. Share the verification for
+    # concurrent reads and keep their network waits out of the ASGI event loop.
+    return await asyncio.to_thread(_get_current_user_sync, authorization)
 
 
 async def get_optional_user(authorization: str = Header(None)):
@@ -247,7 +262,7 @@ async def get_optional_user(authorization: str = Header(None)):
         return await get_current_user(authorization)
     except HTTPException as exc:
         # A banned bearer token must never silently become an anonymous visitor.
-        if exc.status_code == 403 and str(exc.detail) == BANNED_ACCOUNT_DETAIL:
+        if exc.status_code >= 500 or (exc.status_code == 403 and str(exc.detail) == BANNED_ACCOUNT_DETAIL):
             raise
         return None
 

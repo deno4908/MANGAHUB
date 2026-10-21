@@ -5479,8 +5479,14 @@ async def manga_detail(slug: str, db=Depends(get_supabase_public)):
         return detail
 
     detail_slug = str(item.get("slug") or normalized_slug).strip()
-    override_rows = await _fetch_override_rows_by_slugs(db, [detail_slug, normalized_slug])
-    _apply_override_fields(item, _resolve_override_row(override_rows, detail_slug))
+    source_slug = str(item.get("source_slug") or detail_slug).strip()
+    source_hidden_reason = (_hidden_reason_for_slug(hidden, source_slug)
+                            or _hidden_reason_for_slug(hidden, source_slug.rsplit("-", 1)[0]))
+    if source_hidden_reason:
+        raise HTTPException(status_code=451, detail={"hidden": True, "reason": source_hidden_reason})
+    override_rows = await _fetch_override_rows_by_slugs(db, [detail_slug, normalized_slug, source_slug])
+    _apply_override_fields(item, _resolve_override_row(override_rows, detail_slug)
+                           or _resolve_override_row(override_rows, source_slug))
 
     loop = asyncio.get_running_loop()
 

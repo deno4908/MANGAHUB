@@ -127,6 +127,55 @@ def test_image_preference_expires_and_falls_back_without_inventing_urls():
         service.close()
 
 
+def test_legacy_slug_resolves_by_exact_qq_search_without_crawling_sitemaps():
+    legacy = "toi-tro-thanh-nguoi-duoc-nu-phan-dien-yeu-thich-nhat"
+    canonical = legacy + "-23163"
+
+    def handler(request):
+        if request.url.path == "/frontend/search/search":
+            form = parse_qs(request.content.decode())
+            assert form["search"] == ["nu phan dien yeu thich nhat"]
+            return httpx.Response(200, text=f'<li><a href="/truyen-tranh/{canonical}"><div class="search_info"><p class="name">Exact book</p></div></a></li>')
+        raise AssertionError("Legacy lookup must not crawl the whole catalog")
+
+    service, calls = setup_service(handler)
+    try:
+        assert service.resolve(legacy) == BASE + "/truyen-tranh/" + canonical
+        assert service.resolve(legacy) == BASE + "/truyen-tranh/" + canonical
+        assert len(calls) == 1
+    finally:
+        service.close()
+
+
+def test_legacy_title_alias_resolves_only_a_unique_exact_source_title():
+    def handler(request):
+        assert request.url.path == "/frontend/search/search"
+        return httpx.Response(200, text='<li><a href="/truyen-tranh/one-piece-1-128"><div class="search_info"><p class="name">One Piece</p></div></a></li>')
+
+    service, calls = setup_service(handler)
+    try:
+        assert service.resolve("one-piece") == BASE + "/truyen-tranh/one-piece-1-128"
+        assert len(calls) == 1
+    finally:
+        service.close()
+
+
+def test_legacy_lookup_does_not_guess_between_books_with_the_same_title():
+    def handler(request):
+        assert request.url.path == "/frontend/search/search"
+        html = ''.join(f'<li><a href="/truyen-tranh/edition-{cid}"><div class="search_info"><p class="name">Same Title</p></div></a></li>' for cid in (1, 2))
+        return httpx.Response(200, text=html)
+
+    service, calls = setup_service(handler)
+    try:
+        with pytest.raises(Exception) as error:
+            service.resolve("same-title")
+        assert error.value.status_code == 404
+        assert len(calls) == 1
+    finally:
+        service.close()
+
+
 def test_docs_portal_and_swagger_have_separate_routes_and_local_assets():
     service, calls = setup_service()
     with TestClient(create_app(service=service)) as api:

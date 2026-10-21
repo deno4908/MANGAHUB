@@ -23,7 +23,7 @@ from fastapi import HTTPException
 from truyenapi.truyenapi.config import Settings
 from truyenapi.truyenapi.client import SourceClient
 from truyenapi.truyenapi.parsers import identity, optional_integer
-from truyenapi.truyenapi.service import LiveService
+from truyenapi.truyenapi.service import LiveService, normalized
 from truyenapi.truyenapi.updates import update_interval
 
 from fastapi_app.services.cache_service import cache
@@ -397,21 +397,57 @@ async def resolve_slug_from_id(manga_id):
     return "-".join(identity(url)[:2])
 
 
+def _cached_detail_identifier(slug):
+    """Reuse a QQ reference learned by cards instead of crawling every sitemap."""
+    hint = _json_cached(f"truyenqq:cover-hint:{slug}")
+    if isinstance(hint, dict) and isinstance(hint.get("url"), str):
+        try:
+            stem, identifier, chapter = identity(hint["url"])
+            canonical = f"{stem}-{identifier}"
+            title = str((hint.get("card") or {}).get("name") or "")
+            if chapter is None and (slug in {stem, canonical, identifier} or (title and normalized(title) == normalized(slug))):
+                return canonical
+        except ValueError:
+            pass
+    return slug
+
+
+@coalesce_reads
 async def get_manga_detail(slug):
-    value = await run_live("comic", slug)
-    item = await asyncio.to_thread(_item, value)
-    chapters = [_chapter(ch, item["slug"]) for ch in value.get("chapters", [])]
-    item["chapters"] = [{"server_name": "TruyenQQ", "server_data": chapters}]
-    item["chaptersLatest"] = chapters[:1]
-    payload = {"status": "success", "data": {"item": item, "seoOnPage": {"titleHead": item["name"]}}}
-    return await asyncio.to_thread(_remember, f"truyenqq:detail:{slug}", payload)
+    cached = await asyncio.to_thread(_json_cached, f"truyenqq:detail:{slug}")
+    item = ((cached or {}).get("data") or {}).get("item") if isinstance(cached, dict) else None
+    if isinstance(item, dict) and item.get("source") == "truyenqq" and "chapters" in item:
+        payload = deepcopy(cached)
+    else:
+        identifier = await asyncio.to_thread(_cached_detail_identifier, slug)
+        value = await run_live("comic", identifier)
+        item = await asyncio.to_thread(_item, value)
+        chapters = [_chapter(ch, item["slug"]) for ch in value.get("chapters", [])]
+        item["chapters"] = [{"server_name": "TruyenQQ", "server_data": chapters}]
+        item["chaptersLatest"] = chapters[:1]
+        payload = {"status": "success", "data": {"item": item, "seoOnPage": {"titleHead": item["name"]}}}
+        await asyncio.to_thread(_remember, f"truyenqq:detail:{slug}", payload)
+    item = payload["data"]["item"]
+    canonical = item["slug"]
+    # Keep existing website IDs so ratings, views, comments and bookmarks keep
+    # their original keys. Chapter tokens still carry the exact QQ comic ID.
+    if canonical != slug and (canonical.rsplit("-", 1)[0] == slug or normalized(item.get("name", "")) == normalized(slug)):
+        item["source_slug"] = canonical
+        item["slug"] = item["id"] = slug
+    return payload
 
 
+@coalesce_reads
 async def search_manga(keyword, page=1):
     # The source AJAX search is a single limited result set, without fake pages.
     if page > 1:
         return _page({"items": [], "page": page, "source_limited": True})
-    return await asyncio.to_thread(_page, await run_live("search", keyword))
+    key = "truyenqq:search:v1:" + hashlib.sha256(keyword.strip().casefold().encode()).hexdigest()
+    cached = await asyncio.to_thread(_json_cached, key)
+    if isinstance(cached, dict) and isinstance((cached.get("data") or {}).get("items"), list):
+        return cached
+    payload = await asyncio.to_thread(_page, await run_live("search", keyword))
+    return await asyncio.to_thread(_remember, key, payload, 60)
 
 
 @coalesce_reads
