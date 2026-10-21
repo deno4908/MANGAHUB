@@ -1,6 +1,7 @@
 name = "mangahub-mangadex-edge"
 main = "mangadex-edge-worker.js"
 compatibility_date = "2026-06-10"
+workers_dev = true
 
 routes = [
   { pattern = "mangahub.art/api/mangadex-edge/*", zone_name = "mangahub.art" }
