@@ -46,7 +46,7 @@ def _from_qq(item):
 
 def metadata_keys(identifier):
     return [f"truyenqq:cover-hint:{identifier}", f"truyenqq:detail:{identifier}",
-            f"catalog:card-metadata:v1:{identifier}"]
+            f"catalog:card-metadata:v1:{identifier}", f"catalog:qq-sync:v1:{identifier}"]
 
 
 def cached_metadata(identifier, values=None):
@@ -65,6 +65,9 @@ async def _qq_metadata(identifier):
     existing = await asyncio.to_thread(cached_metadata, identifier)
     if existing:
         return existing
+    from fastapi_app.services.catalog_visibility import unmatched
+    if identifier in await asyncio.to_thread(unmatched, [identifier]):
+        return None
     if re.fullmatch(r"[0-9a-f]{24}", identifier):
         return None  # An old OTruyen ObjectId does not identify a QQ book.
     async with _qq_slots:

@@ -10,7 +10,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 function Preview({ manga }: { manga: Manga }) {
   const resolved = useCardMetadata(manga);
-  return <div data-source={resolved.source} data-cover={resolved.cover}>{resolved.title} | {resolved.views} | {resolved.id}</div>;
+  return <div data-source={resolved.source} data-cover={resolved.cover} data-availability={resolved.chapterAvailability}>{resolved.title} | {resolved.views} | {resolved.id}</div>;
 }
 
 it('repairs an eight-word legacy card and preserves its local views and route', async () => {
@@ -25,12 +25,12 @@ it('repairs an eight-word legacy card and preserves its local views and route', 
   client.clear();
 });
 
-it('retains a valid romanized title if an old QQ slug has no source match', async () => {
+it('marks a confirmed unmatched legacy title as unavailable without erasing its title or statistics', async () => {
   const client = new QueryClient();
   const request = vi.spyOn(mangaApi, 'getCardMetadata').mockResolvedValue({ items: { 'nozo-x-kimi': null } });
   render(<QueryClientProvider client={client}><Preview manga={{ id: 'nozo-x-kimi', title: 'Nozo X Kimi', views: 7 } as Manga} /></QueryClientProvider>);
   await waitFor(() => expect(request).toHaveBeenCalledOnce());
-  expect(screen.getByText('Nozo X Kimi | 7 | nozo-x-kimi')).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByText('Nozo X Kimi | 7 | nozo-x-kimi')).toHaveAttribute('data-availability', 'unavailable'));
   client.clear();
 });
 
@@ -44,6 +44,38 @@ it('keeps uploaded card metadata even when an external source shares its cached 
   const card = screen.getByText(`Uploaded title | 8 | ${id}`);
   expect(card).toHaveAttribute('data-source', 'uploaded');
   expect(card).toHaveAttribute('data-cover', '/own-cover.jpg');
+  client.clear();
+});
+
+it('filters only confirmed unmatched legacy records and preserves stored reading progress', async () => {
+  const client = new QueryClient();
+  const rows = [
+    { manga_slug: 'old-missing', manga_title: 'A valid title', progress: 82 },
+    { manga_slug: 'old-pending', manga_title: 'Pending title', progress: 45 },
+    { manga_slug: 'old-matched', manga_title: 'Matched title', progress: 23 },
+    { manga_slug: 'local-upload', manga_title: 'Own title', source: 'uploaded', progress: 9 },
+  ];
+  vi.spyOn(mangaApi, 'getCardMetadata').mockResolvedValue({ items: {
+    'old-missing': null,
+    'old-matched': { id: 'old-matched-123', slug: 'old-matched-123', title: 'Matched title', source: 'truyenqq' },
+  } });
+  const { result } = renderHook(() => useCanonicalMangaRecords(rows), {
+    wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+  });
+  expect(result.current).toHaveLength(4);
+  await waitFor(() => expect(result.current?.map(row => row.manga_slug)).toEqual(['old-pending', 'old-matched', 'local-upload']));
+  expect(result.current?.map(row => row.progress)).toEqual([45, 23, 9]);
+  expect(rows[0]).toEqual({ manga_slug: 'old-missing', manga_title: 'A valid title', progress: 82 });
+  expect(rows).toHaveLength(4);
+  client.clear();
+});
+
+it('keeps cards visible when metadata is temporarily unavailable', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const request = vi.spyOn(mangaApi, 'getCardMetadata').mockRejectedValue(new Error('Temporary outage'));
+  render(<QueryClientProvider client={client}><Preview manga={{ id: 'old-network-failure', title: 'Valid title', views: 83 } as Manga} /></QueryClientProvider>);
+  await waitFor(() => expect(request).toHaveBeenCalledOnce());
+  expect(screen.getByText('Valid title | 83 | old-network-failure')).not.toHaveAttribute('data-availability');
   client.clear();
 });
 

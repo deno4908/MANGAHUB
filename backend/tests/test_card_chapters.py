@@ -158,6 +158,8 @@ def test_endpoint_masks_hidden_canonical_qq_alias(memory, monkeypatch):
     app = FastAPI()
     app.include_router(manga.router, prefix="/api/manga")
     app.dependency_overrides[manga.get_supabase_public] = lambda: object()
+    from fastapi_app.services import catalog_visibility
+    monkeypatch.setattr(catalog_visibility, "published_uploads", AsyncMock(return_value={}))
     monkeypatch.setattr(manga, "_get_hidden_slugs", AsyncMock(return_value={CANONICAL: "hidden"}))
     qq._item({"id": "18078", "url": f"https://truyenqqko.com/truyen-tranh/{CANONICAL}", "title": "Book",
               "latest_chapter": {"number": "46"}})

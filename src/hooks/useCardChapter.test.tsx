@@ -1,12 +1,15 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Manga } from '@/types/manga';
 import { mangaApi } from '@/lib/api';
 import MangaCard from '@/components/manga/MangaCard';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+beforeEach(() => {
+  vi.spyOn(mangaApi, 'getCardMetadata').mockResolvedValue({ items: {} });
+});
 const manga = { id: 'vo-trong-game-cua-toi-la-idol-noi-tieng-ngoai-doi', source: 'truyenqq',
   title: 'Vợ Trong Game Của Tôi Là Idol Nổi Tiếng Ngoài Đời', cover: '/no-cover.svg',
   chapters: [], genres: [], tags: [], views: 50, rating: 0, lastUpdated: '', status: 'ongoing' } as unknown as Manga;
@@ -39,12 +42,33 @@ it('does not hydrate a card that already has a real native latest chapter', () =
   client.clear();
 });
 
-it('explains an old QQ slug that no longer resolves instead of showing updating forever', async () => {
+it('hides an old QQ card once the source confirms it no longer resolves', async () => {
   const client = new QueryClient();
   vi.spyOn(mangaApi, 'getLatestCardChapters').mockResolvedValue({ items: {
     [manga.id]: { chapter: null, pending: false, state: 'unavailable' },
   } });
   render(<QueryClientProvider client={client}><MemoryRouter><MangaCard manga={manga} /></MemoryRouter></QueryClientProvider>);
-  await waitFor(() => expect(screen.getByText('Chưa tìm thấy trên QQ')).toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByText(manga.title)).not.toBeInTheDocument());
+  client.clear();
+});
+
+it('hides confirmed unmatched metadata even when a saved card has stale chapter data', async () => {
+  const client = new QueryClient();
+  vi.mocked(mangaApi.getCardMetadata).mockResolvedValue({ items: { [manga.id]: null } });
+  const saved = { ...manga, chapters: [{ id: 'qq--book-18078--46', number: 46 } as any] };
+  render(<QueryClientProvider client={client}><MemoryRouter><MangaCard manga={saved} /></MemoryRouter></QueryClientProvider>);
+  expect(screen.getByText(manga.title)).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByText(manga.title)).not.toBeInTheDocument());
+  client.clear();
+});
+
+it('keeps local publications visible without asking either source', () => {
+  const client = new QueryClient();
+  const chapters = vi.spyOn(mangaApi, 'getLatestCardChapters');
+  const uploaded = { ...manga, source: 'uploaded', chapterAvailability: 'unavailable' } as Manga;
+  render(<QueryClientProvider client={client}><MemoryRouter><MangaCard manga={uploaded} /></MemoryRouter></QueryClientProvider>);
+  expect(screen.getByText(manga.title)).toBeInTheDocument();
+  expect(mangaApi.getCardMetadata).not.toHaveBeenCalled();
+  expect(chapters).not.toHaveBeenCalled();
   client.clear();
 });

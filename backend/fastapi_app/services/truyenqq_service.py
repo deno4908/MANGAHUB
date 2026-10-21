@@ -209,6 +209,7 @@ def _item(value: dict, observed=None, *, cover_hints=None) -> dict:
         observed_at = datetime.fromisoformat(observed).timestamp() if observed else time.time()
         hint = json.dumps({"cover_urls": covers, "url": value["url"], "card": card, "card_observed_at": observed_at}, ensure_ascii=False)
         hints = {f"truyenqq:cover-hint:{alias}": hint for alias in {slug, identity(value["url"])[0]}}
+        hints.update({f"catalog:qq-sync:v1:{alias}": "available" for alias in {slug, identity(value["url"])[0]}})
         if cover_hints is None:
             cache.set_many(hints, ttl=86400)
         else:

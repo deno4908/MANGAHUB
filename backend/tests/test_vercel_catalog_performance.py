@@ -119,7 +119,9 @@ def test_qq_page_publishes_all_cover_aliases_in_one_nonblocking_batch(monkeypatc
     cache = Mock(get=Mock(return_value=None))
     def batch(values, ttl):
         assert threading.get_ident() != owner
-        assert len(values) == 96 and ttl == 86400
+        assert len([key for key in values if key.startswith("truyenqq:cover-hint:")]) == 96
+        assert len([key for key in values if key.startswith("catalog:qq-sync:v1:")]) == 96
+        assert ttl == 86400
     cache.set_many.side_effect = batch
     monkeypatch.setattr(qq, "cache", cache)
     items = [{"id": str(i + 1000), "url": f"https://truyenqqko.com/truyen-tranh/book-{i}-{i + 1000}",

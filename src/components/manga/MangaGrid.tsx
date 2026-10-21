@@ -89,6 +89,8 @@ const isGenericPlaceholderTitle = (value: unknown): boolean => {
 };
 
 const shouldHideInvalidMangaCard = (item: Manga): boolean => {
+  if (item.source !== 'uploaded' && item.source !== 'mangadex'
+      && !MANGADEX_ID_RE.test(item.id.replace(/^mdx-/, '')) && item.chapterAvailability === 'unavailable') return true;
   if (isReservedPublicMangaSlug(item.id)) return true;
 
   const cover = String(item.cover || '').trim();

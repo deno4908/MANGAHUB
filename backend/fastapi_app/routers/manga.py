@@ -46,9 +46,14 @@ class CardMetadataRequest(BaseModel):
 
 @router.post("/chapters/latest/batch")
 async def card_latest_chapters(payload: CardMetadataRequest, db=Depends(get_supabase_public)):
-    from fastapi_app.services import card_chapters
+    from fastapi_app.services import card_chapters, catalog_visibility
     requested = [value.lower() for value in payload.identifiers]
-    found, hidden = await asyncio.gather(card_chapters.get_many(requested), _get_hidden_slugs(db))
+    uploaded = await catalog_visibility.published_uploads(db, requested)
+    external = [identifier for identifier in requested if identifier not in uploaded]
+    found, hidden = await asyncio.gather(card_chapters.get_many(external), _get_hidden_slugs(db))
+    found.update({identifier: {"chapter": None, "pending": False} for identifier in uploaded})
+    await asyncio.to_thread(catalog_visibility.remember_matches,
+        {identifier: None for identifier, item in found.items() if item.get("state") == "unavailable"})
     for identifier, result in found.items():
         canonical = (result.get("chapter") or {}).get("slug", "")
         if _hidden_reason_for_slug(hidden, identifier) or _hidden_reason_for_slug(hidden, canonical):
@@ -58,9 +63,13 @@ async def card_latest_chapters(payload: CardMetadataRequest, db=Depends(get_supa
 
 @router.post("/metadata/batch")
 async def card_metadata_batch(payload: CardMetadataRequest, db=Depends(get_supabase_public)):
-    from fastapi_app.services import card_metadata
+    from fastapi_app.services import card_metadata, catalog_visibility
     requested = [value.lower() for value in payload.identifiers]
-    found, hidden = await asyncio.gather(card_metadata.get_many(requested), _get_hidden_slugs(db))
+    uploaded = await catalog_visibility.published_uploads(db, requested)
+    external = [identifier for identifier in requested if identifier not in uploaded]
+    found, hidden = await asyncio.gather(card_metadata.get_many(external), _get_hidden_slugs(db))
+    found.update(uploaded)
+    await asyncio.to_thread(catalog_visibility.remember_matches, found)
     result = {}
     for identifier, item in found.items():
         aliases = [identifier, (item or {}).get("id", ""), (item or {}).get("slug", "")]
@@ -1118,15 +1127,20 @@ def _filter_trending_items(
     source: str = "all",
 ) -> list[dict[str, Any]]:
     from fastapi_app.services.card_metadata import cached_metadata
+    from fastapi_app.services.catalog_visibility import unmatched
     from fastapi_app.services.card_chapters import cached_chapter
     from fastapi_app.services.card_chapters import prefetch_cached
     _, values = prefetch_cached([_clean_slug(item.get("slug") or item.get("id"))
                                  for item in items or [] if isinstance(item, dict)])
+    unavailable = unmatched([_clean_slug(item.get("slug") or item.get("id"))
+                             for item in items or [] if isinstance(item, dict)], values)
     visible: list[dict[str, Any]] = []
     for item in items or []:
         if not isinstance(item, dict):
             continue
         slug = _clean_slug(item.get("slug") or item.get("id"))
+        if slug in unavailable:
+            continue
         if _is_invalid_manga_slug(slug):
             continue
         if not _trending_source_matches(slug, source):

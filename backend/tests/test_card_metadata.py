@@ -129,6 +129,8 @@ def test_metadata_endpoint_validates_input_and_filters_hidden_aliases(memory, mo
     app = FastAPI()
     app.include_router(manga.router, prefix="/api/manga")
     app.dependency_overrides[manga.get_supabase_public] = lambda: object()
+    from fastapi_app.services import catalog_visibility
+    monkeypatch.setattr(catalog_visibility, "published_uploads", AsyncMock(return_value={}))
     monkeypatch.setattr(manga, "_get_hidden_slugs", AsyncMock(return_value={LEGACY + "-18078": "hidden"}))
     qq._item(native_qq())
     async def check():

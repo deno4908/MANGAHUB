@@ -302,6 +302,8 @@ const MangaCard = ({ manga: originalManga, index = 0, variant = 'default' }: Man
     });
   }, [isMangaDexItem, manga.externalUrl, manga.id, manga.slug, queryClient]);
 
+  if (isOTruyenItem && manga.chapterAvailability === 'unavailable') return null;
+
   if (variant === 'horizontal') {
     if (manga.externalUrl) {
       return (

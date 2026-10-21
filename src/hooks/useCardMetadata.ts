@@ -1,14 +1,14 @@
 import { useMemo } from 'react';
-import { useQueries, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import { queryOptions, useQueries, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import type { Manga } from '@/types/manga';
 import { normalizeMangaDexId } from '@/lib/mangaLinks';
-import { applyCardMetadata, needsCanonicalTitle, requestCardMetadata } from '@/lib/cardMetadata';
+import { applyCardMetadata, isLegacyQQIdentifier, needsCanonicalTitle, requestCardMetadata } from '@/lib/cardMetadata';
 import { thumbUrl } from '@/lib/adapters';
 
-const metadataOptions = (id: string, client: QueryClient) => ({
+const metadataOptions = (id: string, client: QueryClient) => queryOptions({
   queryKey: ['manga', 'card-metadata', id],
   queryFn: () => requestCardMetadata(id, client),
-  staleTime: 60 * 60 * 1000,
+  staleTime: query => query.state.data === null ? 5 * 60 * 1000 : 60 * 60 * 1000,
   gcTime: 60 * 60 * 1000,
   retry: 2,
   retryDelay: (attempt: number) => 1000 * (attempt + 1),
@@ -18,14 +18,16 @@ const metadataOptions = (id: string, client: QueryClient) => ({
 export function useCardMetadata(manga: Manga): Manga {
   const client = useQueryClient();
   const id = normalizeMangaDexId(manga.id) || manga.slug || manga.id;
-  const needed = manga.source !== 'uploaded' && needsCanonicalTitle(id, manga.title);
+  const needsTitle = needsCanonicalTitle(id, manga.title);
+  const needsSync = manga.source !== 'uploaded' && isLegacyQQIdentifier(id);
+  const needed = manga.source !== 'uploaded' && (needsTitle || needsSync);
   const query = useQuery({
     ...metadataOptions(id, client),
     enabled: needed,
   });
-  if (query.data && manga.source !== 'uploaded') return applyCardMetadata(manga, { ...query.data, title: needed ? query.data.title : manga.title });
-  // A missing QQ match can still have a valid romanized title. Keep that label
-  // until an authoritative replacement exists; never replace it with a guess.
+  if (query.data && manga.source !== 'uploaded') return applyCardMetadata(manga, { ...query.data, title: needsTitle ? query.data.title : manga.title });
+  if (needsSync && query.data === null) return { ...manga, chapterAvailability: 'unavailable' };
+  // Pending requests and transport errors keep the existing card visible.
   if (needed && normalizeMangaDexId(id)) return { ...manga, title: query.isFetching ? 'Đang tải tên truyện…' : 'Chưa lấy được tên truyện' };
   return manga;
 }
@@ -45,7 +47,7 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
     const title = record.manga_title || record.title || record.name;
     const cover = record.manga_thumb || record.cover || record.cover_url || record.thumb;
     return record.source !== 'uploaded' && /^[a-z0-9]+(?:-+[a-z0-9]+)*$/.test(id)
-      && (needsCanonicalTitle(id, title) || (fillMissingCovers && !cover));
+      && (isLegacyQQIdentifier(id) || needsCanonicalTitle(id, title) || (fillMissingCovers && !cover));
   }).map(recordId))] : [], [records, enabled, fillMissingCovers]);
   const metadata = useQueries({
     queries: ids.map(id => metadataOptions(id, client)),
@@ -54,7 +56,8 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
   return useMemo(() => {
     if (!records) return records;
     const byId = new Map(ids.map((id, index) => [id, metadata[index]]));
-    return records.map(record => {
+    return records.filter(record => record.source === 'uploaded' || !isLegacyQQIdentifier(recordId(record))
+      || byId.get(recordId(record)) !== null).map(record => {
       const id = recordId(record);
       const item = byId.get(id);
       if (!item || record.source === 'uploaded') return record;

@@ -953,6 +953,9 @@ async def get_my_rated_manga(
             }
         )
 
+    from fastapi_app.services.catalog_visibility import unmatched
+    missing = await asyncio.to_thread(unmatched, [item["manga_slug"] for item in response_items])
+    response_items = [item for item in response_items if item["manga_slug"] not in missing]
     return {"items": response_items, "total": len(response_items)}
 
 
@@ -1042,7 +1045,9 @@ async def get_top_rated_manga(
         reverse=True,
     )
 
-    items = ranked[:limit]
+    from fastapi_app.services.catalog_visibility import unmatched
+    missing = await asyncio.to_thread(unmatched, [item["manga_slug"] for item in ranked])
+    items = [item for item in ranked if item["manga_slug"] not in missing][:limit]
     return {"items": items, "total": len(items)}
 
 

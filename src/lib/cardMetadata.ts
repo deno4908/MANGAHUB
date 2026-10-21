@@ -6,7 +6,7 @@ import { repairMojibakeText, thumbUrl } from '@/lib/adapters';
 import { patchMangaInQueryCache } from '@/lib/querySync';
 
 export type CardMetadata = {
-  id: string; slug: string; source: 'mangadex' | 'truyenqq'; title: string;
+  id: string; slug: string; source: 'mangadex' | 'truyenqq' | 'uploaded'; title: string;
   cover_url?: string; genres?: string[]; tags?: string[]; status?: Manga['status']; content_rating?: string;
   chapters_latest?: Array<{ chapter_name?: string; chapter_title?: string; chapter_api_data?: string; updatedAt?: string }>;
 };
@@ -31,6 +31,7 @@ export function applyCardMetadata(manga: Manga, metadata: CardMetadata): Manga {
     number: Number(latest?.chapter_name) || 0, title: latest?.chapter_title || `Chương ${latest?.chapter_name}`,
     pages: [], uploadDate: latest?.updatedAt || '', scanlationGroup: '' }] : manga.chapters;
   return { ...manga, title: metadata.title, source: metadata.source, slug: metadata.slug,
+    chapterAvailability: manga.chapterAvailability === 'unavailable' ? undefined : manga.chapterAvailability,
     cover: metadata.cover_url ? thumbUrl(metadata.cover_url, metadata.id) : manga.cover,
     genres: metadata.genres?.length ? metadata.genres : manga.genres,
     tags: metadata.tags?.length ? metadata.tags : manga.tags,
@@ -56,11 +57,18 @@ async function flush() {
             continue;
           }
           const metadata = response.items[id] as CardMetadata | null;
+          if (metadata === null && isLegacyQQIdentifier(id)) for (const client of new Set(waiters.map(waiter => waiter.client))) {
+            patchMangaInQueryCache(client, [id], record => record.source === 'uploaded' || record.is_user_upload
+              ? record : { ...record, chapterAvailability: 'unavailable' });
+          }
           if (metadata) for (const client of new Set(waiters.map(waiter => waiter.client))) {
             patchMangaInQueryCache(client, [id, metadata.id], record => {
+              if (record.source === 'uploaded' || record.is_user_upload) return record;
               const title = String(record.title || record.name || record.manga_title || '');
-              if (!needsCanonicalTitle(id, title)) return record;
+              if (!needsCanonicalTitle(id, title)) return record.chapterAvailability === 'unavailable'
+                ? { ...record, chapterAvailability: undefined } : record;
               const next: Record<string, any> = { ...record, title: metadata.title, contentRating: metadata.content_rating || record.contentRating };
+              if (next.chapterAvailability === 'unavailable') delete next.chapterAvailability;
               if ('name' in record) next.name = metadata.title;
               if ('manga_title' in record || 'manga_slug' in record) next.manga_title = metadata.title;
               if (metadata.cover_url) for (const field of ['thumb', 'thumb_url', 'cover_url', 'manga_thumb']) {
@@ -87,4 +95,8 @@ export function requestCardMetadata(id: string, client: QueryClient): Promise<Ca
     queued.set(id, [...(queued.get(id) || []), { client, resolve, reject }]);
     if (!timer) timer = setTimeout(() => void flush(), 30);
   });
+}
+export function isLegacyQQIdentifier(identifier: string): boolean {
+  return !normalizeMangaDexId(identifier) && /^[a-z0-9]+(?:-+[a-z0-9]+)*$/i.test(identifier)
+    && !/-\d+$/.test(identifier);
 }
