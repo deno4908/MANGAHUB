@@ -504,6 +504,8 @@ def _verify_recaptcha_token(token: str) -> tuple[bool, str]:
         timeout = max(1, int(getattr(config, "RECAPTCHA_TIMEOUT_SECONDS", 5) or 5))
         with urllib.request.urlopen(req, timeout=timeout) as response:
             result = json.loads(response.read().decode("utf-8"))
+        if not isinstance(result, dict):
+            raise ValueError("Invalid reCAPTCHA verification response")
     except Exception:
         return False, "Không thể xác minh reCAPTCHA, vui lòng thử lại"
 
@@ -891,7 +893,6 @@ def register():
     strength_error = password_strength_error(data.get("password"))
     if strength_error:
         return jsonify({"error": strength_error}), 400
-    password = derive_password(data["password"], email)
     username = data.get("username", "").strip()
     display_name = data.get("displayName", username)
     captcha_ok, captcha_error = _require_recaptcha(data)
@@ -908,6 +909,7 @@ def register():
     if username_error:
         return jsonify({"error": username_error}), 400
 
+    password = derive_password(data["password"], email)
     try:
         # Enforce verification window: unverified emails expire after N minutes.
         same_email_auth_users = _get_auth_users_by_email(email)

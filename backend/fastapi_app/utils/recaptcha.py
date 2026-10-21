@@ -49,7 +49,10 @@ async def enforce_recaptcha(request: Request, token: str | None) -> None:
                 str(getattr(config, "RECAPTCHA_VERIFY_URL", "") or "https://www.google.com/recaptcha/api/siteverify"),
                 data=payload,
             )
+            response.raise_for_status()
             result = response.json()
+            if not isinstance(result, dict):
+                raise ValueError("Invalid reCAPTCHA verification response")
     except Exception:
         raise HTTPException(
             status_code=400,
