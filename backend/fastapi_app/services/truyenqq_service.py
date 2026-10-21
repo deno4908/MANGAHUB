@@ -95,7 +95,16 @@ def _source_error_headers(error):
             ("Source redirected", "redirect"), ("Unexpected source host", "source-host"),
             ("Missing comic listing", "invalid-listing"), ("Unexpected search response", "invalid-search"),
         ) if reason.startswith(prefix)), "invalid-response")
-    return {"X-TruyenQQ-Error": code, "Cache-Control": "no-store"}
+    headers = {"X-TruyenQQ-Error": code, "Cache-Control": "no-store"}
+    response = getattr(error, "response", None)
+    if response is not None:
+        transport = response.extensions.get("truyenqq_transport")
+        if transport in {"direct", "edge-gateway", "edge-source"}:
+            headers["X-TruyenQQ-Transport"] = transport
+        colo = response.headers.get("x-truyenqq-colo", "")
+        if re.fullmatch(r"[A-Z]{3}", colo):
+            headers["X-TruyenQQ-Colo"] = colo
+    return headers
 
 
 def _log_source_error(method, error):

@@ -46,6 +46,8 @@ async function qqSource(request, url) {
     });
     const headers = new Headers(upstream.headers);
     headers.set("Cache-Control", "no-store");
+    headers.set("X-TruyenQQ-Relay", "1");
+    headers.set("X-TruyenQQ-Colo", request.cf?.colo || "-");
     headers.delete("Set-Cookie");
     return new Response(upstream.body, { status: upstream.status, headers });
   } catch {

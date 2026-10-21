@@ -65,7 +65,10 @@ class TruyenQQTransport(httpx.BaseTransport):
         response_headers = [(k, v) for k, v in result.headers.multi_items()
                             if k.lower() not in {"content-encoding", "content-length", "transfer-encoding"}]
         return httpx.Response(result.status_code, headers=response_headers,
-                              content=result.content, request=request)
+                              content=result.content, request=request, extensions={
+                                  "truyenqq_transport": "edge-source" if relay and result.headers.get("x-truyenqq-relay") == "1"
+                                  else "edge-gateway" if relay else "direct",
+                              })
 
     def close(self):
         with self._lock:
