@@ -6,6 +6,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from fastapi_app.services.catalog_updates import catalog_updates, POLL_SECONDS
 from serverless_runtime import IS_VERCEL, create_task
+from fastapi_app.dependencies import authorize_api_request
+import site_access as access_policy
 
 router = APIRouter()
 
@@ -18,7 +20,7 @@ async def update_versions():
     return {"sources": catalog_updates.current, "poll_interval_seconds": POLL_SECONDS}
 
 
-async def event_stream(request):
+async def _catalog_event_stream(request):
     seen = {}
     initial = True
     heartbeat_at = 0
@@ -45,6 +47,24 @@ async def event_stream(request):
             yield ": keepalive\n\n"
             heartbeat_at = time.monotonic()
         await asyncio.sleep(1)
+
+
+async def event_stream(request):
+    authorization = getattr(request.state, "site_access_authorization", None)
+    context = access_policy.source_authorization.set(authorization)
+    try:
+        async for chunk in _catalog_event_stream(request):
+            # Recheck existing streams as well as new HTTP connections.
+            try:
+                user = await authorize_api_request(authorization)
+                state = await asyncio.to_thread(access_policy.get_state)
+                if not await asyncio.to_thread(access_policy.is_allowed, state, user):
+                    return
+            except Exception:
+                return
+            yield chunk
+    finally:
+        access_policy.source_authorization.reset(context)
 
 
 @router.get("/updates/stream")

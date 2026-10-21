@@ -6,6 +6,7 @@ import time
 import httpx
 from curl_cffi.requests import Session
 from curl_cffi.requests.exceptions import RequestException, Timeout
+from site_access import source_authorization
 
 
 class TruyenQQTransport(httpx.BaseTransport):
@@ -45,6 +46,10 @@ class TruyenQQTransport(httpx.BaseTransport):
             outgoing = {k: v for k, v in headers.items() if k in {
                 "accept", "accept-language", "referer", "content-type",
             }} if relay else headers
+            # Only the owned relay receives this request's verified website
+            # token. It is never added to the QQ origin or image CDN requests.
+            if relay and source_authorization.get():
+                outgoing["Authorization"] = source_authorization.get()
             return self._session().request(
                 request.method, url, headers=outgoing,
                 data=body, allow_redirects=False,

@@ -161,3 +161,21 @@ def test_browser_recovery_hint_contains_only_public_source_fields():
     assert hints['X-TruyenQQ-Source-Path'] == '/frontend/search/search'
     assert hints['X-TruyenQQ-Search'] == 'one%20piece'
     assert 'private' not in str(hints)
+
+
+def test_verified_website_token_is_scoped_to_the_owned_relay_not_qq(browser):
+    from site_access import source_authorization
+    success = browser.request.return_value
+    blocked = SimpleNamespace(status_code=403, content=b'Forbidden', headers=httpx.Headers())
+    browser.request.side_effect = [blocked, success]
+    marker = source_authorization.set('Bearer website-reader')
+    client = SourceClient(Settings(request_delay=0, retries=1), transport=transport.TruyenQQTransport())
+    try:
+        client.request('https://truyenqqko.com/doc-truyen')
+        direct, relay = browser.request.call_args_list
+        assert 'Authorization' not in direct.kwargs['headers']
+        assert relay.kwargs['headers']['Authorization'] == 'Bearer website-reader'
+    finally:
+        client.close()
+        source_authorization.reset(marker)
+    assert source_authorization.get() is None

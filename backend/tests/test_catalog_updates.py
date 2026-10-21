@@ -94,6 +94,7 @@ def test_upstream_change_reaches_detail_feed_other_worker_and_stream(monkeypatch
         assert worker.current['mangadex']['revision'] == event['revision']
         monkeypatch.setattr(events_router, 'catalog_updates', worker)
         request_mock = Mock()
+        request_mock.state.site_access_authorization = None
         request_mock.is_disconnected = _connected
         stream = events_router.event_stream(request_mock)
         assert 'event: ready' in await anext(stream)

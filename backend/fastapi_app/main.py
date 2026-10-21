@@ -42,6 +42,8 @@ from fastapi_app.routers import (
     catalog_updates as catalog_updates_router,
 )
 from fastapi_app.services import truyenqq_service
+from fastapi_app.routers import site_access as site_access_router
+import site_access as access_policy
 from fastapi_app.services.catalog_updates import catalog_updates
 from fastapi_app.services.chapter_checker import chapter_check_loop
 from security_runtime import ensure_security_redis_available
@@ -443,10 +445,31 @@ async def enforce_api_access_policy(request: Request, call_next):
         return await call_next(request)
 
     try:
-        await authorize_api_request(
-            request.headers.get("Authorization"),
-            minimum_role=_minimum_api_role_for_path(request.url.path),
-        )
+        path = request.url.path
+        minimum_role = _minimum_api_role_for_path(path)
+        authorization = request.headers.get("Authorization")
+        # Cookie grants are only for public reads (including <img> requests).
+        # Mutations and privileged namespaces always require their bearer token.
+        if not authorization and minimum_role is None and request.method in {"GET", "HEAD"} and path not in {"/api/site-access", "/api/maintenance"}:
+            token = access_policy.asset_token(request.cookies.get(access_policy.COOKIE_NAME))
+            if token:
+                authorization = "Bearer " + token
+        user = await authorize_api_request(authorization, minimum_role=minimum_role)
+        request.state.api_user = user
+        request.state.site_access_authorization = authorization
+        if path not in {"/api/site-access", "/api/maintenance"}:
+            # Admins must remain able to repair settings even if the store fails.
+            if not user or user.get("role") != "admin":
+                state = await asyncio.to_thread(access_policy.get_state)
+                if not await asyncio.to_thread(access_policy.is_allowed, state, user):
+                    return JSONResponse(status_code=403, content={
+                        "code": "WHITELIST_REQUIRED", "detail": state["message"],
+                        "site_access": {"enabled": True, "allowed": False,
+                                        "authenticated": user is not None, "message": state["message"]},
+                    }, headers=_api_auth_error_headers(request))
+    except access_policy.AccessUnavailable as exc:
+        return JSONResponse(status_code=503, content={"code": "SITE_ACCESS_UNAVAILABLE", "detail": str(exc)},
+                            headers=_api_auth_error_headers(request))
     except HTTPException as exc:
         return JSONResponse(
             status_code=exc.status_code,
@@ -454,7 +477,16 @@ async def enforce_api_access_policy(request: Request, call_next):
             headers=_api_auth_error_headers(request),
         )
 
-    return await call_next(request)
+    context = access_policy.source_authorization.set(authorization if user else None)
+    try:
+        response = await call_next(request)
+    finally:
+        access_policy.source_authorization.reset(context)
+    # A shared CDN cache must never bypass a later whitelist decision.
+    response.headers["Vercel-CDN-Cache-Control"] = "no-store"
+    response.headers["CDN-Cache-Control"] = "no-store"
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 @app.get("/api/maintenance")
@@ -490,6 +522,7 @@ async def admin_set_maintenance(
 
 # Include routers
 app.include_router(manga.router, prefix="/api/manga", tags=["Manga"])
+app.include_router(site_access_router.router, prefix="/api", tags=["Site access"])
 app.include_router(catalog_updates_router.router, prefix="/api/manga", tags=["Catalog Updates"])
 app.include_router(truyenqq.router, prefix="/api/manga", tags=["TruyenQQ"])
 app.include_router(users.router, prefix="/api/users", tags=["Users"])
