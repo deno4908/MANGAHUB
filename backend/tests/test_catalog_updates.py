@@ -23,8 +23,14 @@ class Cache:
     def get(self, key):
         return self.values.get(key)
 
+    def get_many(self, keys):
+        return {key: self.values.get(key) for key in keys}
+
     def set(self, key, value, ttl=300):
         self.values[key] = value
+
+    def set_many(self, values, ttl=300):
+        self.values.update(values)
 
     def delete(self, key):
         self.values.pop(key, None)

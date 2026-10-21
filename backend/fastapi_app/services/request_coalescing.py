@@ -16,7 +16,10 @@ def coalesce_reads(function=None, *, revision=None):
     async def wrapped(*args, **kwargs):
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
-        key = (asyncio.get_running_loop(), repr(bound.arguments), revision() if revision else None)
+        # Revision providers read shared Redis state. A slow network must not
+        # pause all image/catalog requests on the ASGI event loop.
+        version = await asyncio.to_thread(revision) if revision else None
+        key = (asyncio.get_running_loop(), repr(bound.arguments), version)
         task = pending.get(key)
         if task is None:
             task = create_task(function(*args, **kwargs))

@@ -26,6 +26,8 @@ def memory(monkeypatch):
     store = {}
     monkeypatch.setattr(cards.cache, "get", store.get)
     monkeypatch.setattr(cards.cache, "set", lambda key, value, **kw: store.__setitem__(key, value))
+    monkeypatch.setattr(cards.cache, "get_many", lambda keys: {key: store.get(key) for key in keys})
+    monkeypatch.setattr(cards.cache, "set_many", lambda items, **kwargs: store.update(items))
     monkeypatch.setattr(cards, "_jobs", {})
     monkeypatch.setattr(cards, "_slots", {"mangadex": asyncio.Semaphore(2), "truyenqq": asyncio.Semaphore(2)})
     monkeypatch.setattr(mdx, "_latest_chapter_info_from_cached_catalog", lambda identifier: None)

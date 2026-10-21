@@ -650,7 +650,7 @@ def _ensure_moderator_not_targeting_admin(actor: dict[str, Any], target_role: st
 
 
 @router.get("/announcements/active")
-async def active_site_announcements(
+def active_site_announcements(
     limit: int = Query(3, ge=1, le=5),
     db=Depends(get_supabase),
 ):

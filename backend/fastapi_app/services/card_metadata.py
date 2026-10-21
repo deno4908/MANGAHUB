@@ -26,8 +26,8 @@ def _retain(task):
     return task
 
 
-def _read(key):
-    value = cache.get(key)
+def _read(key, values=None):
+    value = cache.get(key) if values is None else values.get(key)
     if isinstance(value, str):
         try:
             return json.loads(value)
@@ -44,20 +44,25 @@ def _from_qq(item):
             "status": item.get("status", "ongoing"), "chapters_latest": item.get("chaptersLatest", [])}
 
 
-def cached_metadata(identifier):
-    hint = _read(f"truyenqq:cover-hint:{identifier}") or {}
+def metadata_keys(identifier):
+    return [f"truyenqq:cover-hint:{identifier}", f"truyenqq:detail:{identifier}",
+            f"catalog:card-metadata:v1:{identifier}"]
+
+
+def cached_metadata(identifier, values=None):
+    hint = _read(f"truyenqq:cover-hint:{identifier}", values) or {}
     item = hint.get("card")
     if not item:
-        detail = _read(f"truyenqq:detail:{identifier}") or {}
+        detail = _read(f"truyenqq:detail:{identifier}", values) or {}
         item = detail.get("data", {}).get("item")
     if isinstance(item, dict) and item.get("name") and item.get("slug"):
         return _from_qq(item)
-    return _read(f"catalog:card-metadata:v1:{identifier}")
+    return _read(f"catalog:card-metadata:v1:{identifier}", values)
 
 
 @coalesce_reads
 async def _qq_metadata(identifier):
-    existing = cached_metadata(identifier)
+    existing = await asyncio.to_thread(cached_metadata, identifier)
     if existing:
         return existing
     if re.fullmatch(r"[0-9a-f]{24}", identifier):
@@ -65,7 +70,7 @@ async def _qq_metadata(identifier):
     async with _qq_slots:
         try:
             value = await qq.run_live("basic", identifier)
-            return _from_qq(qq._item(value))
+            return _from_qq(await asyncio.to_thread(qq._item, value))
         except HTTPException as error:
             if error.status_code == 404:
                 return None
@@ -88,8 +93,13 @@ def _from_mdx(raw):
 async def _mdx_metadata(identifiers):
     found = {}
     missing = []
+    revisions = await asyncio.to_thread(cache.get_many, [f"catalog:book-version:mangadex:{identifier}" for identifier in identifiers])
+    keys = {identifier: f"mangadex:metadata:{identifier}:rev={revisions.get('catalog:book-version:mangadex:' + identifier) or ''}"
+            for identifier in identifiers}
+    values = await asyncio.to_thread(cache.get_many, keys.values())
+    fresh = {}
     for identifier in identifiers:
-        raw = mdx._load_json_cache_payload(f"mangadex:metadata:{identifier}:rev={mdx._live_revision(identifier)}")
+        raw = _read(keys[identifier], values)
         if raw and raw.get("data"):
             found[identifier] = _from_mdx(raw["data"])
         else:
@@ -102,12 +112,17 @@ async def _mdx_metadata(identifiers):
             identifier = raw.get("id")
             if identifier in missing:
                 found[identifier] = _from_mdx(raw)
-                mdx._cache_payload(f"mangadex:metadata:{identifier}:rev={mdx._live_revision(identifier)}",
-                                   {"data": raw}, ttl=mdx.MANGA_DETAIL_TTL)
+                fresh[keys[identifier]] = json.dumps({"data": raw}, ensure_ascii=False)
+    labels = {}
     for identifier, item in found.items():
-        cache.set(f"catalog:card-metadata:v1:{identifier}", json.dumps(item), ttl=3600)
+        labels[f"catalog:card-metadata:v1:{identifier}"] = json.dumps(item)
         if item.get("cover_url"):
-            cache.set(f"mangadex:cover-url:v2:{identifier}", item["cover_url"], ttl=3600)
+            labels[f"mangadex:cover-url:v2:{identifier}"] = item["cover_url"]
+    await asyncio.gather(
+        asyncio.to_thread(cache.set_many, fresh, ttl=mdx.MANGA_DETAIL_TTL),
+        asyncio.to_thread(cache.set_many, {key + ":stale": value for key, value in fresh.items()}, ttl=mdx.STALE_TTL),
+        asyncio.to_thread(cache.set_many, labels, ttl=3600),
+    )
     return found
 
 
@@ -116,8 +131,9 @@ async def get_many(identifiers):
     result = {}
     missing_mdx = {}
     missing_qq = []
+    values = await asyncio.to_thread(cache.get_many, [key for identifier in set(identifiers) for key in metadata_keys(identifier)])
     for identifier in sorted(set(identifiers)):
-        item = cached_metadata(identifier)
+        item = cached_metadata(identifier, values)
         if item:
             result[identifier] = item
             continue

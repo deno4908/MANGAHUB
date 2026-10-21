@@ -519,6 +519,7 @@ def _etag_for_file(path: Path) -> str:
 
 COMMON_HEADERS = {
     "Cache-Control": "public, max-age=2592000, immutable",
+    "Vercel-CDN-Cache-Control": "public, s-maxage=86400, stale-while-revalidate=604800",
     "Access-Control-Allow-Origin": "*",
     "Vary": "Accept-Encoding",
 }

@@ -110,6 +110,7 @@ def test_qq_cover_reuses_listing_hint_and_disk_cache(live, monkeypatch):
     store = {}
     qq.cache.get.side_effect = store.get
     qq.cache.set.side_effect = lambda key, value, *args, **kwargs: store.__setitem__(key, value)
+    qq.cache.set_many.side_effect = lambda values, **kwargs: store.update(values)
     asyncio.run(qq.get_list())
     before = len(live[1])
     app = FastAPI()
@@ -118,6 +119,7 @@ def test_qq_cover_reuses_listing_hint_and_disk_cache(live, monkeypatch):
         first = api.get(f"/api/manga/truyenqq/cover/{SLUG}")
         assert first.status_code == 200
         assert first.headers["x-cache"] == "MISS"
+        assert "s-maxage=3600" in first.headers["Vercel-CDN-Cache-Control"]
         assert len(live[1]) == before + 1  # image only; no comic HTML request
         async def offline(*args, **kwargs):
             raise AssertionError("Disk cache must work without contacting the source")

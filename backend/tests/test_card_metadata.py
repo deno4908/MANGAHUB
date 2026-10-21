@@ -21,6 +21,8 @@ def memory(monkeypatch):
     values = {}
     monkeypatch.setattr(cards.cache, "get", lambda key: values.get(key))
     monkeypatch.setattr(cards.cache, "set", lambda key, value, **kwargs: values.__setitem__(key, value))
+    monkeypatch.setattr(cards.cache, "get_many", lambda keys: {key: values.get(key) for key in keys})
+    monkeypatch.setattr(cards.cache, "set_many", lambda items, **kwargs: values.update(items))
     monkeypatch.setattr(cards, "_qq_slots", asyncio.Semaphore(3))
     return values
 

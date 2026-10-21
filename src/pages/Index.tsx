@@ -1,7 +1,8 @@
 import { useMemo, useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { loadHomeCardMetadata } from '@/lib/homeCardMetadata';
 import { useHomepageCombined } from '@/hooks/useApi';
 import { useSettingsStore } from '@/store/settingsStore';
 import { useUserStore } from '@/store/userStore';
@@ -12,7 +13,6 @@ import { AlertTriangle, ArrowRight, Bell, CalendarDays, Wrench, X } from 'lucide
 import { announcementApi, mangaApi, ratingApi, subscribeHomepageRefresh } from '@/lib/api';
 import {
   adaptListData,
-  adaptMangaDetail,
   pickBestTitle as pickBestMangaTitle,
   repairMojibakeText,
   thumbFallbackUrl,
@@ -1041,6 +1041,7 @@ const syncMangaDexLatestChapters = (
 };
 
 const Index = () => {
+  const queryClient = useQueryClient();
   const showMatureContent = useSettingsStore((s) => s.settings.privacy.showMatureContent);
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
   const authUser = useUserStore((s) => s.user);
@@ -1414,107 +1415,8 @@ const Index = () => {
   }, [guestTopRatedRows, topRatedKnownLookup]);
 
   const { data: guestTopRatedResolvedMap = {} } = useQuery({
-    queryKey: ['rating', 'top', 'guest', 'details-v1', guestTopRatedMissingSlugs],
-    queryFn: async () => {
-      const result: Record<string, Manga> = {};
-
-      await Promise.allSettled(
-        guestTopRatedMissingSlugs.map(async (slug) => {
-          const detailId = toMangaDexDetailId(slug);
-
-          if (detailId) {
-            const payload = await mangaApi.getMangaDexDetail(detailId, 1);
-            const item = (payload?.manga || {}) as any;
-            const chapterRows = Array.isArray(item.chapters) ? item.chapters : [];
-
-            const best = chapterRows
-              .map((chapter: any) => {
-                const chapterNum =
-                  firstValidChapterNumber(
-                    parseChapterNumberFromText(chapter?.chapter),
-                    parseChapterNumberFromText(chapter?.chapter_with_groups),
-                    parseChapterNumberFromText(chapter?.title),
-                  );
-                const resolvedChapterNum = isValidChapterNumber(chapterNum) ? chapterNum : 0;
-                const chapterDate = String(
-                  chapter?.publish_at ||
-                  chapter?.readable_at ||
-                  chapter?.created_at ||
-                  chapter?.updated_at ||
-                  item?.updated_at ||
-                  '',
-                ).trim();
-
-                return {
-                  chapterNum: resolvedChapterNum,
-                  chapterDate,
-                  id: String(chapter?.id || '').trim(),
-                };
-              })
-              .filter((chapter) => isValidChapterNumber(chapter.chapterNum))
-              .sort((a, b) => {
-                const numberDiff = b.chapterNum - a.chapterNum;
-                if (numberDiff !== 0) return numberDiff;
-                return parseTime(b.chapterDate) - parseTime(a.chapterDate);
-              })[0];
-
-            const uploadDate =
-              best?.chapterDate ||
-              String(item?.updated_at || '').trim() ||
-              new Date().toISOString();
-
-            const chapters = best
-              ? [{
-                  id: best.id || `mdx-ch-${detailId}-top`,
-                  mangaId: detailId,
-                  number: best.chapterNum,
-                  title: chapterLabelFromNumber(best.chapterNum),
-                  pages: [],
-                  uploadDate,
-                  scanlationGroup: '',
-                }]
-              : [];
-
-            const rawGenres = Array.isArray(item.genres)
-              ? item.genres.map((genre: unknown) => String(genre || '').trim()).filter(Boolean)
-              : [];
-
-            result[slug] = {
-              id: slug,
-              title: pickDisplayTitle(slug, item.title) || 'Chưa có tiêu đề',
-              author: String(item.authors_text || '').trim() || 'MangaDex',
-              artist: String(item.authors_text || '').trim() || 'MangaDex',
-              description: String(item.description || '').trim(),
-              cover: toMangaDexCoverProxy(item.cover_url, detailId),
-              coverProxy: toMangaDexCoverDirect(item.cover_url) || undefined,
-              status: String(item.status || '').trim().toLowerCase() === 'completed' ? 'completed' : 'ongoing',
-              type: 'manga',
-              genres: rawGenres,
-              tags: rawGenres.map((genre) => genre.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')).filter(Boolean),
-              rating: 0,
-              ratingCount: 0,
-              myRating: null,
-              follows: 0,
-              views: Number(item.view_count || item.views || 0),
-              year: Number(item.year) || new Date().getFullYear(),
-              chapters,
-              lastUpdated: uploadDate,
-              contentRating: String(item.content_rating || item.contentRating || '').trim().toLowerCase(),
-            };
-            return;
-          }
-
-          const raw = await mangaApi.getDetail(slug);
-          const adapted = adaptMangaDetail(raw);
-          result[slug] = {
-            ...adapted,
-            id: slug,
-          };
-        }),
-      );
-
-      return result;
-    },
+    queryKey: ['rating', 'top', 'guest', 'card-metadata-v2', guestTopRatedMissingSlugs],
+    queryFn: () => loadHomeCardMetadata(guestTopRatedMissingSlugs, queryClient),
     enabled: canRunHomeDeferredQueries && guestTopRatedMissingSlugs.length > 0,
     staleTime: 10 * 60 * 1000,
     retry: 0,

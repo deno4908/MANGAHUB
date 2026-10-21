@@ -16,7 +16,9 @@ IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
 def image_response(result):
     content, mime = result
     return Response(content, media_type=mime, headers={
-        "Cache-Control": "public, max-age=300", "X-Content-Type-Options": "nosniff"})
+        "Cache-Control": "public, max-age=3600",
+        "Vercel-CDN-Cache-Control": "public, s-maxage=3600, stale-while-revalidate=86400",
+        "X-Content-Type-Options": "nosniff"})
 
 
 def _cached_image(key, request, ttl):
@@ -28,6 +30,7 @@ def _cached_image(key, request, ttl):
     path = max(existing, key=lambda entry: entry.stat().st_mtime_ns)
     etag = images._etag_for_file(path)
     headers = {"Cache-Control": "public, max-age=3600", "ETag": etag,
+               "Vercel-CDN-Cache-Control": "public, s-maxage=3600, stale-while-revalidate=86400",
                "X-Content-Type-Options": "nosniff", "X-Cache": "HIT"}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
@@ -75,5 +78,5 @@ async def cover(identifier: str, request: Request):
 @router.get("/truyenqq/image/{identifier}/{number}/{index}")
 async def chapter_image(identifier: str, number: str, request: Request, index: int = Path(ge=1)):
     async def load():
-        return await qq.run_live("chapter_image", identifier, number, index)
+        return await qq.get_chapter_image(identifier, number, index)
     return await _serve_image(f"chapter:{identifier}:{number}:{index}", request, load, ttl=7 * 86400)

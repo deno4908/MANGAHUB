@@ -174,6 +174,18 @@ class _InMemoryCache:
             self._store.pop(key, None)
             self._dirty = True
 
+    def get_many(self, keys):
+        return {key: self.get(key) for key in dict.fromkeys(keys)}
+
+    def set_many(self, values, ttl=300):
+        with self._lock:
+            expires = time.time() + ttl
+            for key, value in values.items():
+                self._store[key] = (value, expires)
+                self._store.move_to_end(key)
+            self._prune_locked()
+            self._dirty = True
+
     def flush_pattern(self, pattern: str):
         """Delete matching keys without invalidating unrelated cache entries."""
         self.flush_patterns([pattern])
@@ -201,6 +213,19 @@ class _RedisCache:
 
     def delete(self, key: str):
         self._client.delete(key)
+
+    def get_many(self, keys):
+        keys = list(dict.fromkeys(keys))
+        return dict(zip(keys, self._client.mget(keys))) if keys else {}
+
+    def set_many(self, values, ttl=300):
+        if not values:
+            return
+        # One network round trip for the whole page, preserving per-key expiry.
+        with self._client.pipeline(transaction=False) as pipeline:
+            for key, value in values.items():
+                pipeline.setex(key, ttl, value)
+            pipeline.execute()
 
     def flush_pattern(self, pattern: str):
         """Delete keys matching a pattern."""

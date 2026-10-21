@@ -326,6 +326,8 @@ def _build_vi_catalog_lookup_index() -> dict[str, dict[str, Any]]:
     for limit in sorted({*VI_CATALOG_FALLBACK_LIMITS, 2000, 3000, 5000}, reverse=True):
         preferred_keys.append(f"mangadex:vi-catalog:{int(limit)}")
 
+    keys = [key + suffix for key in preferred_keys for suffix in ("", ":stale")]
+    values = cache.get_many(keys)
     seen: set[str] = set()
     for base_key in preferred_keys:
         for suffix in ("", ":stale"):
@@ -333,9 +335,15 @@ def _build_vi_catalog_lookup_index() -> dict[str, dict[str, Any]]:
             if key in seen:
                 continue
             seen.add(key)
-            payload = _load_json_cache_payload(key)
+            raw = values.get(key)
+            try:
+                payload = json.loads(raw) if isinstance(raw, str) else None
+            except ValueError:
+                payload = None
             if not _payload_has_mangas(payload):
                 continue
+
+            _overlay_live_catalog_chapters(payload)
 
             index: dict[str, dict[str, Any]] = {}
             for manga in (payload or {}).get("mangas") or []:
@@ -358,7 +366,7 @@ def _get_cached_vi_catalog_manga(manga_id: str) -> dict[str, Any] | None:
 
     now = time.time()
     if (
-        not _vi_catalog_lookup_index
+        _vi_catalog_lookup_index_at <= 0
         or now - _vi_catalog_lookup_index_at >= VI_CATALOG_LOOKUP_INDEX_TTL
     ):
         _vi_catalog_lookup_index = _build_vi_catalog_lookup_index()
@@ -750,7 +758,7 @@ def _live_revision(manga_id: str = "") -> str:
 
 
 async def _request_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    key = _request_fingerprint(path, params) + ":rev=" + _live_revision()
+    key = _request_fingerprint(path, params) + ":rev=" + await asyncio.to_thread(_live_revision)
     existing = _inflight_request_tasks.get(key)
     if existing and not existing.done():
         return await asyncio.shield(existing)
@@ -1035,7 +1043,14 @@ async def _fetch_cover_urls_for_manga_ids(manga_ids: list[str]) -> dict[str, str
     if not valid_ids:
         return {}
 
-    mapping: dict[str, str] = {}
+    cached = await asyncio.to_thread(cache.get_many, [f"mangadex:cover-url:v2:{manga_id}" for manga_id in valid_ids])
+    mapping: dict[str, str] = {
+        manga_id: cached[f"mangadex:cover-url:v2:{manga_id}"] for manga_id in valid_ids
+        if isinstance(cached.get(f"mangadex:cover-url:v2:{manga_id}"), str)
+        and cached[f"mangadex:cover-url:v2:{manga_id}"].startswith("https://uploads.mangadex.org/covers/")
+    }
+    warm_ids = set(mapping)
+    valid_ids = [manga_id for manga_id in valid_ids if manga_id not in mapping]
     step = 100
     for start in range(0, len(valid_ids), step):
         batch = valid_ids[start : start + step]
@@ -1086,6 +1101,9 @@ async def _fetch_cover_urls_for_manga_ids(manga_ids: list[str]) -> dict[str, str
                 if isinstance(cover_url, str) and cover_url:
                     mapping[manga_id] = cover_url
 
+    await asyncio.to_thread(cache.set_many,
+        {f"mangadex:cover-url:v2:{manga_id}": url for manga_id, url in mapping.items()
+         if manga_id not in warm_ids and not manga_id.startswith("cover:")}, ttl=3600)
     return mapping
 
 
@@ -1364,9 +1382,10 @@ def _normalize_latest_chapter_language(value: str) -> str:
     return language
 
 
-def _latest_chapter_cache_key(manga_id: str, translated_language: str) -> str:
+def _latest_chapter_cache_key(manga_id: str, translated_language: str, *, revision: str | None = None) -> str:
     language = _normalize_latest_chapter_language(translated_language)
-    revision = _live_revision(manga_id)
+    if revision is None:
+        revision = _live_revision(manga_id)
     suffix = f":rev={revision}" if revision else ""
     # Keep the established Vietnamese key warm while separating every other
     # translation so a VI chapter is never shown for a Japanese result.
@@ -1463,10 +1482,24 @@ async def _get_latest_vi_chapter_for_manga_ids(
                             if _MANGADEX_UUID_RE.fullmatch(str(value).strip())))[:100]
     result = {}
     missing = []
+    revisions = await asyncio.to_thread(cache.get_many, [f"catalog:book-version:mangadex:{manga_id}" for manga_id in ids])
+    keys = {manga_id: _latest_chapter_cache_key(manga_id, language, revision=revisions.get(f"catalog:book-version:mangadex:{manga_id}") or "") for manga_id in ids}
+    values = await asyncio.to_thread(cache.get_many, keys.values())
+    def cached_infos():
+        found = {}
+        for manga_id in ids:
+            raw = values.get(keys[manga_id])
+            try:
+                info = json.loads(raw) if isinstance(raw, str) else None
+            except ValueError:
+                info = None
+            if not info and language == "vi":
+                info = _latest_chapter_info_from_cached_catalog(manga_id)
+            found[manga_id] = info
+        return found
+    infos = await asyncio.to_thread(cached_infos)
     for manga_id in ids:
-        info = _load_json_cache_payload(_latest_chapter_cache_key(manga_id, language))
-        if not info and language == "vi":
-            info = _latest_chapter_info_from_cached_catalog(manga_id)
+        info = infos[manga_id]
         if info:
             result[manga_id] = info
         else:
@@ -2196,12 +2229,13 @@ async def get_latest_vi_chapter_feed(
             ",".join(sorted(normalized_excluded_ids)).encode("utf-8")
         ).hexdigest()[:12]
 
+    revision = await asyncio.to_thread(_live_revision)
     cache_key = (
         f"mangadex:latest-vi-feed:v3:{page}:{limit}:snapshot={int(snapshot)}:"
         f"rating={','.join(normalized_content_ratings)}:"
-        f"excluded={excluded_cache_token}:rev={_live_revision()}"
+        f"excluded={excluded_cache_token}:rev={revision}"
     )
-    cached = cache.get(cache_key)
+    cached = await asyncio.to_thread(cache.get, cache_key)
     if cached:
         try:
             return json.loads(cached)
@@ -2216,7 +2250,7 @@ async def get_latest_vi_chapter_feed(
     max_batches = 1 if snapshot else max(2, min(LATEST_FEED_MAX_BATCHES, page * 4 + 4))
 
     for _ in range(max_batches):
-        payload = _load_json_cache_payload("catalog:probe:mangadex") if snapshot and page == 1 else None
+        payload = await asyncio.to_thread(_load_json_cache_payload, "catalog:probe:mangadex") if snapshot and page == 1 else None
         if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
             payload = await _request_json(
                 "/chapter",
@@ -2310,6 +2344,8 @@ async def get_latest_vi_chapter_feed(
                 mangas[manga_id]["cover_url"] = cover_url
 
     items: list[dict[str, Any]] = []
+    revisions = await asyncio.to_thread(cache.get_many, [f"catalog:book-version:mangadex:{manga_id}" for manga_id in page_manga_ids])
+    chapter_values = {}
     for manga_id in page_manga_ids:
         manga = mangas[manga_id]
         latest = latest_by_manga.get(manga_id) or {}
@@ -2332,8 +2368,10 @@ async def get_latest_vi_chapter_feed(
         if latest.get("id"):
             info = {"id": latest["id"], "chapter_name": str(latest.get("chapter") or "0"),
                     "chapter_title": str(latest.get("chapter_with_groups") or ""), "publish_at": latest_time}
-            cache.set(_latest_chapter_cache_key(manga_id, "vi"), json.dumps(info), ttl=VI_CATALOG_TTL)
+            chapter_values[_latest_chapter_cache_key(manga_id, "vi", revision=revisions.get(f"catalog:book-version:mangadex:{manga_id}") or "")] = json.dumps(info)
         items.append(item)
+
+    await asyncio.to_thread(cache.set_many, chapter_values, ttl=VI_CATALOG_TTL)
 
     result = {
         "data": {

@@ -5,7 +5,6 @@ All blocking scraper work runs in a bounded pool, outside the ASGI event loop.
 """
 import asyncio
 from serverless_runtime import create_task
-import functools
 import hashlib
 import json
 import random
@@ -25,6 +24,7 @@ from truyenapi.truyenapi.service import LiveService
 from truyenapi.truyenapi.updates import update_interval
 
 from fastapi_app.services.cache_service import cache
+from fastapi_app.services.request_coalescing import coalesce_reads
 
 _live: LiveService | None = None
 _lock = threading.Lock()
@@ -50,7 +50,10 @@ def get_live() -> LiveService:
 
 async def run_live(method: str, *args, **kwargs):
     try:
-        call = functools.partial(getattr(get_live(), method), *args, **kwargs)
+        # Creating the HTTP client also performs blocking TLS setup. Keep the
+        # first request out of the event loop, just like subsequent scraping.
+        def call():
+            return getattr(get_live(), method)(*args, **kwargs)
         executor = (_image_executor if method in {"image", "chapter_image"} else
                     _reader_executor if method in {"comic", "chapter"} else
                     _card_executor if method == "basic_latest" else _executor)
@@ -116,7 +119,7 @@ def _chapter(value: dict, slug: str, observed=None) -> dict:
             "chapter_api_data": f"/api/manga/chapter/{chapter_token(slug, number)}" if number else ""}
 
 
-def _item(value: dict, observed=None) -> dict:
+def _item(value: dict, observed=None, *, cover_hints=None) -> dict:
     slug = full_slug(value)
     covers = value.get("cover_urls") or []
     # Use a source-aware proxy: hotlink Referer and fallback CDNs matter for QQ.
@@ -137,13 +140,18 @@ def _item(value: dict, observed=None) -> dict:
         card = {key: item[key] for key in ("slug", "name", "cover_url", "category", "status", "chaptersLatest")}
         observed_at = datetime.fromisoformat(observed).timestamp() if observed else time.time()
         hint = json.dumps({"cover_urls": covers, "url": value["url"], "card": card, "card_observed_at": observed_at}, ensure_ascii=False)
-        for alias in {slug, identity(value["url"])[0]}:
-            cache.set(f"truyenqq:cover-hint:{alias}", hint, ttl=86400)
+        hints = {f"truyenqq:cover-hint:{alias}": hint for alias in {slug, identity(value["url"])[0]}}
+        if cover_hints is None:
+            cache.set_many(hints, ttl=86400)
+        else:
+            cover_hints.update(hints)
     return item
 
 
 def _page(value: dict) -> dict:
-    items = [_item(item, value.get("fetched_at")) for item in value.get("items", [])]
+    cover_hints = {}
+    items = [_item(item, value.get("fetched_at"), cover_hints=cover_hints) for item in value.get("items", [])]
+    cache.set_many(cover_hints, ttl=86400)
     page = int(value.get("page") or 1)
     pages = int(value.get("total_pages") or 1)
     size = max(len(items), 1)
@@ -162,12 +170,8 @@ def _remember(key: str, payload: dict, ttl=60) -> dict:
 
 
 async def get_home():
-    value = await run_live("home")
-    seen = {}
-    for section in value["sections"]:
-        for item in section["items"]:
-            seen.setdefault(item["id"], item)
-    return _remember("truyenqq:home", _page({"items": list(seen.values())}))
+    payload = await _catalog_page("home")
+    return await asyncio.to_thread(_remember, "truyenqq:home", payload)
 
 
 def live_list_cache_key(list_type, page):
@@ -217,7 +221,7 @@ def _overlay_latest(payload, *, page=1, genres=(), status=None, latest_order=Fal
 async def _catalog_page(method, *args, **kwargs):
     digest = hashlib.sha256(json.dumps([method, args, kwargs], sort_keys=True).encode()).hexdigest()
     key = "truyenqq:page-snapshot:v1:" + digest
-    snapshot = _json_cached(key)
+    snapshot = await asyncio.to_thread(_json_cached, key)
     if not isinstance(snapshot, dict) or not isinstance(snapshot.get("payload"), dict):
         snapshot = None
     if snapshot is None or snapshot.get("fresh_until", 0) < time.time():
@@ -226,12 +230,19 @@ async def _catalog_page(method, *args, **kwargs):
         if task is None:
             async def refresh():
                 try:
-                    value = _page(await run_live(method, *args, **kwargs))
-                    cache.set(key, json.dumps({"payload": value, "fresh_until": time.time() + 45}), ttl=1800)
+                    raw = await run_live(method, *args, **kwargs)
+                    if method == "home":
+                        seen = {}
+                        for section in raw["sections"]:
+                            for item in section["items"]:
+                                seen.setdefault(item["id"], item)
+                        raw = {"items": list(seen.values()), "fetched_at": raw.get("fetched_at")}
+                    value = await asyncio.to_thread(_page, raw)
+                    await asyncio.to_thread(cache.set, key, json.dumps({"payload": value, "fresh_until": time.time() + 45}), ttl=1800)
                     return value
                 except Exception:
                     if snapshot:
-                        cache.set(key, json.dumps({**snapshot, "fresh_until": time.time() + 10}), ttl=1800)
+                        await asyncio.to_thread(cache.set, key, json.dumps({**snapshot, "fresh_until": time.time() + 10}), ttl=1800)
                     raise
             task = create_task(refresh())
             _catalog_jobs[task_key] = task
@@ -248,17 +259,17 @@ async def _catalog_page(method, *args, **kwargs):
 async def get_list(list_type="truyen-moi", page=1):
     if list_type == "sap-ra-mat":
         return _page({"items": [], "page": page})
-    shared_key = live_list_cache_key(list_type, page)
-    shared = cache.get(shared_key)
+    shared_key = await asyncio.to_thread(live_list_cache_key, list_type, page)
+    shared = await asyncio.to_thread(cache.get, shared_key)
     if isinstance(shared, str):
         try:
             return json.loads(shared)
         except ValueError:
-            cache.delete(shared_key)
+            await asyncio.to_thread(cache.delete, shared_key)
     payload = await _catalog_page("collection", _COLLECTIONS.get(list_type, "latest"), page)
-    payload = _overlay_latest(payload, page=page, latest_order=list_type == "truyen-moi")
-    payload = _remember(f"truyenqq:list:{list_type}:{page}", payload)
-    cache.set(shared_key, json.dumps(payload, ensure_ascii=False), ttl=8)
+    payload = await asyncio.to_thread(_overlay_latest, payload, page=page, latest_order=list_type == "truyen-moi")
+    payload = await asyncio.to_thread(_remember, f"truyenqq:list:{list_type}:{page}", payload)
+    await asyncio.to_thread(cache.set, shared_key, json.dumps(payload, ensure_ascii=False), ttl=8)
     return payload
 
 
@@ -284,7 +295,7 @@ async def get_categories():
 
 
 async def get_cover_info(identifier):
-    raw = cache.get(f"truyenqq:cover-hint:{identifier}")
+    raw = await asyncio.to_thread(cache.get, f"truyenqq:cover-hint:{identifier}")
     if isinstance(raw, str):
         try:
             return json.loads(raw)
@@ -299,12 +310,13 @@ async def get_total_count():
 
 async def get_category_manga(slug, page=1):
     value = await _catalog_page("genre_comics", slug, page)
-    return _remember(f"truyenqq:category:{slug}:{page}", _overlay_latest(value, page=page, genres=[slug], latest_order=True))
+    value = await asyncio.to_thread(_overlay_latest, value, page=page, genres=[slug], latest_order=True)
+    return await asyncio.to_thread(_remember, f"truyenqq:category:{slug}:{page}", value)
 
 
 async def get_filtered(*, genres=(), page=1, sort="updated_desc", status=None):
     value = await _catalog_page("discover", page=page, genres=genres, sort=sort, status=status)
-    return _overlay_latest(value, page=page, genres=genres, status=status, latest_order=sort == "updated_desc")
+    return await asyncio.to_thread(_overlay_latest, value, page=page, genres=genres, status=status, latest_order=sort == "updated_desc")
 
 
 async def resolve_slug_from_id(manga_id):
@@ -317,24 +329,45 @@ async def resolve_slug_from_id(manga_id):
 
 async def get_manga_detail(slug):
     value = await run_live("comic", slug)
-    item = _item(value)
+    item = await asyncio.to_thread(_item, value)
     chapters = [_chapter(ch, item["slug"]) for ch in value.get("chapters", [])]
     item["chapters"] = [{"server_name": "TruyenQQ", "server_data": chapters}]
     item["chaptersLatest"] = chapters[:1]
     payload = {"status": "success", "data": {"item": item, "seoOnPage": {"titleHead": item["name"]}}}
-    return _remember(f"truyenqq:detail:{slug}", payload)
+    return await asyncio.to_thread(_remember, f"truyenqq:detail:{slug}", payload)
 
 
 async def search_manga(keyword, page=1):
     # The source AJAX search is a single limited result set, without fake pages.
     if page > 1:
         return _page({"items": [], "page": page, "source_limited": True})
-    return _page(await run_live("search", keyword))
+    return await asyncio.to_thread(_page, await run_live("search", keyword))
+
+
+@coalesce_reads
+async def get_chapter_manifest(slug, number):
+    """Share source-provided page URLs across Vercel instances, never image bytes."""
+    key = f"truyenqq:chapter-manifest:v1:{slug}:{number}"
+    cached = await asyncio.to_thread(_json_cached, key)
+    if isinstance(cached, dict) and cached.get("images") and cached.get("url"):
+        return cached
+    value = await run_live("chapter", slug, number)
+    manifest = {field: value[field] for field in ("images", "url", "title")}
+    await asyncio.to_thread(cache.set, key, json.dumps(manifest), ttl=300)
+    return manifest
+
+
+async def get_chapter_image(slug, number, index):
+    value = await get_chapter_manifest(slug, number)
+    if index < 1 or index > len(value["images"]):
+        raise HTTPException(404, "Image index out of range")
+    image = value["images"][index - 1]
+    return await run_live("image", [image["url"], *(image.get("fallback_urls") or [])], value["url"])
 
 
 async def get_chapter(chapter_id):
     slug, number = parse_chapter_token(chapter_id)
-    value = await run_live("chapter", slug, number)
+    value = await get_chapter_manifest(slug, number)
     images = [{"image_page": img["index"], "image_file":
                f"/api/manga/truyenqq/image/{quote(slug, safe='')}/{quote(number, safe='')}/{img['index']}"}
               for img in value["images"]]

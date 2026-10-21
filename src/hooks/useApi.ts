@@ -263,17 +263,26 @@ export function useHomepage(enabled = true) {
 
 /** Homepage + MangaDex catalog in one hook for Index page. */
 export function useHomepageCombined(maxChapters = 120) {
-  return useQuery({
+  const featuredQuery = useQuery({
+    queryKey: ["manga", "featured", 12],
+    queryFn: async () => adaptListData(await mangaApi.getFeatured(12)),
+    staleTime: 60 * 1000,
+    gcTime: 15 * 60 * 1000,
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+  const homeQuery = useQuery({
     queryKey: ["manga", "homepage", "combined-v2", maxChapters],
     queryFn: async () => {
-      const payload = await mangaApi.getHomepage({ includeFeatured: true });
+      // Featured titles can require individual upstream lookups. Render the
+      // catalog as soon as it arrives, then fill the banner independently.
+      const payload = await mangaApi.getHomepage();
       const latest = adaptListData(payload.latest || {});
       const ongoing = adaptListData(payload.ongoing || {});
-      const featured = adaptListData(payload.featured || {});
-      if (!latest.items.length && !ongoing.items.length && !featured.items.length) {
+      if (!latest.items.length && !ongoing.items.length) {
         throw new Error("Home data unavailable");
       }
-      return { latest, ongoing, featured };
+      return { latest, ongoing };
     },
     staleTime: 30 * 1000,
     gcTime: 15 * 60 * 1000,
@@ -281,6 +290,10 @@ export function useHomepageCombined(maxChapters = 120) {
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
+  return {
+    ...homeQuery,
+    data: homeQuery.data ? { ...homeQuery.data, featured: featuredQuery.data } : undefined,
+  };
 }
 
 export function useMangaDexViCatalog(

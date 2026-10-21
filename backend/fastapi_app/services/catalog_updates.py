@@ -58,7 +58,7 @@ class CatalogUpdates:
             value = await qq.run_live("collection", "latest", 1, refresh=True)
             if not value.get("items"):
                 raise ValueError("Empty QQ update probe")
-            self._warm_qq = qq._page(value)
+            self._warm_qq = await asyncio.to_thread(qq._page, value)
             return {item["slug"]: {"slug": item["slug"], "chapter_id":
                     ((item.get("chaptersLatest") or [{}])[0].get("chapter_api_data") or "").rsplit("/", 1)[-1],
                     "chapter_name": (item.get("chaptersLatest") or [{}])[0].get("chapter_name", "")}
@@ -71,7 +71,7 @@ class CatalogUpdates:
         rows = payload.get("data")
         if not isinstance(rows, list) or not rows:
             raise ValueError("Empty MangaDex update probe")
-        cache_service.cache.set("catalog:probe:mangadex", json.dumps(payload), ttl=max(1800, POLL_SECONDS * 2))
+        await asyncio.to_thread(cache_service.cache.set, "catalog:probe:mangadex", json.dumps(payload), ttl=max(1800, POLL_SECONDS * 2))
         entries = {}
         for chapter in rows:
             slug = mdx._extract_manga_id_from_chapter(chapter)

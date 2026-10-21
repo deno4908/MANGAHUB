@@ -1112,6 +1112,9 @@ def _filter_trending_items(
 ) -> list[dict[str, Any]]:
     from fastapi_app.services.card_metadata import cached_metadata
     from fastapi_app.services.card_chapters import cached_chapter
+    from fastapi_app.services.card_chapters import prefetch_cached
+    _, values = prefetch_cached([_clean_slug(item.get("slug") or item.get("id"))
+                                 for item in items or [] if isinstance(item, dict)])
     visible: list[dict[str, Any]] = []
     for item in items or []:
         if not isinstance(item, dict):
@@ -1125,7 +1128,7 @@ def _filter_trending_items(
             continue
         if _safe_int(item.get("views") or item.get("view_count")) <= 0:
             continue
-        canonical = cached_metadata(slug)
+        canonical = cached_metadata(slug, values)
         if canonical and canonical.get("title"):
             if hidden and _hidden_reason_for_slug(hidden, canonical.get("slug")):
                 continue
@@ -1134,7 +1137,7 @@ def _filter_trending_items(
                     "genres": canonical.get("genres") or item.get("genres", []),
                     "tags": canonical.get("tags") or item.get("tags", []),
                     "content_rating": canonical.get("content_rating") or item.get("content_rating", "")}
-        chapter = cached_chapter(slug)
+        chapter = cached_chapter(slug, values)
         if chapter:
             item = {**item, "latest_chapter": chapter["chapter_name"], "latest_chapter_id": chapter["id"],
                     "latest_chapter_updated_at": chapter.get("publish_at", "")}
@@ -1400,8 +1403,10 @@ def _source_revision(source: str) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _combined_cache_key(list_type: str, page: int, max_chapters: int) -> str:
-    return f"manga:list-combined:truyenqq-v1:{list_type}:{page}:{max_chapters}:rev={_source_revision('truyenqq')}"
+def _combined_cache_key(list_type: str, page: int, max_chapters: int, *, revision: str | None = None) -> str:
+    if revision is None:
+        revision = _source_revision("truyenqq")
+    return f"manga:list-combined:truyenqq-v1:{list_type}:{page}:{max_chapters}:rev={revision}"
 
 
 def _cache_combined_payload(cache_key: str, payload: dict[str, Any]) -> None:
@@ -2110,7 +2115,7 @@ async def featured_manga(
             },
         }
     }
-    _attach_ratings_to_items(payload, db, user)  # sync OK here: small item count in featured
+    await _async_attach_ratings_to_items(payload, db, user)
     return payload
 
 
@@ -6553,7 +6558,7 @@ async def trending_manga(
         cached_items, cached_at = memory_cached
         age = time.time() - cached_at
         if cached_items:
-            items = _filter_trending_items(cached_items, hidden, normalized_source)
+            items = await asyncio.to_thread(_filter_trending_items, cached_items, hidden, normalized_source)
             if items and _has_positive_trending_views(items):
                 trimmed = items[:limit]
                 # If cache is stale, schedule background refresh
@@ -6562,19 +6567,19 @@ async def trending_manga(
                 return {"trending": trimmed, "total": len(trimmed)}
 
     # --- Medium path: serve from disk cache (fast) ---
-    cached_payload = _load_json_cache(cache_key)
+    cached_payload = await asyncio.to_thread(_load_json_cache, cache_key)
     if isinstance(cached_payload, dict):
         cached_items = cached_payload.get("trending") or []
         if isinstance(cached_items, list) and cached_items and _has_positive_trending_views(cached_items):
             _trending_memory_cache[memory_key] = (cached_items, time.time())
-            cached_items = _filter_trending_items(cached_items, hidden, normalized_source)
+            cached_items = await asyncio.to_thread(_filter_trending_items, cached_items, hidden, normalized_source)
             if cached_items:
                 trimmed = cached_items[:limit]
                 return {"trending": trimmed, "total": len(trimmed)}
 
     # --- Cold start: compute trending synchronously from DB (first load may be slow) ---
     trending = await _compute_trending_from_db(limit, db, normalized_source)
-    trending = _filter_trending_items(trending, hidden, normalized_source)
+    trending = await asyncio.to_thread(_filter_trending_items, trending, hidden, normalized_source)
     if trending and _has_positive_trending_views(trending):
         _trending_memory_cache[memory_key] = (trending, time.time())
         try:
@@ -6588,7 +6593,7 @@ async def trending_manga(
         return {"trending": trending[:limit], "total": len(trending[:limit])}
 
     # Last resort: try to load from any recent cache
-    fallback_items = _load_recent_trending_fallback(limit=limit, hidden=hidden, source=normalized_source)
+    fallback_items = await asyncio.to_thread(_load_recent_trending_fallback, limit=limit, hidden=hidden, source=normalized_source)
     if fallback_items:
         return {"trending": fallback_items, "total": len(fallback_items)}
 
@@ -6747,6 +6752,28 @@ def _merge_trending_fill(primary: list[dict], fallback: list[dict], limit: int) 
     return merged[:limit]
 
 
+def _load_trending_snapshots(slugs: list[str], revision: str) -> dict[str, Any]:
+    """Fetch optional display snapshots in one Redis round trip per ranking."""
+    bases = [_combined_cache_key(kind, page, 120, revision=revision)
+             for kind in ("truyen-moi", "dang-phat-hanh") for page in range(1, 13)]
+    bases += [f"truyenqq:list:{kind}:{page}"
+              for kind in ("truyen-moi", "dang-phat-hanh", "hoan-thanh") for page in range(1, 21)]
+    bases += [f"mangadex:vi-catalog:{limit}" for limit in
+              (120, 96, 160, 240, 300, 500, 800, 1000, 1200, 2000, 3000, 5000, "all")]
+    for slug in slugs:
+        manga_id = _extract_mangadex_id(slug)
+        bases.append(f"mangadex:lookup:{manga_id}" if manga_id else f"truyenqq:detail:{slug}")
+    values = cache.get_many([base + suffix for base in bases for suffix in ("", ":stale")])
+    snapshots = {}
+    for key, raw in values.items():
+        if isinstance(raw, str):
+            try:
+                snapshots[key] = json.loads(raw)
+            except ValueError:
+                pass
+    return snapshots
+
+
 async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") -> list[dict]:
     """Heavy computation: build trending from manga_views + reading_history DB tables."""
     import asyncio
@@ -6853,11 +6880,13 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
         slugs = [r["slug"] for r in valid_rows]
         if slugs:
             source_map: dict[str, dict] = {}
+            revision = await asyncio.to_thread(_source_revision, "truyenqq")
+            snapshots = await asyncio.to_thread(_load_trending_snapshots, slugs, revision)
             # Avoid network calls in hot endpoint path; enrich only from cached list-combined payloads.
             for list_type in ("truyen-moi", "dang-phat-hanh"):
                 for cached_page in range(1, 13):
-                    combined_key = _combined_cache_key(list_type=list_type, page=cached_page, max_chapters=120)
-                    combined_payload = _load_json_cache(combined_key) or _load_json_cache(f"{combined_key}:stale")
+                    combined_key = _combined_cache_key(list_type=list_type, page=cached_page, max_chapters=120, revision=revision)
+                    combined_payload = snapshots.get(combined_key) or snapshots.get(f"{combined_key}:stale")
                     if not isinstance(combined_payload, dict):
                         continue
                     list_payload = combined_payload.get("list")
@@ -6920,8 +6949,8 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
             for list_type in ("truyen-moi", "dang-phat-hanh", "hoan-thanh"):
                 for cached_page in range(1, 21):
                     list_payload = (
-                        _load_json_cache(f"truyenqq:list:{list_type}:{cached_page}")
-                        or _load_json_cache(f"truyenqq:list:{list_type}:{cached_page}:stale")
+                        snapshots.get(f"truyenqq:list:{list_type}:{cached_page}")
+                        or snapshots.get(f"truyenqq:list:{list_type}:{cached_page}:stale")
                     )
                     if not isinstance(list_payload, dict):
                         continue
@@ -7076,7 +7105,8 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
             if unresolved_mangadex_slug_map:
                 catalog_meta_map: dict[str, dict[str, Any]] = {}
                 for catalog_limit in (120, 96, 160, 240, 300, 500, 800, 1000, 1200, 2000, 3000, 5000, None):
-                    catalog_payload = _load_mangadex_catalog_cache(catalog_limit)
+                    catalog_key = f"mangadex:vi-catalog:{'all' if catalog_limit is None else catalog_limit}"
+                    catalog_payload = snapshots.get(catalog_key) or snapshots.get(catalog_key + ":stale")
                     if not isinstance(catalog_payload, dict):
                         continue
                     for manga in (catalog_payload.get("mangas") or []):
@@ -7106,8 +7136,8 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
                 for source_slug, manga_id in unresolved_mangadex_slug_map.items():
                     catalog_meta = dict(catalog_meta_map.get(manga_id, {}) or {})
                     lookup_payload = (
-                        _load_json_cache(f"mangadex:lookup:{manga_id}")
-                        or _load_json_cache(f"mangadex:lookup:{manga_id}:stale")
+                        snapshots.get(f"mangadex:lookup:{manga_id}")
+                        or snapshots.get(f"mangadex:lookup:{manga_id}:stale")
                     )
                     lookup_manga = (lookup_payload or {}).get("manga") if isinstance(lookup_payload, dict) else None
                     if isinstance(lookup_manga, dict):
@@ -7224,7 +7254,7 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
             if unresolved_otruyen_slugs:
                 cached_detail_candidates = list(dict.fromkeys(unresolved_otruyen_slugs))[ : min(max(limit * 2, 24), 240) ]
                 for source_slug in cached_detail_candidates:
-                    detail_payload = _load_json_cache(f"truyenqq:detail:{source_slug}") or _load_json_cache(f"truyenqq:detail:{source_slug}:stale")
+                    detail_payload = snapshots.get(f"truyenqq:detail:{source_slug}") or snapshots.get(f"truyenqq:detail:{source_slug}:stale")
                     if not isinstance(detail_payload, dict):
                         continue
                     extracted_meta = _extract_otruyen_detail_meta(source_slug, detail_payload)
@@ -7424,7 +7454,7 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
         trending = _merge_trending_fill(trending, fallback_trending, limit)
 
     if not trending:
-        trending = _load_recent_trending_fallback(limit=limit, hidden=hidden, source=normalized_source)
+        trending = await asyncio.to_thread(_load_recent_trending_fallback, limit=limit, hidden=hidden, source=normalized_source)
 
     return trending[:limit]
 
