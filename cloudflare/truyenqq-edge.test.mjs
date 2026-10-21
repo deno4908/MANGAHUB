@@ -107,17 +107,10 @@ test('a valid reader fetch is shared with the backend; blocked pages never poiso
   } finally { globalThis.caches = previousCaches; }
 });
 
-test('internal source calls receive only validated page parameters, never caller headers or metadata', async () => {
-  let calls = 0;
-  const QQ_ORIGIN = { load: async (...args) => {
-    calls++;
-    assert.deepEqual(args, ['/tim-kiem-nang-cao/trang-137', '?sort=4', undefined]);
-    return { status: 200, headers: [['Content-Type', 'text/html']], body: '<div class="list_grid">QQ records</div>' };
-  } };
-  globalThis.fetch = async () => { throw new Error('Public handler must use the internal source binding'); };
-  const response = await worker.fetch(new Request(edge + '/tim-kiem-nang-cao/trang-137?sort=4', {
-    headers: { Authorization: 'private-token', Cookie: 'private-cookie' },
-  }), { QQ_ORIGIN });
-  assert.equal(response.status, 200);
-  assert.equal(calls, 1);
+test('a Cloudflare challenge is classified without exposing source HTML in diagnostics', async () => {
+  globalThis.fetch = async () => new Response('<html>Just a moment... /cdn-cgi/challenge-platform/</html>', { status: 403 });
+  const response = await worker.fetch(new Request(edge + '/doc-truyen'));
+  assert.equal(response.status, 403);
+  assert.equal(response.headers.get('X-TruyenQQ-Block'), 'challenge');
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
 });

@@ -3192,24 +3192,6 @@ const BrowseManga = () => {
     setSearchParams,
   ]);
 
-  // Prefetch the 'latest' list in the background when page first loads with popular sort
-  // so switching to 'Mới nhất' tab is instant
-  useEffect(() => {
-    if (!browseUrlReady || !isOTruyenSourceTab || filters.sort !== 'popular' || useOTruyenCategory || useCombinedList) return;
-    const prefetchKey = ['manga', 'list', 'truyen-moi', 1] as const;
-    const existing = queryClient.getQueryData(prefetchKey);
-    if (existing) return;
-    const timer = window.setTimeout(() => {
-      queryClient.prefetchQuery({
-        queryKey: prefetchKey,
-        queryFn: async () => adaptListData(await mangaApi.getList('truyen-moi', 1)),
-        staleTime: 10 * 60 * 1000,
-        gcTime: 2 * 60 * 1000,
-      });
-    }, 800);
-    return () => window.clearTimeout(timer);
-  }, [isOTruyenSourceTab, filters.sort, useOTruyenCategory, useCombinedList, queryClient]);
-
   // Client-side filter on loaded data
   const filtered = useMemo(() => {
     const sourceItems =
@@ -5323,60 +5305,7 @@ const BrowseManga = () => {
     fetchMangaDexLatestFeedPage,
   ]);
 
-  // Prefetch next OTruyen page
-  useEffect(() => {
-    // A filtered OTruyen page can scan a large upstream window. Starting page
-    // N + 1 while page N is still loading doubles that work and slows direct
-    // jumps such as completed Romance page 25.
-    if (!browseUrlReady || isClientPaginationMode || useOTruyenFilteredServerMode) return;
-    const nextPage = page + 1;
-    if (nextPage > otruyenServerPages) return;
-    if (useCombinedList) {
-      queryClient.prefetchQuery({
-        queryKey: ['manga', 'list-combined', listType, nextPage, mangadexCatalogLimit],
-        queryFn: async () => {
-          const payload = await mangaApi.getCombinedList(listType, nextPage, mangadexCatalogLimit);
-          return {
-            listData: adaptListData(payload?.list || {}),
-            mangadex: (payload?.mangadex?.mangas || []) as MangaDexCatalogItem[],
-          };
-        },
-        staleTime: 5 * 60 * 1000,
-        gcTime: 2 * 60 * 1000,
-      });
-      return;
-    }
-    if (useOTruyenCategory) {
-      queryClient.prefetchQuery({
-        queryKey: ['manga', 'category', activeCategorySlug, nextPage],
-        queryFn: async () => adaptListData(await mangaApi.getCategoryManga(activeCategorySlug, nextPage)),
-        staleTime: 5 * 60 * 1000,
-        gcTime: 2 * 60 * 1000,
-      });
-      return;
-    }
-    queryClient.prefetchQuery({
-    queryKey: ['manga', 'list', listType, nextPage],
-    queryFn: async () => adaptListData(await mangaApi.getList(listType, nextPage)),
-    staleTime: 5 * 60 * 1000,
-    gcTime: 2 * 60 * 1000,
-  });
-  }, [
-    page,
-    otruyenServerPages,
-    useCombinedList,
-    useOTruyenFilteredServerMode,
-    useOTruyenCategory,
-    activeCategorySlug,
-    directOTruyenFilterGenreSlugs,
-    filters.status,
-    filters.sort,
-    showMatureContent,
-    listType,
-    mangadexCatalogLimit,
-    queryClient,
-    isClientPaginationMode,
-  ]);
+  // QQ pages load on navigation; speculative reads compete with visible covers.
 
   const isTabLoadingState =
     isInitialMergedLoading ||

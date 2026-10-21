@@ -15,13 +15,14 @@ import { useUserStore } from "./store/userStore";
 import { useSettingsStore } from "./store/settingsStore";
 import { authApi, clearBanLock, FORCE_FORBIDDEN_EVENT, FORCE_LOGOUT_EVENT, FORCE_MAINTENANCE_EVENT, getAccessToken, hasBanLock, shouldRefreshSessionNow, systemApi } from "./lib/api";
 import type { MaintenanceState } from "./lib/api";
+import { lazyPage } from './lib/lazyPage';
 
 // ─── Lazy-loaded pages (code-split per route) ───
-const Index = lazy(() => import("./pages/Index"));
-const BrowseManga = lazy(() => import("./pages/BrowseManga"));
-const MangaDetail = lazy(() => import("./pages/MangaDetail"));
-const ChapterReader = lazy(() => import("./pages/ChapterReader"));
-const SearchPage = lazy(() => import("./pages/SearchPage"));
+const Index = lazyPage(() => import("./pages/Index"));
+const BrowseManga = lazyPage(() => import("./pages/BrowseManga"));
+const MangaDetail = lazyPage(() => import("./pages/MangaDetail"));
+const ChapterReader = lazyPage(() => import("./pages/ChapterReader"));
+const SearchPage = lazyPage(() => import("./pages/SearchPage"));
 const Profile = lazy(() => import("./pages/Profile"));
 const PublicProfilePage = lazy(() => import("./pages/PublicProfilePage"));
 const BookmarksPage = lazy(() => import("./pages/BookmarksPage"));
@@ -643,6 +644,18 @@ const AppContent = () => {
   const [maintenanceChecked, setMaintenanceChecked] = useState(false);
   const lockedByBan = hasBanLock();
   const allowWhenLocked = ['/banned', '/forbidden', '/login', '/register', '/forgot-password', '/auth/callback', '/support'];
+
+  useEffect(() => {
+    // Download only the requested public page while the maintenance check runs.
+    // Rendering and API queries still wait for the existing access checks.
+    const path = location.pathname;
+    const page = path === '/' ? Index
+      : path === '/manga' ? BrowseManga
+        : path.startsWith('/manga/') ? MangaDetail
+          : path.startsWith('/chapter/') ? ChapterReader
+            : path === '/search' ? SearchPage : undefined;
+    void page?.preload().catch(() => { /* React.lazy can retry on navigation. */ });
+  }, [location.pathname]);
 
   useEffect(() => {
     let cancelled = false;

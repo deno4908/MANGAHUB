@@ -121,7 +121,9 @@ def test_blocked_datacenter_retries_same_qq_filter_via_edge_then_reuses_it(brows
     client.http.cookies.set('private', 'cookie')
     try:
         source = 'https://truyenqqko.com/tim-kiem-nang-cao/trang-2?sort=4&category=26'
-        assert client.request(source).status_code == 200
+        response = client.request(source)
+        assert response.status_code == 200
+        assert response.extensions['truyenqq_transport'] == 'edge-gateway'
         client.request('https://truyenqqko.com/frontend/search/search', data={'search': 'one piece', 'type': 0})
         calls = browser.request.call_args_list
         assert calls[0].args[1] == source

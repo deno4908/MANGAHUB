@@ -56,7 +56,8 @@ class TruyenQQTransport(httpx.BaseTransport):
             result = fetch(relay=relay)
             if result.status_code == 403 and relay_allowed and not relay:
                 self._edge_until = time.monotonic() + 300
-                result = fetch(relay=True)
+                relay = True
+                result = fetch(relay=relay)
         except Timeout as error:
             raise httpx.ReadTimeout("TruyenQQ browser request timed out", request=request) from error
         except RequestException as error:

@@ -28,7 +28,7 @@ export async function fetchQQOrigin(path, query, body) {
   return { status: upstream.status, headers: [...headers], body: html };
 }
 
-async function qqSource(request, url, origin) {
+async function qqSource(request, url) {
   const path = url.pathname.slice(QQ_PREFIX.length);
   const search = path === "/frontend/search/search";
   const listing = QQ_PAGES.test(path) || /^\/sitemap(?:-[a-zA-Z0-9-]+)?\.xml$/.test(path);
@@ -77,7 +77,7 @@ async function qqSource(request, url, origin) {
   if (cached) return serve(cached, true);
 
   try {
-    const result = origin ? await origin.load(path, url.search, body) : await fetchQQOrigin(path, url.search, body);
+    const result = await fetchQQOrigin(path, url.search, body);
     const upstream = new Response(result.body, { status: result.status, headers: result.headers });
     const headers = new Headers(upstream.headers);
     headers.set("Cache-Control", "public, max-age=120");
@@ -115,9 +115,9 @@ function json(payload, status = 200, extraHeaders = {}) {
 }
 
 export default {
-  async fetch(request, env = {}) {
+  async fetch(request) {
     const url = new URL(request.url);
-    if (url.pathname.startsWith(QQ_PREFIX + "/")) return qqSource(request, url, env.QQ_ORIGIN);
+    if (url.pathname.startsWith(QQ_PREFIX + "/")) return qqSource(request, url);
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
