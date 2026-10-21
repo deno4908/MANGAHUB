@@ -5,6 +5,7 @@ Uses the `ratings` table: (user_id, manga_slug, score, created_at, updated_at).
 
 import asyncio
 import json
+import logging
 import re
 import unicodedata
 
@@ -17,9 +18,11 @@ from fastapi_app.dependencies import (
     get_supabase,
     get_supabase_public,
 )
-from fastapi_app.services import mangadex_service, otruyen_service
+from fastapi_app.services import mangadex_service, truyenqq_service
 from fastapi_app.services.cache_service import cache
 from fastapi_app.utils.anti_spam import enforce_user_action_limit
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 TOP_RATED_PRIOR_AVERAGE = 3.5
@@ -459,10 +462,10 @@ async def get_manga_rating(manga_slug: str, db=Depends(get_supabase_public)):
 
     try:
         rows = (
-            db.table("ratings")
+            (await asyncio.to_thread(lambda: (db.table("ratings")
             .select("user_id,manga_slug,score,updated_at")
             .in_("manga_slug", candidates)
-            .execute()
+            .execute())))
             .data
             or []
         )
@@ -490,13 +493,13 @@ async def get_my_rating(
 
     try:
         result = (
-            db.table("ratings")
+            (await asyncio.to_thread(lambda: (db.table("ratings")
             .select("score,updated_at")
             .eq("user_id", user["id"])
             .in_("manga_slug", candidates)
             .order("updated_at", desc=True)
             .limit(1)
-            .execute()
+            .execute())))
         )
         score = result.data[0]["score"] if result.data else None
     except Exception:
@@ -514,12 +517,12 @@ async def get_my_rated_manga(
     """Get current user's rated manga list with best-effort title/thumb metadata."""
     try:
         rating_rows = (
-            db.table("ratings")
+            (await asyncio.to_thread(lambda: (db.table("ratings")
             .select("manga_slug,score,updated_at")
             .eq("user_id", user["id"])
             .order("updated_at", desc=True)
             .limit(limit * 4)
-            .execute()
+            .execute())))
             .data
             or []
         )
@@ -572,12 +575,12 @@ async def get_my_rated_manga(
     if alias_slugs:
         try:
             history_rows = (
-                db.table("reading_history")
+                (await asyncio.to_thread(lambda: (db.table("reading_history")
                 .select("manga_slug,manga_title,manga_thumb,chapter_name,read_at")
                 .in_("manga_slug", alias_slugs)
                 .order("read_at", desc=True)
                 .limit(min(max(len(alias_slugs) * 2, limit * 2), 600))
-                .execute()
+                .execute())))
                 .data
                 or []
             )
@@ -741,7 +744,7 @@ async def get_my_rated_manga(
         if merged_title and merged_thumb:
             continue
 
-        for key in (f"otruyen:detail:{canonical_slug}", f"otruyen:detail:{canonical_slug}:stale"):
+        for key in (f"truyenqq:detail:{canonical_slug}", f"truyenqq:detail:{canonical_slug}:stale"):
             payload = _load_json_cache_payload(key)
             if not isinstance(payload, dict):
                 continue
@@ -797,7 +800,7 @@ async def get_my_rated_manga(
             async with sem:
                 try:
                     payload = await asyncio.wait_for(
-                        otruyen_service.get_manga_detail(slug_value),
+                        truyenqq_service.get_manga_detail(slug_value),
                         timeout=3.0,
                     )
                 except Exception:
@@ -963,15 +966,16 @@ async def get_top_rated_manga(
 
     try:
         rows = (
-            db.table("ratings")
+            (await asyncio.to_thread(lambda: (db.table("ratings")
             .select("user_id,manga_slug,score,updated_at")
             .order("updated_at", desc=True)
             .limit(fetch_limit)
-            .execute()
+            .execute())))
             .data
             or []
         )
     except Exception:
+        logger.exception("Top-rated query failed; returning an empty ranking")
         rows = []
 
     per_slug_users: dict[str, dict[str, tuple[float, str]]] = {}
@@ -1126,10 +1130,10 @@ async def get_batch_ratings(
 
     try:
         rows = (
-            db.table("ratings")
+            (await asyncio.to_thread(lambda: (db.table("ratings")
             .select("user_id,manga_slug,score,updated_at")
             .in_("manga_slug", query_slugs)
-            .execute()
+            .execute())))
             .data
             or []
         )
@@ -1168,11 +1172,11 @@ async def get_batch_ratings(
     if user and query_slugs:
         try:
             my_rows = (
-                db.table("ratings")
+                (await asyncio.to_thread(lambda: (db.table("ratings")
                 .select("manga_slug,score,updated_at")
                 .eq("user_id", user["id"])
                 .in_("manga_slug", query_slugs)
-                .execute()
+                .execute())))
                 .data
                 or []
             )

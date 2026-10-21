@@ -13,17 +13,20 @@ import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape, unescape as html_unescape
-from typing import Any
+from typing import Any, Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config import config
 from fastapi_app.dependencies import get_optional_user, get_supabase, get_supabase_public
 from fastapi_app.services.cache_service import cache
-from fastapi_app.services import mangadex_service, otruyen_service
+from fastapi_app.services import mangadex_service, truyenqq_service
+from fastapi_app.services.public_reads import cached_public_read
+otruyen_service = truyenqq_service  # compatibility for existing integrations
+
 from fastapi_app.utils.anti_spam import (
     check_fixed_window,
     check_recent_once,
@@ -34,6 +37,37 @@ from fastapi_app.utils.anti_spam import (
 from fastapi_app.utils.upload_security import detect_image_content_type
 
 router = APIRouter()
+
+
+class CardMetadataRequest(BaseModel):
+    identifiers: list[Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9-]+$")]] = Field(max_length=48)
+
+
+@router.post("/chapters/latest/batch")
+async def card_latest_chapters(payload: CardMetadataRequest, db=Depends(get_supabase_public)):
+    from fastapi_app.services import card_chapters
+    requested = [value.lower() for value in payload.identifiers]
+    found, hidden = await asyncio.gather(card_chapters.get_many(requested), _get_hidden_slugs(db))
+    for identifier, result in found.items():
+        canonical = (result.get("chapter") or {}).get("slug", "")
+        if _hidden_reason_for_slug(hidden, identifier) or _hidden_reason_for_slug(hidden, canonical):
+            found[identifier] = {"chapter": None, "pending": False}
+    return {"items": found}
+
+
+@router.post("/metadata/batch")
+async def card_metadata_batch(payload: CardMetadataRequest, db=Depends(get_supabase_public)):
+    from fastapi_app.services import card_metadata
+    requested = [value.lower() for value in payload.identifiers]
+    found, hidden = await asyncio.gather(card_metadata.get_many(requested), _get_hidden_slugs(db))
+    result = {}
+    for identifier, item in found.items():
+        aliases = [identifier, (item or {}).get("id", ""), (item or {}).get("slug", "")]
+        if any(_hidden_reason_for_slug(hidden, alias) for alias in aliases if alias):
+            result[identifier] = None
+        else:
+            result[identifier] = item
+    return {"items": result}
 logger = logging.getLogger(__name__)
 _MANGADEX_RETRY_AFTER_RE = re.compile(r"retry_after=([0-9.]+)s")
 
@@ -78,7 +112,7 @@ COMBINED_LIST_TTL_SECONDS = 120
 COMBINED_LIST_STALE_TTL_SECONDS = 900
 COMBINED_LIST_MDX_TIMEOUT_SECONDS = 6.0
 TRENDING_CACHE_TTL_SECONDS = 120
-TRENDING_CACHE_VERSION = "v15"
+TRENDING_CACHE_VERSION = "v16-truyenqq"
 TRENDING_ENABLE_NETWORK_DETAIL_ENRICH = False
 MANGADEX_STARTUP_WARMUP_ENABLED = str(
     os.getenv("MANGADEX_STARTUP_WARMUP_ENABLED", "false") or "false"
@@ -88,7 +122,7 @@ _combined_refresh_tasks: dict[str, asyncio.Task] = {}
 _startup_warmup_task: asyncio.Task | None = None
 OTRUYEN_IMG_CDN = "https://img.otruyenapi.com/uploads/comics/"
 DEFAULT_SHARE_IMAGE_PATH = "/og-logo.png"
-SITEMAP_CACHE_VERSION = "v4"
+SITEMAP_CACHE_VERSION = "v5-truyenqq"
 SITEMAP_CACHE_TTL_SECONDS = _env_int("SITEMAP_CACHE_TTL_SECONDS", 1800, minimum=300)
 SITEMAP_LOCAL_ACTIVITY_LIMIT = _env_int("SITEMAP_LOCAL_ACTIVITY_LIMIT", 3000, minimum=100)
 SITEMAP_OTRUYEN_PAGE_LIMIT = _env_int("SITEMAP_OTRUYEN_PAGE_LIMIT", 30, minimum=3)
@@ -173,6 +207,7 @@ async def _get_hidden_slugs(db) -> dict[str, str]:
         _hidden_cache_at = time.time()
         return _hidden_cache
     except Exception:
+        _hidden_cache_at = time.time() - _HIDDEN_CACHE_TTL + 10
         return _hidden_cache  # Return stale on DB error
 
 
@@ -328,7 +363,7 @@ async def _validate_view_chapter_owner(db: Any, manga_slug: str, chapter_id: str
                     }
                     status = "valid" if mangadex_manga_id in owner_ids else "invalid"
             else:
-                payload = await otruyen_service.get_chapter(chapter_id)
+                payload = await truyenqq_service.get_chapter(chapter_id)
                 item = (payload or {}).get("data", {}).get("item") if isinstance(payload, dict) else None
                 if not isinstance(item, dict):
                     status = "invalid"
@@ -542,7 +577,7 @@ async def _canonical_view_slug(value: Any) -> str:
     otruyen_object_id = _decode_otruyen_route_id(raw)
     if otruyen_object_id:
         try:
-            resolved_slug = await otruyen_service.resolve_slug_from_id(otruyen_object_id)
+            resolved_slug = await truyenqq_service.resolve_slug_from_id(otruyen_object_id)
         except Exception:
             resolved_slug = None
         cleaned_resolved = _clean_slug(resolved_slug)
@@ -593,11 +628,11 @@ async def _fetch_override_rows_by_slugs(db: Any, slugs: list[Any]) -> dict[str, 
         return {}
 
     try:
-        result = await asyncio.to_thread(
+        result = await cached_public_read(("overrides", id(db), tuple(lookup_slugs)),
             lambda: db.table("manga_overrides")
             .select("manga_slug,is_featured,featured_at,admin_notes")
             .in_("manga_slug", lookup_slugs)
-            .execute()
+            .execute(), None
         )
     except Exception:
         return {}
@@ -653,7 +688,10 @@ async def _attach_overrides_to_otruyen_payload(payload: Any, db: Any) -> None:
     if not slugs:
         return
 
-    override_rows = await _fetch_override_rows_by_slugs(db, slugs)
+    override_rows, _ = await asyncio.gather(
+        _fetch_override_rows_by_slugs(db, slugs),
+        _async_attach_local_views_to_otruyen_payload(payload, db),
+    )
     if not override_rows:
         for item in items:
             _apply_override_fields(item, None)
@@ -839,7 +877,7 @@ def _fallback_trending_thumb(slug: str) -> str:
         return ""
     if _extract_mangadex_id(normalized):
         return ""
-    return f"{OTRUYEN_IMG_CDN}{normalized}-thumb.jpg"
+    return f"/api/manga/truyenqq/cover/{quote(normalized, safe='')}"
 
 
 def _extract_item_categories(item: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -1071,6 +1109,8 @@ def _filter_trending_items(
     hidden: dict[str, str] | None = None,
     source: str = "all",
 ) -> list[dict[str, Any]]:
+    from fastapi_app.services.card_metadata import cached_metadata
+    from fastapi_app.services.card_chapters import cached_chapter
     visible: list[dict[str, Any]] = []
     for item in items or []:
         if not isinstance(item, dict):
@@ -1084,6 +1124,19 @@ def _filter_trending_items(
             continue
         if _safe_int(item.get("views") or item.get("view_count")) <= 0:
             continue
+        canonical = cached_metadata(slug)
+        if canonical and canonical.get("title"):
+            if hidden and _hidden_reason_for_slug(hidden, canonical.get("slug")):
+                continue
+            item = {**item, "title": canonical["title"],
+                    "thumb": canonical.get("cover_url") or item.get("thumb", ""),
+                    "genres": canonical.get("genres") or item.get("genres", []),
+                    "tags": canonical.get("tags") or item.get("tags", []),
+                    "content_rating": canonical.get("content_rating") or item.get("content_rating", "")}
+        chapter = cached_chapter(slug)
+        if chapter:
+            item = {**item, "latest_chapter": chapter["chapter_name"], "latest_chapter_id": chapter["id"],
+                    "latest_chapter_updated_at": chapter.get("publish_at", "")}
         title = str(item.get("title") or item.get("name") or "").strip()
         thumb = str(item.get("thumb") or item.get("thumb_url") or item.get("cover_url") or "").strip()
         if not title and not thumb:
@@ -1094,7 +1147,7 @@ def _filter_trending_items(
 
 def _normalize_trending_source(value: Any) -> str:
     source = str(value or "all").strip().lower()
-    return source if source in {"all", "otruyen", "mangadex"} else "all"
+    return source if source in {"all", "truyenqq", "mangadex"} else "all"
 
 
 def _trending_source_matches(slug: Any, source: str) -> bool:
@@ -1257,8 +1310,23 @@ def _attach_ratings_to_items(payload: Any, db: Any, user: dict | None = None) ->
 
 
 async def _async_attach_ratings_to_items(payload: Any, db: Any, user: dict | None = None) -> None:
-    """Async wrapper — runs rating attachment in a thread pool."""
-    await asyncio.to_thread(_attach_ratings_to_items, payload, db, user)
+    """Keep optional rating reads from delaying source catalog data."""
+    items = _otruyen_payload_items(payload)
+    slugs = sorted({str(item.get("slug") or "") for item in items if item.get("slug")})
+    if not slugs:
+        return
+    def load():
+        rows = {"data": {"items": [{"slug": slug} for slug in slugs]}}
+        _attach_ratings_to_items(rows, db, user)
+        return {row["slug"]: row for row in rows["data"]["items"]}
+    enriched = await cached_public_read(("catalog-ratings", id(db), tuple(slugs), (user or {}).get("id")),
+                                        load, {}, ttl=5)
+    for item in items:
+        row = enriched.get(item.get("slug"), {})
+        item["rating_average"] = row.get("rating_average", 0)
+        item["rating_count"] = row.get("rating_count", 0)
+        if user:
+            item["my_rating"] = row.get("my_rating")
 
 
 def _attach_ratings_to_mangadex_payload(payload: Any, db: Any, user: dict | None = None) -> None:
@@ -1326,8 +1394,13 @@ async def _async_attach_ratings_to_mangadex_payload(payload: Any, db: Any, user:
     await asyncio.to_thread(_attach_ratings_to_mangadex_payload, payload, db, user)
 
 
+def _source_revision(source: str) -> str:
+    value = cache.get(f"catalog:source-version:{source}")
+    return value if isinstance(value, str) else ""
+
+
 def _combined_cache_key(list_type: str, page: int, max_chapters: int) -> str:
-    return f"manga:list-combined:{list_type}:{page}:{max_chapters}"
+    return f"manga:list-combined:truyenqq-v1:{list_type}:{page}:{max_chapters}:rev={_source_revision('truyenqq')}"
 
 
 def _cache_combined_payload(cache_key: str, payload: dict[str, Any]) -> None:
@@ -1553,7 +1626,7 @@ async def _prepare_mangadex_catalog_response(
 
 
 async def _build_combined_payload(list_type: str, page: int, max_chapters: int) -> dict[str, Any]:
-    otruyen_task = otruyen_service.get_list(list_type, page)
+    otruyen_task = truyenqq_service.get_list(list_type, page)
     mangadex_task = asyncio.wait_for(
         mangadex_service.get_vi_catalog(max_chapters=max_chapters),
         timeout=COMBINED_LIST_MDX_TIMEOUT_SECONDS,
@@ -1706,7 +1779,7 @@ async def home(
 ):
     """Trang chủ — danh sách truyện mới nhất."""
     data, hidden = await asyncio.gather(
-        otruyen_service.get_home(),
+        truyenqq_service.get_home(),
         _get_hidden_slugs(db),
     )
     if hidden and isinstance(data, dict):
@@ -1736,10 +1809,21 @@ async def homepage(
         else None
     )
     latest, ongoing, hidden = await asyncio.gather(
-        otruyen_service.get_list("truyen-moi", 1),
-        otruyen_service.get_list("dang-phat-hanh", 1),
+        truyenqq_service.get_list("truyen-moi", 1),
+        truyenqq_service.get_list("dang-phat-hanh", 1),
         _get_hidden_slugs(db),
+        return_exceptions=True,
     )
+    source_errors = []
+    for name, value in (("latest", latest), ("ongoing", ongoing)):
+        if not isinstance(value, dict):
+            source_errors.append(name)
+    if not isinstance(latest, dict):
+        latest = _fallback_empty_list_payload(1)
+    if not isinstance(ongoing, dict):
+        ongoing = _fallback_empty_list_payload(1)
+    if not isinstance(hidden, dict):
+        hidden = {}
     for src in (latest, ongoing):
         if hidden and isinstance(src, dict):
             items = (src.get("data") or {}).get("items") or []
@@ -1760,7 +1844,7 @@ async def homepage(
         _attach_overrides_to_otruyen_payload(home_items_payload, db),
         _async_attach_ratings_to_items(home_items_payload, db, user),
     )
-    result = {"latest": latest, "ongoing": ongoing}
+    result = {"latest": latest, "ongoing": ongoing, "meta": {"unavailable_sections": source_errors}}
     if featured_task is not None:
         try:
             result["featured"] = await featured_task
@@ -1803,7 +1887,7 @@ async def _build_featured_item_from_slug(
     mangadex_id = _extract_mangadex_id(normalized)
     if mangadex_id:
         try:
-            data = await mangadex_service.get_manga_detail(manga_id=mangadex_id, max_chapters=120)
+            data = await mangadex_service.get_manga_detail(manga_id=mangadex_id, max_chapters=1)
         except Exception:
             return None
 
@@ -1885,7 +1969,7 @@ async def _build_featured_item_from_slug(
         }
 
     try:
-        detail = await otruyen_service.get_manga_detail(normalized)
+        detail = await truyenqq_service.get_manga_detail(normalized)
     except Exception:
         return None
 
@@ -1927,12 +2011,13 @@ async def _build_featured_item_from_slug(
         "thumb_url": str(item.get("thumb_url") or meta.get("thumb") or "").strip(),
         "cover_url": str(item.get("thumb_url") or meta.get("thumb") or "").strip(),
         "category": category_value,
-        "source": str(item.get("source") or "otruyen"),
+        "source": str(item.get("source") or "truyenqq"),
         "chaptersLatest": chapters_latest,
         "last_chapter": latest_chapter or str(item.get("last_chapter") or item.get("chapter_newest") or "").strip(),
         "updatedAt": str(meta.get("last_updated") or item.get("updatedAt") or item.get("updated_at") or "").strip(),
-        "view_count": base_views + local_views,
-        "views": base_views + local_views,
+        "view_count": local_views,
+        "views": local_views,
+        "local_view_count": local_views,
         "content_rating": str(item.get("content_rating") or item.get("contentRating") or meta.get("content_rating") or "").strip().lower(),
         "is_featured": True,
         "featured_at": featured_at,
@@ -2044,7 +2129,7 @@ async def manga_list(
     """
     # Fetch list data and hidden slugs in parallel
     data, hidden = await asyncio.gather(
-        otruyen_service.get_list(list_type, page),
+        truyenqq_service.get_list(list_type, page),
         _get_hidden_slugs(db),
     )
     if hidden and isinstance(data, dict):
@@ -2150,10 +2235,10 @@ def _otruyen_filtered_cache_key(
 ) -> str:
     genre_key = ",".join(sorted(_clean_slug(value) for value in genre_values if _clean_slug(value)))
     return (
-        "manga:otruyen-filtered:v5:"
+        "manga:truyenqq-filtered:v1:"
         f"p{page}:l{limit}:base={_clean_slug(base_slug)}:"
         f"g={genre_key}:s={_clean_slug(status_value)}:sort={_clean_slug(sort)}:"
-        f"mature={1 if show_mature else 0}"
+        f"mature={1 if show_mature else 0}:rev={_source_revision('truyenqq')}"
     )
 
 
@@ -2167,9 +2252,9 @@ def _otruyen_filtered_popular_snapshot_cache_key(
     """Key for the shared ranked candidate window used by popular pages."""
     genre_key = ",".join(sorted(_clean_slug(value) for value in genre_values if _clean_slug(value)))
     return (
-        "manga:otruyen-filtered:popular-snapshot:v2:"
+        "manga:truyenqq-filtered:popular-snapshot:v1:"
         f"base={_clean_slug(base_slug)}:g={genre_key}:s={_clean_slug(status_value)}:"
-        f"mature={1 if show_mature else 0}"
+        f"mature={1 if show_mature else 0}:rev={_source_revision('truyenqq')}"
     )
 
 
@@ -2341,6 +2426,8 @@ def _otruyen_payload_total_pages(payload: Any) -> int:
     if not isinstance(payload, dict):
         return 1
     pagination = (((payload.get("data") or {}).get("params") or {}).get("pagination") or {})
+    if _safe_int(pagination.get("totalPages")) > 0:
+        return _safe_int(pagination["totalPages"])
     total_items = _safe_int(pagination.get("totalItems"))
     per_page = _safe_int(pagination.get("totalItemsPerPage")) or 24
     if total_items > 0 and per_page > 0:
@@ -2349,14 +2436,13 @@ def _otruyen_payload_total_pages(payload: Any) -> int:
 
 
 def _otruyen_apply_local_views(item: dict[str, Any], views_lookup: dict[str, int]) -> None:
-    if not views_lookup or not isinstance(item, dict):
+    if not isinstance(item, dict):
         return
     candidates = _hidden_slug_candidates(item.get("slug") or item.get("_id") or item.get("id"))
     local_views = max((_safe_int(views_lookup.get(candidate)) for candidate in candidates), default=0)
-    current_views = _safe_int(item.get("local_view_count") or item.get("view_count") or item.get("views"))
     item["local_view_count"] = local_views
-    item["view_count"] = max(current_views, local_views)
-    item["views"] = item["view_count"]
+    item["view_count"] = local_views
+    item["views"] = local_views
 
 
 def _attach_local_views_to_otruyen_payload(payload: Any, db: Any) -> None:
@@ -2372,7 +2458,10 @@ def _attach_local_views_to_otruyen_payload(payload: Any, db: Any) -> None:
 
 
 async def _async_attach_local_views_to_otruyen_payload(payload: Any, db: Any) -> None:
-    await asyncio.to_thread(_attach_local_views_to_otruyen_payload, payload, db)
+    lookup = await cached_public_read(("views", id(db)), lambda: _fetch_local_views_lookup(db),
+                                      dict(_manga_views_lookup_cache), ttl=10)
+    for item in _otruyen_payload_items(payload):
+        _otruyen_apply_local_views(item, lookup)
 
 
 def _sort_otruyen_filtered_items(
@@ -2550,8 +2639,8 @@ async def _build_otruyen_filtered_payload(
 
     async def fetch_page(target_page: int) -> dict[str, Any]:
         if use_category_source:
-            return await otruyen_service.get_category_manga(selected_base_slug, target_page)
-        return await otruyen_service.get_list(list_type, target_page)
+            return await truyenqq_service.get_category_manga(selected_base_slug, target_page)
+        return await truyenqq_service.get_list(list_type, target_page)
 
     first_payload = await fetch_page(1)
     total_source_pages = min(_otruyen_payload_total_pages(first_payload), OTRUYEN_FILTERED_MAX_SCAN_PAGES)
@@ -2694,7 +2783,7 @@ async def manga_list_batch(
     hidden = await _get_hidden_slugs(db)
     return await _build_otruyen_page_batch(
         page_numbers,
-        lambda target_page: otruyen_service.get_list(list_type, target_page),
+        lambda target_page: truyenqq_service.get_list(list_type, target_page),
         hidden=hidden,
         db=db,
         user=user,
@@ -2756,7 +2845,7 @@ async def manga_list_combined(
 @router.get("/categories")
 async def categories():
     """Danh sách tất cả thể loại."""
-    return await otruyen_service.get_categories()
+    return await truyenqq_service.get_categories()
 
 
 @router.get("/category/{slug}")
@@ -2768,7 +2857,7 @@ async def category_manga(
 ):
     """Danh sách truyện theo thể loại."""
     data, hidden = await asyncio.gather(
-        otruyen_service.get_category_manga(slug, page),
+        truyenqq_service.get_category_manga(slug, page),
         _get_hidden_slugs(db),
     )
     if hidden and isinstance(data, dict):
@@ -2794,7 +2883,7 @@ async def category_manga_batch(
     hidden = await _get_hidden_slugs(db)
     return await _build_otruyen_page_batch(
         page_numbers,
-        lambda target_page: otruyen_service.get_category_manga(slug, target_page),
+        lambda target_page: truyenqq_service.get_category_manga(slug, target_page),
         hidden=hidden,
         db=db,
         user=user,
@@ -2802,7 +2891,8 @@ async def category_manga_batch(
     )
 
 
-@router.get("/otruyen-filtered")
+@router.get("/otruyen-filtered", include_in_schema=False)
+@router.get("/truyenqq-filtered")
 async def otruyen_filtered_manga(
     genre_slugs: str = Query(""),
     status: str = Query(""),
@@ -2824,45 +2914,26 @@ async def otruyen_filtered_manga(
     normalized_sort = _clean_slug(sort) or "latest"
     normalized_base_slug = _clean_slug(base_slug) or (genre_values[0] if genre_values else "")
 
-    if not genre_values and not normalized_status:
-        raise HTTPException(status_code=400, detail="genre_slugs or status is required")
+    if normalized_status and normalized_status not in {"ongoing", "completed"}:
+        return {"status": "success", "data": {"items": [], "params": {"pagination": {
+            "currentPage": page, "totalItemsPerPage": limit, "totalItems": 0, "totalPages": 1}}}}
 
-    cache_key = _otruyen_filtered_cache_key(
-        page=page,
-        limit=limit,
-        base_slug=normalized_base_slug,
-        genre_values=genre_values,
-        status_value=normalized_status,
-        sort=normalized_sort,
-        show_mature=show_mature,
+    # QQ supports these filters on one source page; no cross-page crawl needed.
+    payload = await truyenqq_service.get_filtered(
+        genres=genre_values, page=page,
+        sort={"popular": "views_desc", "newest": "created_desc", "oldest": "created_asc"}.get(normalized_sort, "updated_desc"),
+        status=normalized_status if normalized_status in {"ongoing", "completed"} else None,
     )
-    cached_payload = _load_json_cache(cache_key)
-    if cached_payload is not None:
-        return cached_payload
-
-    stale_payload = _load_json_cache(f"{cache_key}:stale")
     hidden = await _get_hidden_slugs(db)
-    try:
-        payload = await _build_otruyen_filtered_payload(
-            genre_values=genre_values,
-            status_value=normalized_status,
-            sort=normalized_sort,
-            page=page,
-            limit=limit,
-            show_mature=show_mature,
-            base_slug=normalized_base_slug,
-            hidden=hidden,
-            db=db,
-            user=user,
-            attach_ratings=attach_ratings,
-        )
-        _cache_otruyen_filtered_payload(cache_key, payload)
-        return payload
-    except Exception as exc:
-        if stale_payload is not None:
-            return stale_payload
-        logger.exception("OTruyen filtered catalog request failed")
-        raise HTTPException(status_code=502, detail="Danh mục OTruyen tạm thời không khả dụng") from exc
+    items = payload["data"]["items"]
+    payload["data"]["items"] = _filter_hidden(items, hidden)
+    if not show_mature:
+        payload["data"]["items"] = [item for item in payload["data"]["items"]
+                                    if not _is_mature_metadata(item.get("content_rating"), item.get("category"), [])]
+    await _attach_overrides_to_otruyen_payload(payload, db)
+    if attach_ratings:
+        await _async_attach_ratings_to_items(payload, db, user)
+    return payload
 
 
 def _safe_query(fn):
@@ -3003,7 +3074,7 @@ def _top_local_viewed_mangadex_ids(
     return ranked[: max(1, limit)]
 
 
-def _attach_local_views_to_mangadex_payload(payload: Any, db: Any) -> None:
+def _attach_local_views_to_mangadex_payload(payload: Any, db: Any, *, views_lookup=None) -> None:
     """Attach canonical local DB view counts to MangaDex catalog rows.
 
     MangaDex does not expose view counts. For our UI, manga_views is the same
@@ -3017,7 +3088,8 @@ def _attach_local_views_to_mangadex_payload(payload: Any, db: Any) -> None:
     if not isinstance(mangas, list) or not mangas:
         return
 
-    views_lookup = _fetch_local_views_lookup(db)
+    if views_lookup is None:
+        views_lookup = _fetch_local_views_lookup(db)
     for manga in mangas:
         if not isinstance(manga, dict):
             continue
@@ -3031,7 +3103,9 @@ def _attach_local_views_to_mangadex_payload(payload: Any, db: Any) -> None:
 
 
 async def _async_attach_local_views_to_mangadex_payload(payload: Any, db: Any) -> None:
-    await asyncio.to_thread(_attach_local_views_to_mangadex_payload, payload, db)
+    lookup = await cached_public_read(("views", id(db)), lambda: _fetch_local_views_lookup(db),
+                                      dict(_manga_views_lookup_cache), ttl=10)
+    _attach_local_views_to_mangadex_payload(payload, db, views_lookup=lookup)
 
 
 def _sort_mangadex_items_by_local_views_first(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3874,7 +3948,7 @@ async def _build_mangadex_popular_filtered_search(
                 page=max(1, math.floor(cursor / max(1, upstream_limit)) + 1),
                 limit=upstream_limit,
                 translated_language=translated_language,
-                attach_latest=True,
+                attach_latest=False,
                 included_tag_slugs=genre_values,
                 included_tags_mode="AND",
                 original_languages=original_language_values,
@@ -4237,6 +4311,8 @@ def _normalize_share_cover_url(value: Any, slug: str = "") -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
+    if raw.startswith("/api/"):
+        return raw
     if raw.startswith("//"):
         return f"https:{raw}"
     if raw.startswith(("http://", "https://")):
@@ -4334,7 +4410,7 @@ async def _resolve_share_identifier(identifier: str) -> tuple[str, str]:
 
     otruyen_object_id = _decode_otruyen_route_id(raw_identifier)
     if otruyen_object_id:
-        resolved_slug = await otruyen_service.resolve_slug_from_id(otruyen_object_id)
+        resolved_slug = await truyenqq_service.resolve_slug_from_id(otruyen_object_id)
         if not resolved_slug:
             raise HTTPException(status_code=404, detail="Manga not found")
         return _clean_slug(resolved_slug), raw_identifier
@@ -4350,14 +4426,14 @@ async def _build_manga_share_meta(
     db: Any,
 ) -> dict[str, str]:
     raw_source = str(source or "").strip().lower()
-    if raw_source and raw_source not in {"mangadex", "otruyen"}:
+    if raw_source and raw_source not in {"mangadex", "truyenqq"}:
         raise HTTPException(status_code=404, detail="Manga not found")
 
     normalized_identifier, canonical_token = await _resolve_share_identifier(identifier)
     mangadex_id = _extract_mangadex_id(normalized_identifier)
     if raw_source == "mangadex" and not mangadex_id:
         raise HTTPException(status_code=404, detail="Manga not found")
-    if raw_source == "otruyen":
+    if raw_source == "truyenqq":
         mangadex_id = None
 
     if not mangadex_id and _is_invalid_manga_slug(normalized_identifier):
@@ -4375,7 +4451,7 @@ async def _build_manga_share_meta(
     title = ""
     description = ""
     cover_url = ""
-    share_source = "mangadex" if mangadex_id else "otruyen"
+    share_source = "mangadex" if mangadex_id else "truyenqq"
 
     if not mangadex_id:
         uploaded_manga = await asyncio.to_thread(
@@ -4419,7 +4495,7 @@ async def _build_manga_share_meta(
         canonical_token = mangadex_id
         share_source = "mangadex"
     elif not title:
-        detail = await otruyen_service.get_manga_detail(normalized_identifier)
+        detail = await truyenqq_service.get_manga_detail(normalized_identifier)
         item = (detail.get("data") or {}).get("item") if isinstance(detail, dict) else None
         if not isinstance(item, dict):
             raise HTTPException(status_code=404, detail="Manga not found")
@@ -4534,7 +4610,7 @@ async def _build_chapter_share_meta(
             pass
 
     try:
-        chapter_payload = await otruyen_service.get_chapter(raw_chapter_id)
+        chapter_payload = await truyenqq_service.get_chapter(raw_chapter_id)
     except Exception:
         chapter_payload = None
     item = (chapter_payload or {}).get("data", {}).get("item") if isinstance(chapter_payload, dict) else None
@@ -4548,7 +4624,7 @@ async def _build_chapter_share_meta(
             manga_meta = await _build_manga_share_meta(
                 request,
                 identifier=manga_slug,
-                source="otruyen",
+                source="truyenqq",
                 db=db,
             )
             manga_title = manga_meta.get("title") or "MangaHub"
@@ -4713,7 +4789,7 @@ def _parse_share_path(share_path: str) -> tuple[str | None, str]:
     parts = [part for part in str(share_path or "").strip("/").split("/") if part]
     if len(parts) == 1:
         return None, parts[0]
-    if len(parts) == 2 and parts[0].lower() in {"mangadex", "otruyen"}:
+    if len(parts) == 2 and parts[0].lower() in {"mangadex", "truyenqq"}:
         return parts[0].lower(), parts[1]
     raise HTTPException(status_code=404, detail="Manga not found")
 
@@ -5010,9 +5086,9 @@ async def _collect_otruyen_sitemap_entries(
             break
         batch_specs = jobs[start : start + SITEMAP_OTRUYEN_BATCH_SIZE]
         batch = [
-            otruyen_service.get_home()
+            truyenqq_service.get_home()
             if kind == "home"
-            else otruyen_service.get_list(list_type, page)
+            else truyenqq_service.get_list(list_type, page)
             for kind, list_type, page in batch_specs
         ]
         try:
@@ -5262,7 +5338,7 @@ async def manga_detail(slug: str, db=Depends(get_supabase_public)):
     normalized_slug = raw_identifier
     otruyen_object_id = _decode_otruyen_route_id(raw_identifier)
     if otruyen_object_id:
-        resolved_slug = await otruyen_service.resolve_slug_from_id(otruyen_object_id)
+        resolved_slug = await truyenqq_service.resolve_slug_from_id(otruyen_object_id)
         if not resolved_slug:
             raise HTTPException(status_code=404, detail="Manga not found")
         normalized_slug = resolved_slug
@@ -5381,7 +5457,7 @@ async def manga_detail(slug: str, db=Depends(get_supabase_public)):
             data["manga"] = manga
         return data
 
-    detail = await otruyen_service.get_manga_detail(normalized_slug)
+    detail = await truyenqq_service.get_manga_detail(normalized_slug)
     if not isinstance(detail, dict):
         return detail
 
@@ -5422,12 +5498,9 @@ async def manga_detail(slug: str, db=Depends(get_supabase_public)):
     if views_result and hasattr(views_result, "data"):
         local_count = (views_result.data or {}).get("views", 0)
 
-    base_views = item.get("view_count") or item.get("views") or 0
-    try:
-        base_views = int(base_views)
-    except Exception:
-        base_views = 0
-    item["view_count"] = base_views + int(local_count or 0)
+    item["view_count"] = int(local_count or 0)
+    item["local_view_count"] = item["view_count"]
+    item["views"] = item["view_count"]
 
     chapters = item.get("chapters") or []
     chapter_meta: list[tuple[str, str]] = []
@@ -5668,7 +5741,7 @@ async def search(
     db=Depends(get_supabase_public),
 ):
     """Tìm kiếm truyện."""
-    otruyen_task = otruyen_service.search_manga(keyword, page=page)
+    otruyen_task = truyenqq_service.search_manga(keyword, page=page)
     if include_mangadex:
         mangadex_task: Any = mangadex_service.search_manga(
             keyword=keyword,
@@ -5727,6 +5800,14 @@ async def search(
     except Exception:
         pass
 
+    unavailable_sources = []
+    if isinstance(data_result, Exception):
+        unavailable_sources.append("truyenqq")
+    if include_mangadex and isinstance(mdx_result, Exception):
+        unavailable_sources.append("mangadex")
+    if not uploaded_items and len(unavailable_sources) == (2 if include_mangadex else 1):
+        raise HTTPException(503, "Các nguồn tìm kiếm tạm thời không khả dụng. Vui lòng thử lại.")
+    data.setdefault("meta", {})["unavailable_sources"] = unavailable_sources
     merged_items = [*uploaded_items, *base_items, *mdx_items]
     seen: set[str] = set()
     dedup_items = []
@@ -5750,6 +5831,11 @@ async def search(
         base_total = int(str(data["data"]["params"]["pagination"].get("totalItems") or len(base_items)))
         mdx_total = int(str((((mdx_data.get("data") or {}).get("params") or {}).get("pagination") or {}).get("totalItems") or len(mdx_items)))
         data["data"]["params"]["pagination"]["totalItems"] = base_total + mdx_total
+        # Each source advances one source page per UI page. Dividing their
+        # combined total by the first merged page size skips later MDX pages.
+        data["data"]["params"]["pagination"]["totalPages"] = max(
+            1, _otruyen_payload_total_pages(data_result), _otruyen_payload_total_pages(mdx_data)
+        )
         data["data"]["params"]["pagination"]["totalItemsPerPage"] = max(
             len(dedup_items),
             int(str(data["data"]["params"]["pagination"].get("totalItemsPerPage") or 24)),
@@ -5804,40 +5890,8 @@ async def mangadex_search(
         hidden = await _get_hidden_slugs(db)
 
     normalized_sort = str(sort or "").strip().lower()
-    uses_popular_builder = normalized_sort == "popular"
-    has_precise_mangadex_filters = bool(
-        str(keyword or "").strip()
-        or genre_values
-        or original_language_values
-        or status_values
-    )
     try:
-        if uses_popular_builder and has_precise_mangadex_filters:
-            data = await _build_mangadex_popular_filtered_search(
-                keyword=keyword,
-                page=page,
-                limit=limit,
-                translated_language=effective_translated_language,
-                genre_values=genre_values,
-                original_language_values=original_language_values,
-                status_values=status_values,
-                content_ratings=content_ratings,
-                db=db,
-            )
-        elif uses_popular_builder:
-            data = await _build_mangadex_popular_with_local_views(
-                keyword=keyword,
-                page=page,
-                limit=limit,
-                translated_language=effective_translated_language,
-                genre_values=genre_values,
-                original_language_values=original_language_values,
-                status_values=status_values,
-                content_ratings=content_ratings,
-                hidden=hidden,
-                db=db,
-            )
-        elif normalized_sort == "rating":
+        if normalized_sort == "rating":
             data = await _build_mangadex_rating_search(
                 keyword=keyword,
                 page=page,
@@ -5857,7 +5911,7 @@ async def mangadex_search(
                 page=page,
                 limit=limit,
                 translated_language=effective_translated_language,
-                attach_latest=True,
+                attach_latest=False,
                 included_tag_slugs=genre_values,
                 included_tags_mode="AND",
                 original_languages=original_language_values,
@@ -5878,8 +5932,6 @@ async def mangadex_search(
     payload = {"mangas": items}
     await _async_attach_local_views_to_mangadex_payload(payload, db)
     items = payload.get("mangas") or []
-    if normalized_sort == "popular":
-        items = _sort_mangadex_items_by_local_views_first(items)
     data.setdefault("data", {})["items"] = items
 
     if attach_ratings and normalized_sort != "rating":
@@ -5890,7 +5942,7 @@ async def mangadex_search(
 
 @router.get("/mangadex/home-banner")
 async def mangadex_home_banner(
-    limit: int = Query(8, ge=1, le=16),
+    limit: int = Query(8, ge=1, le=24),
     show_mature: bool = Query(False),
     filter_hidden: bool = Query(True),
     user=Depends(get_optional_user),
@@ -5915,6 +5967,7 @@ async def mangadex_home_banner(
             limit=limit,
             content_ratings=content_ratings,
             excluded_manga_ids=excluded_manga_ids,
+            snapshot=True,
         )
     except RuntimeError as error:
         raise _mangadex_upstream_http_exception(error) from error
@@ -6363,7 +6416,7 @@ async def chapter_detail(chapter_id: str):
 
     logger = logging.getLogger(__name__)
 
-    data = await otruyen_service.get_chapter(chapter_id)
+    data = await truyenqq_service.get_chapter(chapter_id)
 
     # Inject correct comic_slug from chapter_path
     if isinstance(data, dict):
@@ -6439,14 +6492,14 @@ async def random_manga(db=Depends(get_supabase_public)):
 
     # Instant path: pick from pre-loaded pool
     for _ in range(8):
-        pick = otruyen_service.get_random_item()
+        pick = truyenqq_service.get_random_item()
         if not pick:
             break
         if _hidden_reason_for_slug(hidden, pick.get("slug") or pick.get("id")) is None:
             return {
                 "id": pick.get("_id") or pick.get("id") or pick.get("slug"),
                 "slug": pick.get("slug"),
-                "source": "otruyen",
+                "source": "truyenqq",
                 "item": pick,
             }
 
@@ -6454,8 +6507,8 @@ async def random_manga(db=Depends(get_supabase_public)):
     import asyncio
 
     latest, ongoing = await asyncio.gather(
-        otruyen_service.get_list("truyen-moi", 1),
-        otruyen_service.get_list("dang-phat-hanh", 1),
+        truyenqq_service.get_list("truyen-moi", 1),
+        truyenqq_service.get_list("dang-phat-hanh", 1),
     )
     items = []
     for src in [latest, ongoing]:
@@ -6467,7 +6520,7 @@ async def random_manga(db=Depends(get_supabase_public)):
         return {
             "id": pick.get("_id") or pick.get("id") or pick.get("slug"),
             "slug": pick.get("slug"),
-            "source": "otruyen",
+            "source": "truyenqq",
             "item": pick,
         }
 
@@ -6477,7 +6530,7 @@ async def random_manga(db=Depends(get_supabase_public)):
 @router.get("/trending")
 async def trending_manga(
     limit: int = Query(20, ge=1, le=300),
-    source: str = Query("all", pattern="^(all|otruyen|mangadex)$"),
+    source: str = Query("all", pattern="^(all|truyenqq|mangadex)$"),
     db=Depends(get_supabase_public),
     user=Depends(get_optional_user),
 ):
@@ -6487,7 +6540,9 @@ async def trending_manga(
     trending: list[dict] = []
     normalized_source = _normalize_trending_source(source)
     hidden = await _get_hidden_slugs(db)
-    cache_suffix = f"{limit}" if normalized_source == "all" else f"{normalized_source}:{limit}"
+    revisions = ":".join(_source_revision(name) for name in ("truyenqq", "mangadex")
+                         if normalized_source in {"all", name})
+    cache_suffix = (f"{limit}" if normalized_source == "all" else f"{normalized_source}:{limit}") + f":rev={revisions}"
     cache_key = f"manga:trending:{TRENDING_CACHE_VERSION}:{cache_suffix}"
     memory_key = f"{TRENDING_CACHE_VERSION}:{cache_suffix}"
 
@@ -6585,7 +6640,7 @@ async def _build_otruyen_fallback_trending(limit: int, hidden: dict) -> list[dic
         page_count = min(max(math.ceil(limit / 24), 1), 6)
         payloads = await asyncio.gather(
             *[
-                otruyen_service.get_list(list_type, page)
+                truyenqq_service.get_list(list_type, page)
                 for list_type in ("dang-phat-hanh", "truyen-moi")
                 for page in range(1, page_count + 1)
             ],
@@ -6864,8 +6919,8 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
             for list_type in ("truyen-moi", "dang-phat-hanh", "hoan-thanh"):
                 for cached_page in range(1, 21):
                     list_payload = (
-                        _load_json_cache(f"otruyen:list:{list_type}:{cached_page}")
-                        or _load_json_cache(f"otruyen:list:{list_type}:{cached_page}:stale")
+                        _load_json_cache(f"truyenqq:list:{list_type}:{cached_page}")
+                        or _load_json_cache(f"truyenqq:list:{list_type}:{cached_page}:stale")
                     )
                     if not isinstance(list_payload, dict):
                         continue
@@ -7168,7 +7223,7 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
             if unresolved_otruyen_slugs:
                 cached_detail_candidates = list(dict.fromkeys(unresolved_otruyen_slugs))[ : min(max(limit * 2, 24), 240) ]
                 for source_slug in cached_detail_candidates:
-                    detail_payload = _load_json_cache(f"otruyen:detail:{source_slug}") or _load_json_cache(f"otruyen:detail:{source_slug}:stale")
+                    detail_payload = _load_json_cache(f"truyenqq:detail:{source_slug}") or _load_json_cache(f"truyenqq:detail:{source_slug}:stale")
                     if not isinstance(detail_payload, dict):
                         continue
                     extracted_meta = _extract_otruyen_detail_meta(source_slug, detail_payload)
@@ -7187,7 +7242,7 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
                     async with detail_semaphore:
                         try:
                             detail_payload = await asyncio.wait_for(
-                                otruyen_service.get_manga_detail(target_slug),
+                                truyenqq_service.get_manga_detail(target_slug),
                                 timeout=8.0,
                             )
                         except Exception:
@@ -7273,7 +7328,7 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
                     {
                         "id": slug,
                         "slug": slug,
-                        "source": "mangadex" if is_mangadex_slug else "otruyen",
+                        "source": "mangadex" if is_mangadex_slug else "truyenqq",
                         "title": resolved_title,
                         "thumb": resolved_thumb,
                         "views": row["views"],
@@ -7362,7 +7417,7 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
     except Exception:
         pass
 
-    if len(trending) < limit and normalized_source in {"all", "otruyen"}:
+    if len(trending) < limit and normalized_source in {"all", "truyenqq"}:
         # Fill short local rankings with OTruyen list data so the rankings page is not sparse.
         fallback_trending = await _build_otruyen_fallback_trending(limit, hidden)
         trending = _merge_trending_fill(trending, fallback_trending, limit)
@@ -7406,4 +7461,4 @@ async def mangadex_cover(manga_id: str):
 @router.get("/image-url")
 async def image_url(path: str):
     """Build full CDN image URL."""
-    return {"url": otruyen_service.get_image_url(path)}
+    return {"url": truyenqq_service.get_image_url(path)}

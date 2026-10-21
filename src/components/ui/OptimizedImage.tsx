@@ -60,10 +60,12 @@ const OptimizedImage = memo(({
     return isNoCoverSrc(raw) ? themedFallbackSrc : raw;
   })();
 
-  const alreadyCached =
-    loadedCache.has(normalizedSrc) || (!!normalizedFallbackSrc && loadedCache.has(normalizedFallbackSrc));
+  const cachedInitialSrc = loadedCache.has(normalizedSrc)
+    ? normalizedSrc
+    : (normalizedFallbackSrc && loadedCache.has(normalizedFallbackSrc) ? normalizedFallbackSrc : normalizedSrc);
+  const alreadyCached = loadedCache.has(cachedInitialSrc);
 
-  const [activeSrc, setActiveSrc]   = useState(normalizedSrc);
+  const [activeSrc, setActiveSrc]   = useState(cachedInitialSrc);
   const [loaded, setLoaded]         = useState(alreadyCached);
   const [error, setError]           = useState(false);
   const [inView, setInView]         = useState(priority || alreadyCached);
@@ -77,7 +79,7 @@ const OptimizedImage = memo(({
   const fallbackSwitchDelayMs =
     typeof fallbackDelayMs === 'number'
       ? Math.max(0, fallbackDelayMs)
-      : (isRemoteUrl(normalizedSrc) && isRemoteUrl(normalizedFallbackSrc) ? 2500 : 0);
+      : (isRemoteUrl(normalizedSrc) ? 10_000 : 0);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const loadedRef = useRef(alreadyCached);
@@ -100,35 +102,53 @@ const OptimizedImage = memo(({
   }, [priority, inView, rootMargin]);
 
   // ── Delayed fallback ───────────────────────────────────────────────────────
-  // For remote cover URLs, avoid firing primary and fallback in parallel on
-  // every card. Start the fallback only if the primary still has not loaded
-  // after a short delay or if the primary errors first.
+  // Give the primary CDN a fair chance before switching. If the remote
+  // fallback also stalls, show a local cover instead of leaving a permanent
+  // skeleton; recovery below keeps trying the remote sources in background.
   useEffect(() => {
-    if (!inView || alreadyCached || !normalizedFallbackSrc) return;
-    if (!isRemoteUrl(normalizedSrc) || !isRemoteUrl(normalizedFallbackSrc)) return;
-    if (fallbackSwitchDelayMs <= 0) return;
+    if (!inView || loaded || error || !isRemoteUrl(activeSrc)) return;
+
+    const isPrimarySource = activeSrc === normalizedSrc;
+    const timeoutMs = isPrimarySource ? fallbackSwitchDelayMs : 12_000;
+    if (timeoutMs <= 0) return;
 
     const timer = window.setTimeout(() => {
-      setActiveSrc((current) => {
-        if (loadedRef.current) return current;
-        if (current === normalizedFallbackSrc) return current;
-        return normalizedFallbackSrc;
-      });
-    }, fallbackSwitchDelayMs);
+      if (loadedRef.current) return;
+      loadedRef.current = false;
+      setLoaded(false);
+      setError(false);
+
+      if (isPrimarySource && normalizedFallbackSrc && activeSrc !== normalizedFallbackSrc) {
+        setActiveSrc(normalizedFallbackSrc);
+        return;
+      }
+
+      if (activeSrc !== themedFallbackSrc) {
+        if (hasRemoteCandidate) setNeedsRecover(true);
+        setActiveSrc(themedFallbackSrc);
+      }
+    }, timeoutMs);
 
     return () => window.clearTimeout(timer);
   }, [
     inView,
-    alreadyCached,
+    loaded,
+    error,
+    activeSrc,
     normalizedSrc,
     normalizedFallbackSrc,
     fallbackSwitchDelayMs,
+    themedFallbackSrc,
+    hasRemoteCandidate,
   ]);
 
   // ── Reset when src prop changes ────────────────────────────────────────────
   useEffect(() => {
-    setActiveSrc(normalizedSrc);
-    const cached = loadedCache.has(normalizedSrc) || (!!normalizedFallbackSrc && loadedCache.has(normalizedFallbackSrc));
+    const cachedSrc = loadedCache.has(normalizedSrc)
+      ? normalizedSrc
+      : (normalizedFallbackSrc && loadedCache.has(normalizedFallbackSrc) ? normalizedFallbackSrc : normalizedSrc);
+    setActiveSrc(cachedSrc);
+    const cached = loadedCache.has(cachedSrc);
     loadedRef.current = cached;
     setLoaded(cached);
     setError(false);
@@ -136,7 +156,6 @@ const OptimizedImage = memo(({
     setNeedsRecover(false);
     setRecoverAttempts(0);
     if (cached) setInView(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [normalizedSrc, normalizedFallbackSrc]);
 
   useEffect(() => {
@@ -162,6 +181,7 @@ const OptimizedImage = memo(({
   }, [activeSrc, hasRemoteCandidate, recoverAttempts, maxRecoverAttempts]);
 
   const handleError = useCallback(() => {
+    loadedRef.current = false;
     // Primary failed; switch to the fallback source if available.
     if (normalizedFallbackSrc && activeSrc !== normalizedFallbackSrc) {
       setLoaded(false);
@@ -183,6 +203,8 @@ const OptimizedImage = memo(({
   const handleManualRetry = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
+    loadedRef.current = false;
+    setLoaded(false);
     setActiveSrc(normalizedSrc);
     setError(false);
     setNeedsRecover(false);
@@ -195,6 +217,8 @@ const OptimizedImage = memo(({
     if (!error || retryCount >= maxRetries) return;
     const delay = retryCount === 0 ? 1000 : 2500;
     const t = setTimeout(() => {
+      loadedRef.current = false;
+      setLoaded(false);
       setActiveSrc(normalizedSrc);
       setError(false);
       setRetryCount(r => r + 1);

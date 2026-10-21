@@ -2,7 +2,7 @@ import { useMemo, useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { useHomepageCombined, useMangaDexViCatalog } from '@/hooks/useApi';
+import { useHomepageCombined } from '@/hooks/useApi';
 import { useSettingsStore } from '@/store/settingsStore';
 import { useUserStore } from '@/store/userStore';
 import MangaGrid from '@/components/manga/MangaGrid';
@@ -485,7 +485,7 @@ const buildTrendingChapter = (slug: string, row: TrendingMangaItem): Manga['chap
   const chapterNum = parseChapterNumberFromText(chapterText);
   const hasNumber = isValidChapterNumber(chapterNum);
   return [{
-    id: `trending-${slug}-latest`,
+    id: String((row as any).latest_chapter_id || `trending-${slug}-latest`),
     mangaId: slug,
     number: hasNumber ? chapterNum : -1,
     title: hasNumber ? chapterLabelFromNumber(chapterNum) : chapterText,
@@ -1001,24 +1001,6 @@ const fetchMangaDexLatestChapterMetaMap = async (
     // Detail fallback below handles transient batch failures.
   }
 
-  const unresolved = ids.filter((detailId) => !result[detailId]?.latestChapter);
-  if (unresolved.length) {
-    const settled = await Promise.allSettled(
-      unresolved.slice(0, detailFallbackLimit).map(async (detailId) => {
-        const payload = await mangaApi.getMangaDexDetail(detailId, 1, 'vi', { timeoutMs: 8_000 });
-        return [detailId, buildMangaDexLatestMetaFromDetail(detailId, payload)] as const;
-      }),
-    );
-
-    for (const item of settled) {
-      if (item.status !== 'fulfilled') continue;
-      const [detailId, meta] = item.value;
-      if (!meta?.latestChapter) continue;
-      result[detailId] = meta;
-      result[`mdx-${detailId}`] = meta;
-    }
-  }
-
   return result;
 };
 
@@ -1071,31 +1053,27 @@ const Index = () => {
   const {
     data,
     isLoading: isInitialMergedLoading,
+    isError: isHomepageError,
     refetch: refetchHomepageCombined,
   } = useHomepageCombined(120);
   const isHomepageCoreReady = !isInitialMergedLoading;
   const {
-    data: deferredMangaDexMangas = [],
-    isLoading: isMangaDexCatalogLoading,
-    isFetching: isMangaDexCatalogFetching,
-    isError: isMangaDexCatalogError,
-  } = useMangaDexViCatalog(120, true);
-  const {
     data: homeBannerData,
     isLoading: isHomeBannerLoading,
     isError: isHomeBannerError,
+    refetch: refetchHomeBanner,
   } = useQuery({
-    queryKey: ['manga', 'home', 'banner', 'mangadex', showMatureContent],
+    queryKey: ['manga', 'home', 'feed-v2', 'mangadex', showMatureContent],
     queryFn: async () => {
       const payload = await mangaApi.getMangaDexHomeBanner({
-        limit: 8,
+        limit: 24,
         showMature: showMatureContent,
         filterHidden: true,
-        timeoutMs: 8_000,
+        timeoutMs: 18_000,
       });
       return adaptListData(payload);
     },
-    staleTime: 5 * 60 * 1000,
+    staleTime: 30 * 1000,
     gcTime: 15 * 60 * 1000,
     retry: 1,
     refetchOnWindowFocus: false,
@@ -1126,54 +1104,9 @@ const Index = () => {
   const latest = data?.latest?.items || [];
   const ongoing = data?.ongoing?.items || [];
   const hasOTruyenHomeItems = latest.length > 0 || ongoing.length > 0 || featured.length > 0;
-  const mangaDexMangasCandidate = useMemo(
-    () => deferredMangaDexMangas.length ? deferredMangaDexMangas : (data?.mangaDexMangas || []),
-    [data?.mangaDexMangas, deferredMangaDexMangas],
-  );
-  const isMangaDexCatalogSettled =
-    isMangaDexCatalogError || (!isMangaDexCatalogLoading && !isMangaDexCatalogFetching);
-  const [homeSyncReady, setHomeSyncReady] = useState(false);
-  const [syncedMangaDexMangas, setSyncedMangaDexMangas] = useState<MangaDexCatalogItem[]>([]);
   const [homeDeferredWorkReady, setHomeDeferredWorkReady] = useState(false);
-
-  useEffect(() => {
-    if (isInitialMergedLoading) {
-      setHomeSyncReady(false);
-      setSyncedMangaDexMangas([]);
-      return;
-    }
-
-    if (homeSyncReady) return;
-
-    if (mangaDexMangasCandidate.length > 0) {
-      setSyncedMangaDexMangas(mangaDexMangasCandidate as MangaDexCatalogItem[]);
-      setHomeSyncReady(true);
-      return;
-    }
-
-    if (isMangaDexCatalogSettled) {
-      setSyncedMangaDexMangas([]);
-      setHomeSyncReady(true);
-      return;
-    }
-
-    if (!hasOTruyenHomeItems) return;
-
-    const timer = window.setTimeout(() => {
-      setSyncedMangaDexMangas([]);
-      setHomeSyncReady(true);
-    }, HOME_SOURCE_SYNC_GRACE_MS);
-
-    return () => window.clearTimeout(timer);
-  }, [
-    hasOTruyenHomeItems,
-    homeSyncReady,
-    isInitialMergedLoading,
-    isMangaDexCatalogSettled,
-    mangaDexMangasCandidate,
-  ]);
-
-  const isHomePrimaryReady = isHomepageCoreReady && homeSyncReady;
+  // Render whichever source arrives first; late MangaDex data remains live.
+  const isHomePrimaryReady = Boolean(data || homeBannerData);
   useEffect(() => {
     if (!isHomePrimaryReady) {
       setHomeDeferredWorkReady(false);
@@ -1193,67 +1126,7 @@ const Index = () => {
 
   const canRunHomeDeferredQueries = isHomePrimaryReady && homeDeferredWorkReady;
 
-  const mangaDexMangas = syncedMangaDexMangas;
-  const mangaDexItems = useMemo<Manga[]>(() => {
-    return (mangaDexMangas || []).map((item: MangaDexCatalogItem) => {
-      const chapter = pickLatestChapter(item);
-      const chapterNumber = firstValidChapterNumber(
-        getMangaDexChapterNumber(chapter),
-        getMangaDexFallbackChapterNumber(item),
-      );
-      const stableDate = pickStableDate(pickChapterDate(chapter, item.updated_at), item.updated_at);
-      const coverProxy = toMangaDexCoverProxy(item.cover_url, item.id);
-      const coverDirect = toMangaDexCoverDirect(item.cover_url);
-      const ratingRaw = Number((item as any).rating_average ?? (item as any).average_rating ?? 0);
-      const ratingCountRaw = Number((item as any).rating_count ?? (item as any).ratings_count ?? 0);
-      return {
-        id: item.id,
-        title: pickDisplayTitle(item.id, item.title) || 'Chưa có tiêu đề',
-        author: item.authors_text || 'MangaDex',
-        artist: item.authors_text || 'MangaDex',
-        description: '',
-        cover: coverProxy,                      // primary: local proxy (disk cache)
-        coverProxy: coverDirect || undefined,   // fallback: direct CDN
-        status: 'ongoing' as const,
-        type: 'manga' as const,
-        genres: (item as any).genres || [],
-        tags: [],
-        rating: Number.isFinite(ratingRaw) ? ratingRaw : 0,
-        ratingCount: Number.isFinite(ratingCountRaw) ? ratingCountRaw : 0,
-        myRating: null,
-        follows: 0,
-        views: Number((item as any).view_count || (item as any).views || 0),
-        year: new Date().getFullYear(),
-        contentRating: String((item as any).content_rating || (item as any).contentRating || '').trim().toLowerCase(),
-        isFeatured: Boolean((item as any).is_featured ?? (item as any).isFeatured),
-        featuredAt: (() => {
-          const value = (item as any).featured_at ?? (item as any).featuredAt;
-          if (value === null || value === undefined) return undefined;
-          const text = String(value).trim();
-          return text || undefined;
-        })(),
-        adminNotes: (() => {
-          const value = (item as any).admin_notes ?? (item as any).adminNotes;
-          if (value === null || value === undefined) return undefined;
-          const text = String(value).trim();
-          return text || undefined;
-        })(),
-        chapters:
-          isValidChapterNumber(chapterNumber)
-            ? [{
-                id: String(chapter?.id || `mdx-last-${item.id}`),
-                mangaId: item.id,
-                number: chapterNumber,
-                title: chapterLabelFromNumber(chapterNumber),
-                pages: [],
-                uploadDate: stableDate,
-                scanlationGroup: '',
-              }]
-            : [],
-        lastUpdated: stableDate,
-      };
-    });
-  }, [mangaDexMangas]);
+  const mangaDexItems = homeBannerData?.items || [];
 
   const visibleMangaDexItems = useMemo(
     () => (showMatureContent ? mangaDexItems : mangaDexItems.filter((m) => !isMatureManga(m))),
@@ -1287,43 +1160,7 @@ const Index = () => {
     },
     [homeBannerData?.items, showMatureContent],
   );
-  const [homeBannerSnapshotReady, setHomeBannerSnapshotReady] = useState(false);
-  const [syncedHomeBannerItems, setSyncedHomeBannerItems] = useState<Manga[]>([]);
-
-  useEffect(() => {
-    if (isInitialMergedLoading) {
-      setHomeBannerSnapshotReady(false);
-      setSyncedHomeBannerItems([]);
-      return;
-    }
-
-    if (homeBannerSnapshotReady) return;
-
-    if (homeBannerItemsCandidate.length > 0 || isHomeBannerError || !isHomeBannerLoading) {
-      setSyncedHomeBannerItems(homeBannerItemsCandidate);
-      setHomeBannerSnapshotReady(true);
-      return;
-    }
-
-    if (!hasOTruyenHomeItems && visibleMangaDexItems.length === 0) return;
-
-    const timer = window.setTimeout(() => {
-      setSyncedHomeBannerItems([]);
-      setHomeBannerSnapshotReady(true);
-    }, HOME_SOURCE_SYNC_GRACE_MS);
-
-    return () => window.clearTimeout(timer);
-  }, [
-    hasOTruyenHomeItems,
-    homeBannerItemsCandidate,
-    homeBannerSnapshotReady,
-    isHomeBannerError,
-    isHomeBannerLoading,
-    isInitialMergedLoading,
-    visibleMangaDexItems.length,
-  ]);
-
-  const homeBannerItems = syncedHomeBannerItems;
+  const homeBannerItems = homeBannerItemsCandidate;
 
   const latestMerged = useMemo(() => {
     const merged = [...visibleLatest, ...visibleMangaDexItems, ...homeBannerItems];
@@ -1442,8 +1279,8 @@ const Index = () => {
       overlays.push({
         id: slug,
         title: safeTitle || 'Chưa có tiêu đề',
-        author: isMdx ? 'MangaDex' : 'OTruyen',
-        artist: isMdx ? 'MangaDex' : 'OTruyen',
+        author: isMdx ? 'MangaDex' : 'TruyenQQ',
+        artist: isMdx ? 'MangaDex' : 'TruyenQQ',
         description: '',
         cover,
         coverProxy,
@@ -1586,7 +1423,7 @@ const Index = () => {
           const detailId = toMangaDexDetailId(slug);
 
           if (detailId) {
-            const payload = await mangaApi.getMangaDexDetail(detailId, 120);
+            const payload = await mangaApi.getMangaDexDetail(detailId, 1);
             const item = (payload?.manga || {}) as any;
             const chapterRows = Array.isArray(item.chapters) ? item.chapters : [];
 
@@ -1714,8 +1551,8 @@ const Index = () => {
       const nextItem: Manga = {
         id: slug,
         title: pickDisplayTitle(slug) || 'Chưa có tiêu đề',
-        author: isMangaDexSlug(slug) ? 'MangaDex' : 'OTruyen',
-        artist: isMangaDexSlug(slug) ? 'MangaDex' : 'OTruyen',
+        author: isMangaDexSlug(slug) ? 'MangaDex' : 'TruyenQQ',
+        artist: isMangaDexSlug(slug) ? 'MangaDex' : 'TruyenQQ',
         description: '',
         cover: DEFAULT_CARD_COVER_FALLBACK,
         coverProxy: DEFAULT_CARD_COVER_FALLBACK,
@@ -1895,8 +1732,8 @@ const Index = () => {
         ...(base || {
           id: itemId,
           title: pickDisplayTitle(itemId, row.title) || 'Chưa có tiêu đề',
-          author: isMdx ? 'MangaDex' : 'OTruyen',
-          artist: isMdx ? 'MangaDex' : 'OTruyen',
+          author: isMdx ? 'MangaDex' : 'TruyenQQ',
+          artist: isMdx ? 'MangaDex' : 'TruyenQQ',
           description: '',
           status: mapTrendingStatus(row.status),
           type: 'manga' as const,
@@ -2050,7 +1887,7 @@ const Index = () => {
     return syncMangaDexLatestChapters(topRated, topRatedMangaDexChapterMap as Record<string, MangaDexLatestChapterMeta>);
   }, [topRated, topRatedMangaDexChapterMap]);
 
-  const isHomeSynchronizedLoading = isInitialMergedLoading || !homeSyncReady;
+  const isHomeSynchronizedLoading = !isHomePrimaryReady && (isInitialMergedLoading || isHomeBannerLoading);
   const isTopRatedSectionLoading = isHomeSynchronizedLoading;
 
   const homeCoverWarmupUrls = useMemo(() => {
@@ -2081,7 +1918,7 @@ const Index = () => {
     };
   }, [canRunHomeDeferredQueries, homeCoverWarmupUrls]);
 
-  const isHeroBannerLoading = isHomeSynchronizedLoading || !homeBannerSnapshotReady;
+  const isHeroBannerLoading = isHomeSynchronizedLoading;
 
   return (
     <div className="min-h-screen">
@@ -2093,7 +1930,12 @@ const Index = () => {
           <HeroSlider manga={heroBannerItems.slice(0, 5)} />
         ) : (
           <div className="h-[340px] bg-muted rounded-2xl flex items-center justify-center">
-            <p className="text-muted-foreground font-medium">Đang tải dữ liệu...</p>
+            {isHomepageError && isHomeBannerError ? (
+              <div className="text-center space-y-3">
+                <p className="text-muted-foreground font-medium">Chưa tải được truyện. Vui lòng thử lại.</p>
+                <button className="px-4 py-2 rounded-lg bg-primary text-primary-foreground" onClick={() => { void refetchHomepageCombined(); void refetchHomeBanner(); }}>Thử lại</button>
+              </div>
+            ) : <p className="text-muted-foreground font-medium">Chưa có truyện để hiển thị.</p>}
           </div>
         )}
       </section>

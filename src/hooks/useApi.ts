@@ -14,6 +14,7 @@ import {
   uploadApi,
 } from "@/lib/api";
 import { useUserStore } from "@/store/userStore";
+import { useCanonicalMangaRecords } from "@/hooks/useCardMetadata";
 import {
   adaptMangaDetail,
   adaptListData,
@@ -25,14 +26,11 @@ import {
   MANGADEX_EXTRA_GENRES,
 } from "@/lib/adapters";
 import { MANGADEX_ID_RE, normalizeMangaDexId } from "@/lib/mangaLinks";
-import { getLocalMangaDexChapterPages } from "@/lib/mangaDexImages";
+import { loadMangaDexChapterPages } from "@/lib/mangaDexImages";
 import { invalidateMangaRealtimeQueries } from "@/lib/querySync";
 import type { Manga } from "@/types/manga";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
-const HOMEPAGE_CORE_TIMEOUT_MS = 7_000;
-const MANGADEX_CATALOG_TIMEOUT_MS = 15_000;
-const HOMEPAGE_MANGADEX_FALLBACK_TIMEOUT_MS = 6_000;
 const LOCAL_COVER_FALLBACK = "/no-cover.svg";
 const USER_DATA_QUERY_OPTIONS = {
   staleTime: 0,
@@ -50,25 +48,7 @@ function isOTruyenErrorPayload(data: any): boolean {
 
 function assertOTruyenPayload(data: any) {
   if (!isOTruyenErrorPayload(data)) return;
-  throw new Error(String(data?.message || "OTruyen unavailable"));
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      reject(new Error("Request timeout"));
-    }, timeoutMs);
-
-    promise
-      .then((value) => {
-        window.clearTimeout(timer);
-        resolve(value);
-      })
-      .catch((error) => {
-        window.clearTimeout(timer);
-        reject(error);
-      });
-  });
+  throw new Error(String(data?.message || "TruyenQQ unavailable"));
 }
 
 function isMangaDexThumbUrl(value: string): boolean {
@@ -130,7 +110,10 @@ function resolveThumbSources(
           fallback: LOCAL_COVER_FALLBACK,
         };
       }
-      return { primary: raw, fallback: LOCAL_COVER_FALLBACK };
+      return {
+        primary: raw,
+        fallback: thumbFallbackUrl(raw, mangaSlug) || LOCAL_COVER_FALLBACK,
+      };
     }
 
     if (raw.startsWith("//")) {
@@ -141,14 +124,17 @@ function resolveThumbSources(
           fallback: LOCAL_COVER_FALLBACK,
         };
       }
-      return { primary: full, fallback: LOCAL_COVER_FALLBACK };
+      return {
+        primary: full,
+        fallback: thumbFallbackUrl(full, mangaSlug) || LOCAL_COVER_FALLBACK,
+      };
     }
 
     if (raw.startsWith("/uploads/comics/")) {
       const direct = `https://img.otruyenapi.com${raw}`;
       const fallback = thumbFallbackUrl(raw, mangaSlug) || direct;
       return {
-        primary: `${API_BASE}/api/images/img?url=${encodeURIComponent(direct)}`,
+        primary: direct,
         fallback,
       };
     }
@@ -157,7 +143,7 @@ function resolveThumbSources(
       const direct = `https://img.otruyenapi.com/${raw}`;
       const fallback = thumbFallbackUrl(raw, mangaSlug) || direct;
       return {
-        primary: `${API_BASE}/api/images/img?url=${encodeURIComponent(direct)}`,
+        primary: direct,
         fallback,
       };
     }
@@ -165,7 +151,7 @@ function resolveThumbSources(
     const resolved = thumbUrl(raw, mangaSlug);
     if (/^https?:\/\/img\.otruyenapi\.com/i.test(resolved)) {
       return {
-        primary: `${API_BASE}/api/images/img?url=${encodeURIComponent(resolved)}`,
+        primary: resolved,
         fallback: thumbFallbackUrl(raw, mangaSlug) || resolved,
       };
     }
@@ -190,8 +176,8 @@ function resolveThumbSources(
 
   const direct = thumbUrl("", mangaSlug);
   return {
-    primary: `${API_BASE}/api/images/img?url=${encodeURIComponent(direct)}`,
-    fallback: direct,
+    primary: direct,
+    fallback: thumbFallbackUrl("", mangaSlug) || LOCAL_COVER_FALLBACK,
   };
 }
 
@@ -257,7 +243,7 @@ export function useHome() {
 }
 
 /** Combined homepage data — 1 request instead of 2 */
-export function useHomepage() {
+export function useHomepage(enabled = true) {
   return useQuery({
     queryKey: ["manga", "homepage"],
     queryFn: async () => {
@@ -267,6 +253,7 @@ export function useHomepage() {
         ongoing: adaptListData(data.ongoing),
       };
     },
+    enabled,
     staleTime: 2 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
     retry: 2,
@@ -276,91 +263,23 @@ export function useHomepage() {
 
 /** Homepage + MangaDex catalog in one hook for Index page. */
 export function useHomepageCombined(maxChapters = 120) {
-  const queryClient = useQueryClient();
-  const homepageCombinedKey = ["manga", "homepage", "combined", maxChapters] as const;
-  const mangadexCatalogKey = [
-    "manga",
-    "mangadex",
-    "vi-catalog",
-    maxChapters,
-  ] as const;
-
   return useQuery({
-    queryKey: homepageCombinedKey,
+    queryKey: ["manga", "homepage", "combined-v2", maxChapters],
     queryFn: async () => {
-      type HomepageMangaDexItem = {
-        id: string;
-        url?: string;
-        title: string;
-        cover_url?: string;
-        authors_text?: string;
-        updated_at?: string;
-        genres?: string[];
-        chapters?: Array<{
-          id?: string;
-          chapter?: string;
-          publish_at?: string;
-          readable_at?: string;
-          created_at?: string;
-          updated_at?: string;
-          chapter_with_groups?: string;
-        }>;
-      };
-
-      const cachedCatalogRaw = queryClient.getQueryData(mangadexCatalogKey);
-      const cachedCatalog = Array.isArray(cachedCatalogRaw)
-        ? (cachedCatalogRaw as HomepageMangaDexItem[])
-        : [];
-
-      type HomepagePayload = {
-        latest?: unknown;
-        ongoing?: unknown;
-        featured?: unknown;
-      };
-
-      let homepagePayload: HomepagePayload = {};
-      try {
-        homepagePayload = await withTimeout(
-          mangaApi.getHomepage({ includeFeatured: true }),
-          HOMEPAGE_CORE_TIMEOUT_MS,
-        ) as HomepagePayload;
-      } catch {
-        // The fallback below still gives older or temporarily unavailable
-        // backends a chance to render featured titles.
+      const payload = await mangaApi.getHomepage({ includeFeatured: true });
+      const latest = adaptListData(payload.latest || {});
+      const ongoing = adaptListData(payload.ongoing || {});
+      const featured = adaptListData(payload.featured || {});
+      if (!latest.items.length && !ongoing.items.length && !featured.items.length) {
+        throw new Error("Home data unavailable");
       }
-
-      // Newer backends include featured titles in /homepage. Keep the small
-      // fallback for a rolling deployment where a frontend arrives first.
-      let featuredPayload = homepagePayload.featured;
-      if (featuredPayload === undefined) {
-        try {
-          featuredPayload = await withTimeout(
-            mangaApi.getFeatured(12),
-            HOMEPAGE_CORE_TIMEOUT_MS,
-          );
-        } catch {
-          featuredPayload = {};
-        }
-      }
-      const latest = adaptListData(homepagePayload.latest || {});
-      const ongoing = adaptListData(homepagePayload.ongoing || {});
-      const featured = adaptListData(featuredPayload || {});
-
-      return {
-        latest,
-        ongoing,
-        featured,
-        mangaDexMangas: cachedCatalog,
-      };
+      return { latest, ongoing, featured };
     },
-    staleTime: 3 * 60 * 1000,
+    staleTime: 30 * 1000,
     gcTime: 15 * 60 * 1000,
-    placeholderData: (previousData) => previousData,
-    retry: 2,
-    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
+    retry: 1,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
-    refetchOnMount: false,
   });
 }
 
@@ -393,46 +312,17 @@ export function useMangaDexViCatalog(
         }>;
       };
 
-      let mangas: CatalogItem[] = [];
-      try {
-        const data = await withTimeout(
-          mangaApi.getMangaDexViCatalog(maxChapters),
-          MANGADEX_CATALOG_TIMEOUT_MS,
-        );
-        mangas = (data?.mangas || []) as CatalogItem[];
-      } catch {
-        mangas = [];
-      }
-
-      if (mangas.length > 0) return mangas;
-
-      try {
-        const fallbackMaxChapters = typeof maxChapters === "number" ? maxChapters : 200;
-        const fallback = await withTimeout(
-          mangaApi.getCombinedList("truyen-moi", 1, fallbackMaxChapters),
-          HOMEPAGE_MANGADEX_FALLBACK_TIMEOUT_MS,
-        );
-        const fallbackMangas = (fallback?.mangadex?.mangas || []) as CatalogItem[];
-        if (Array.isArray(fallbackMangas) && fallbackMangas.length > 0) {
-          return fallbackMangas;
-        }
-      } catch {
-        // Cached data below keeps the homepage usable during MangaDex hiccups.
-      }
-
-      const cached = queryClient.getQueryData(queryKey);
-      if (Array.isArray(cached) && cached.length > 0) {
-        return cached as typeof mangas;
-      }
-
-      throw new Error("MangaDex catalog empty");
+      const data = await mangaApi.getMangaDexViCatalog(maxChapters, { attachRatings: false, timeoutMs: 15_000 });
+      if (!Array.isArray(data?.mangas) || !data.mangas.length) throw new Error("MangaDex catalog unavailable");
+      return data.mangas as CatalogItem[];
     },
     staleTime: 5 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
     enabled,
     // Return stale data instantly on revisit while refetching in background
     placeholderData: (prev) => prev,
-    retry: (failureCount) => failureCount < 3,
+    retry: 1,
+    refetchOnWindowFocus: false,
     retryDelay: (attempt) => Math.min(2000 * 2 ** attempt, 8000),
   });
 }
@@ -464,7 +354,7 @@ export function useMangaDetail(
 ) {
   const mangadexMangaId = slug ? normalizeMangaDexId(slug) : null;
   const detailQuerySlug = mangadexMangaId || slug;
-  const source = mangadexMangaId ? "mangadex" : "otruyen";
+  const source = mangadexMangaId ? "mangadex" : "truyenqq";
   const maxMangaDexChapters = options.maxMangaDexChapters ?? "all";
   const mangaDexLanguage = String(options.mangaDexLanguage || "vi").trim().toLowerCase() || "vi";
   const mangaDexScanlationGroupId = String(options.mangaDexScanlationGroupId || "").trim();
@@ -475,11 +365,11 @@ export function useMangaDetail(
       "detail",
       detailQuerySlug,
       source,
-      mangadexMangaId ? maxMangaDexChapters : "otruyen",
-      mangadexMangaId ? mangaDexLanguage : "otruyen",
-      mangadexMangaId ? mangaDexScanlationGroupId || "all-groups" : "otruyen",
+      mangadexMangaId ? maxMangaDexChapters : "truyenqq",
+      mangadexMangaId ? mangaDexLanguage : "truyenqq",
+      mangadexMangaId ? mangaDexScanlationGroupId || "all-groups" : "truyenqq",
     ],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!slug) throw new Error("No slug");
       if (mangadexMangaId) {
         const mangaId = mangadexMangaId;
@@ -487,8 +377,11 @@ export function useMangaDetail(
           mangaId,
           maxMangaDexChapters,
           mangaDexLanguage,
-          { scanlationGroupId: mangaDexScanlationGroupId || undefined },
+          { scanlationGroupId: mangaDexScanlationGroupId || undefined, signal },
         );
+        if (data?.meta?.chapters_complete === false) {
+          throw new Error("Danh sách chương chưa tải đủ, vui lòng thử lại.");
+        }
         const item = data?.manga || {};
         const chapters = (item.chapters || [])
           // Skip chapters with no valid UUID id — fake fallback ids break the reader
@@ -582,14 +475,15 @@ export function useMangaDetail(
           })(),
         } as Manga;
       }
-      const data = await mangaApi.getDetail(slug);
+      const data = await mangaApi.getDetail(slug, signal);
       return adaptMangaDetail(data);
     },
     enabled,
     staleTime: mangadexMangaId ? 10 * 60 * 1000 : 2 * 60 * 1000,
     gcTime: mangadexMangaId ? 10 * 60 * 1000 : 8 * 60 * 1000,
-    refetchOnMount: mangadexMangaId ? false : "always",
-    placeholderData: (previousData) => previousData,
+    refetchOnMount: true,
+    placeholderData: (previousData) => previousData &&
+      [previousData.id, previousData.slug].includes(detailQuerySlug) ? previousData : undefined,
     retry: mangadexMangaId ? 1 : 2,
     retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
   });
@@ -618,59 +512,12 @@ export function useChapter(chapterId: string | undefined) {
       }
 
       if (mangadexChapterId) {
-        try {
-          const localImageUrls = await getLocalMangaDexChapterPages(mangadexChapterId);
-          if (localImageUrls.length > 0) {
-            return {
-              pages: localImageUrls,
-              raw: { data: { item: {} } },
-            };
-          }
-        } catch {
-          // Browser-side MangaDex API can be blocked on some networks.
-          // Fall back to the backend At-Home lookup below.
-        }
-
-        const attempts: Array<{ mode: "saver"; refresh: boolean }> = [
-          { mode: "saver", refresh: false },
-          { mode: "saver", refresh: true },
-        ];
-        let lastError: unknown = null;
-
-        for (const attempt of attempts) {
-          try {
-            const data = await mangaApi.getMangaDexChapterPages(
-              mangadexChapterId,
-              attempt.mode,
-              attempt.refresh,
-              8_000,
-            );
-            const imageUrls = Array.isArray(data?.image_urls)
-              ? (data.image_urls as string[]).filter(Boolean)
-              : [];
-            if (imageUrls.length > 0) {
-              return {
-                pages: imageUrls,
-                raw: { data: { item: {} } },
-              };
-            }
-          } catch (error) {
-            lastError = error;
-          }
-        }
-
-        if (lastError instanceof Error) {
-          throw lastError;
-        }
-        if (lastError) {
-          throw new Error("Không tải được chương MangaDex");
-        }
-
         return {
-          pages: [],
+          pages: await loadMangaDexChapterPages(mangadexChapterId),
           raw: { data: { item: {} } },
         };
       }
+
       const data = await mangaApi.getChapter(resolvedChapterId);
       return {
         pages: adaptChapterPages(data),
@@ -685,11 +532,11 @@ export function useChapter(chapterId: string | undefined) {
   });
 }
 
-export function useSearch(keyword: string, page = 1) {
+export function useSearch(keyword: string, page = 1, enabled = true) {
   const normalizedKeyword = keyword.trim();
   return useQuery({
     queryKey: ["manga", "search", normalizedKeyword, page],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!normalizedKeyword)
         return {
           items: [] as Manga[],
@@ -699,11 +546,12 @@ export function useSearch(keyword: string, page = 1) {
         };
       const data = await mangaApi.search(normalizedKeyword, page, {
         skipAuth: true,
-        timeoutMs: 10_000,
+        timeoutMs: 15_000,
+        signal,
       });
       return adaptListData(data);
     },
-    enabled: normalizedKeyword.length > 0,
+    enabled: enabled && normalizedKeyword.length > 0,
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
     placeholderData: (previousData) => previousData,
@@ -753,7 +601,7 @@ export function useBookmarks() {
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
   const user = useUserStore((s) => s.user);
   const isRestoringSession = useUserStore((s) => s.isRestoringSession);
-  return useQuery({
+  const query = useQuery({
     queryKey: ["bookmarks"],
     queryFn: async () => {
       const data = await bookmarkApi.getAll();
@@ -770,6 +618,8 @@ export function useBookmarks() {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
+  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true });
+  return { ...query, data };
 }
 
 export function useIsBookmarked(slug: string, enabled = true) {
@@ -862,7 +712,7 @@ export function useFollows() {
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
   const user = useUserStore((s) => s.user);
   const isRestoringSession = useUserStore((s) => s.isRestoringSession);
-  return useQuery({
+  const query = useQuery({
     queryKey: ["follows"],
     queryFn: async () => {
       const data = await followApi.getAll();
@@ -879,6 +729,8 @@ export function useFollows() {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
+  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true });
+  return { ...query, data };
 }
 
 export function useIsFollowing(slug: string, enabled = true) {
@@ -979,60 +831,16 @@ export function useHistory(options: UseHistoryOptions = {}) {
   const enabled = options.enabled ?? (isLoggedIn && !!user && !isRestoringSession);
   const enrichThumbs = options.enrichThumbs ?? true;
 
-  return useQuery({
+  const query = useQuery({
     queryKey: ["history", enrichThumbs ? "enriched" : "raw"],
     queryFn: async () => {
       const data = await historyApi.getAll();
       const historyItems = (data.history || []) as Array<any>;
 
-      if (!enrichThumbs) {
-        return historyItems.map((item: any) => {
-          const resolvedThumb = resolveThumbSources(item?.manga_slug, item?.manga_thumb);
-          return {
-            ...item,
-            manga_thumb: resolvedThumb.primary,
-            manga_thumb_fallback: resolvedThumb.fallback || "",
-          };
-        });
-      }
-
-      const missingMangaDexIds: string[] = [];
-      for (const item of historyItems) {
-        const mangaSlug = String(item?.manga_slug || "");
-        const mangaThumb = String(item?.manga_thumb || "").trim();
-        const mangaDexId = normalizeMangaDexId(mangaSlug);
-        if (!mangaDexId || mangaThumb) continue;
-        if (!missingMangaDexIds.includes(mangaDexId)) {
-          missingMangaDexIds.push(mangaDexId);
-        }
-      }
-
-      const mangadexCoverById: Record<string, string> = {};
-      if (missingMangaDexIds.length > 0) {
-        try {
-          const viCatalog = await mangaApi.getMangaDexViCatalog(200);
-          const mangas = Array.isArray(viCatalog?.mangas) ? viCatalog.mangas : [];
-          for (const manga of mangas) {
-            const id = String(manga?.id || "").trim().toLowerCase();
-            const cover = String(manga?.cover_url || "").trim();
-            if (id && cover) {
-              mangadexCoverById[id] = cover;
-            }
-          }
-        } catch {
-          // Ignore catalog failures and keep graceful thumbnail fallbacks.
-        }
-      }
-
       return historyItems.map((item: any) => {
         const mangaSlug = String(item?.manga_slug || "");
-        const mangaDexId = normalizeMangaDexId(mangaSlug)?.toLowerCase();
         const preferredThumb = String(item?.manga_thumb || "").trim();
-        const backfilledThumb =
-          !preferredThumb && mangaDexId
-            ? mangadexCoverById[mangaDexId] || ""
-            : preferredThumb;
-        const resolvedThumb = resolveThumbSources(mangaSlug, backfilledThumb);
+        const resolvedThumb = resolveThumbSources(mangaSlug, preferredThumb);
         return {
           ...item,
           manga_thumb: resolvedThumb.primary,
@@ -1044,6 +852,8 @@ export function useHistory(options: UseHistoryOptions = {}) {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
+  const data = useCanonicalMangaRecords(query.data, { enabled, fillMissingCovers: enrichThumbs });
+  return { ...query, data };
 }
 
 export function useSaveHistory() {

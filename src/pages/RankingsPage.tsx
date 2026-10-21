@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useMangaDexViCatalog, useMangaList, useTrending } from "@/hooks/useApi";
+import { useCanonicalMangaRecords } from "@/hooks/useCardMetadata";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useUserStore } from "@/store/userStore";
 import MangaGrid from "@/components/manga/MangaGrid";
@@ -327,7 +328,10 @@ function getTrendingImageSources(item: { slug?: string; thumb?: string }) {
           fallbackSrc: DEFAULT_TRENDING_THUMB_FALLBACK,
         };
       }
-      return { src: rawThumb, fallbackSrc: DEFAULT_TRENDING_THUMB_FALLBACK };
+      return {
+        src: rawThumb,
+        fallbackSrc: thumbFallbackUrl(rawThumb, slug) || DEFAULT_TRENDING_THUMB_FALLBACK,
+      };
     }
     return {
       src: thumbUrl(rawThumb, slug),
@@ -989,8 +993,8 @@ const RankingsPage = () => {
       ordered.push({
         id: slug,
         title: pickDisplayTitle(slug) || "Chưa có tiêu đề",
-        author: extractMangaDexId(slug) ? "MangaDex" : "OTruyen",
-        artist: extractMangaDexId(slug) ? "MangaDex" : "OTruyen",
+        author: extractMangaDexId(slug) ? "MangaDex" : "TruyenQQ",
+        artist: extractMangaDexId(slug) ? "MangaDex" : "TruyenQQ",
         description: "",
         cover: DEFAULT_CARD_COVER_FALLBACK,
         coverProxy: DEFAULT_CARD_COVER_FALLBACK,
@@ -1112,8 +1116,8 @@ const RankingsPage = () => {
       overlays.push({
         id: slug,
         title: safeTitle || "Chưa có tiêu đề",
-        author: isMdx ? "MangaDex" : "OTruyen",
-        artist: isMdx ? "MangaDex" : "OTruyen",
+        author: isMdx ? "MangaDex" : "TruyenQQ",
+        artist: isMdx ? "MangaDex" : "TruyenQQ",
         description: "",
         cover,
         coverProxy,
@@ -1565,7 +1569,7 @@ const RankingsPage = () => {
   const canUseFallbackTrending =
     !hasTrendingRows && !trendingLoading && (trendingError || fallbackTrendingItems.length > 0);
 
-  const trendingItems = useMemo(() => {
+  const rawTrendingItems = useMemo(() => {
     const sourceItems = hasTrendingRows
       ? (trendingData as any[])
       : canUseFallbackTrending
@@ -1583,6 +1587,7 @@ const RankingsPage = () => {
       })
       .slice(0, RANKINGS_TRENDING_LIMIT);
   }, [hasTrendingRows, trendingData, canUseFallbackTrending, fallbackTrendingItems]);
+  const trendingItems = useCanonicalMangaRecords(rawTrendingItems, { enabled: activeTab === 'trending' }) || rawTrendingItems;
 
   const isLoading =
     (activeTab === "trending" &&
@@ -1664,7 +1669,7 @@ const RankingsPage = () => {
                         <OptimizedImage
                           src={src}
                           fallbackSrc={fallbackSrc}
-                          fallbackDelayMs={2500}
+                          fallbackDelayMs={10_000}
                           alt={displayTitle}
                           className="w-10 h-14 object-cover rounded-lg shrink-0"
                           priority={idx < 10}

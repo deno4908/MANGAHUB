@@ -1,6 +1,7 @@
 """Shared maintenance-mode helpers for Flask and FastAPI services."""
 
 import base64
+import asyncio
 import json
 import time
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ CACHE_TTL_SECONDS = 3.0
 
 _supabase_admin = None
 _state_cache: tuple[float, dict[str, Any]] | None = None
+_state_reads = {}
 
 
 def _clean_text(value: Any, fallback: str, limit: int) -> str:
@@ -110,10 +112,39 @@ def get_maintenance_state(*, force: bool = False) -> dict[str, Any]:
         )
         state = _normalize_state(getattr(result, "data", None))
     except Exception:
-        state = _default_state()
+        state = dict(_state_cache[1]) if _state_cache else _default_state()
 
-    _state_cache = (now + CACHE_TTL_SECONDS, state)
+    _state_cache = (time.monotonic() + CACHE_TTL_SECONDS, state)
     return dict(state)
+
+
+async def get_maintenance_state_async() -> dict[str, Any]:
+    """A slow settings/DNS lookup must not queue every catalog and image request."""
+    global _state_cache
+    now = time.monotonic()
+    if _state_cache and _state_cache[0] > now:
+        return dict(_state_cache[1])
+    loop = asyncio.get_running_loop()
+    task = _state_reads.get(loop)
+    if task is None or task.done():
+        task = loop.create_task(asyncio.to_thread(get_maintenance_state))
+        _state_reads[loop] = task
+        def finished(done):
+            if _state_reads.get(loop) is done:
+                _state_reads.pop(loop, None)
+            if not done.cancelled():
+                done.exception()
+        task.add_done_callback(finished)
+    if _state_cache:
+        return dict(_state_cache[1])
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=1)
+    except asyncio.TimeoutError:
+        # Match the existing unavailable-settings fallback; preserve an enabled
+        # last-known state rather than disabling maintenance on network errors.
+        state = dict(_state_cache[1]) if _state_cache else _default_state()
+        _state_cache = (time.monotonic() + CACHE_TTL_SECONDS, state)
+        return state
 
 
 def set_maintenance_state(

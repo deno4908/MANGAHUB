@@ -5,7 +5,7 @@ Runs periodically via FastAPI lifespan.
 import asyncio
 import logging
 from datetime import datetime, timezone
-from fastapi_app.services import otruyen_service
+from fastapi_app.services import truyenqq_service
 from fastapi_app.dependencies import get_supabase_admin
 
 logger = logging.getLogger(__name__)
@@ -16,7 +16,7 @@ CHECK_INTERVAL = 600  # Check every 10 minutes
 async def _check_new_chapters():
     """
     For each unique manga_slug in follows table:
-    1. Fetch latest chapter info from OTruyen API
+    1. Fetch latest chapter info from TruyenQQ API
     2. Compare with last known chapter stored in manga_chapter_cache
     3. If new chapter found, create notifications for all followers
     """
@@ -54,8 +54,8 @@ async def _check_new_chapters():
 
 async def _check_single_manga(db, manga_slug: str, manga_title: str):
     """Check a single manga for new chapters."""
-    # Get manga detail from OTruyen
-    detail = await otruyen_service.get_manga_detail(manga_slug)
+    # Get manga detail from TruyenQQ
+    detail = await truyenqq_service.get_manga_detail(manga_slug)
     if not detail or detail.get("status") == "error":
         return
 
@@ -85,7 +85,7 @@ async def _check_single_manga(db, manga_slug: str, manga_title: str):
 
     # Check if we already notified about this chapter
     # Use a simple cache key to track last known chapter per manga
-    cache_key = f"last_chapter:{manga_slug}"
+    cache_key = f"last_chapter:truyenqq:{manga_slug}"
     from fastapi_app.services.cache_service import cache
     last_known = cache.get(cache_key)
 

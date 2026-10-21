@@ -2,7 +2,7 @@ export interface Manga {
   id: string;
   /** Source-native human slug. OTruyen detail APIs still resolve by slug. */
   slug?: string;
-  source?: 'otruyen' | 'mangadex' | 'uploaded';
+  source?: 'truyenqq' | 'mangadex' | 'uploaded';
   title: string;
   altTitle?: string;
   author: string;
@@ -21,10 +21,13 @@ export interface Manga {
   follows: number;
   views: number;
   localViewCount?: number;
+  local_view_count?: number;
+  view_count?: number;
   popularityScore?: number;
   mangadexPopularityScore?: number;
   year: number;
   chapters: Chapter[];
+  chapterAvailability?: 'empty' | 'unavailable';
   lastUpdated: string;
   availableTranslatedLanguages?: string[];
   contentRating?: string;
@@ -36,7 +39,7 @@ export interface Manga {
   externalUrl?: string;
 }
 
-export type ChapterTranslationSource = 'mangadex' | 'local' | 'otruyen';
+export type ChapterTranslationSource = 'mangadex' | 'local' | 'truyenqq';
 
 export interface Chapter {
   id: string;

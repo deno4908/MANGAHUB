@@ -140,7 +140,7 @@ type ChapterGroupOption = {
   id: string;
   name: string;
   count: number;
-  source: Exclude<ChapterTranslationSource, 'otruyen'>;
+  source: Exclude<ChapterTranslationSource, 'truyenqq'>;
   sourceLabel: string;
 };
 
@@ -175,7 +175,7 @@ function getChapterTranslationSource(chapter: Manga['chapters'][number]): Chapte
   if (chapter.translatedLanguage || (chapter.scanlationGroups || []).length > 0) {
     return TRANSLATION_SOURCE_MANGADEX_VALUE;
   }
-  return 'otruyen';
+  return 'truyenqq';
 }
 
 function getChapterTranslationSourceLabel(chapter: Manga['chapters'][number]): string {
@@ -203,7 +203,7 @@ function getChapterGroupOptions(chapter: Manga['chapters'][number]): ChapterGrou
   if (source !== TRANSLATION_SOURCE_MANGADEX_VALUE) return [];
 
   const groups = (chapter.scanlationGroups || [])
-    .map((group) => {
+    .map((group): ChapterGroupOption | null => {
       const key = getMangaDexGroupKey(group);
       if (!key) return null;
       return {
@@ -289,7 +289,9 @@ const MangaDetail = () => {
     const expectedId = String(normalizedSlug || '').trim().toLowerCase();
     if (!expectedId) return null;
     if (previewPath !== mangaRoute.canonicalPath && previewSlug !== expectedId) return null;
-    return preview;
+    // Catalog cards only contain a latest-chapter hint, sometimes a temporary ID.
+    // Reading must wait for the source's actual chapter list.
+    return { ...preview, chapters: [] };
   }, [location.state, mangaRoute.canonicalPath, normalizedSlug]);
   // Detect MangaDex manga by UUID format
   const isMangaDex = mangaRoute.source === 'mangadex';
@@ -309,17 +311,9 @@ const MangaDetail = () => {
     maxMangaDexChapters: 'all',
     mangaDexLanguage: activeMangaDexLanguage,
   });
-  const languageCatalogQuery = useMangaDetail(normalizedSlug, {
-    enabled: isMangaDex && activeMangaDexLanguage !== 'all',
-    maxMangaDexChapters: MANGADEX_FAST_CHAPTER_LIMIT,
-    mangaDexLanguage: 'all',
-  });
   const fetchedManga = isMangaDex
     ? (fullDetailQuery.data || fastDetailQuery.data)
     : fastDetailQuery.data;
-  const languageCatalogManga = activeMangaDexLanguage === 'all'
-    ? fetchedManga
-    : languageCatalogQuery.data;
   const manga = fetchedManga || previewManga;
   const isLoading = !manga && fastDetailQuery.isLoading;
   const error = fastDetailQuery.error && !fetchedManga ? fastDetailQuery.error : null;
@@ -591,7 +585,7 @@ const MangaDetail = () => {
       if (code) seen.add(code);
     };
     add(activeMangaDexLanguage);
-    for (const sourceManga of [manga, languageCatalogManga]) {
+    for (const sourceManga of [manga]) {
       (sourceManga?.availableTranslatedLanguages || []).forEach(add);
       (sourceManga?.chapters || []).forEach((chapter) => add(chapter.translatedLanguage));
     }
@@ -600,7 +594,7 @@ const MangaDetail = () => {
       if (b === activeMangaDexLanguage) return 1;
       return formatMangaDexLanguageLabel(a).localeCompare(formatMangaDexLanguageLabel(b));
     });
-  }, [activeMangaDexLanguage, isMangaDex, languageCatalogManga, manga]);
+  }, [activeMangaDexLanguage, isMangaDex, manga]);
 
   const translationSourceOptions = useMemo(() => {
     if (!isMangaDex) return [];
@@ -671,8 +665,8 @@ const MangaDetail = () => {
     ));
   }, [isMangaDex, mangaDexGroupId, sourceFilteredChapters]);
   const readerChapterSourceFilter = useMemo(
-    () => toReaderChapterSourceFilter(translationSource, mangaDexGroupId),
-    [mangaDexGroupId, translationSource]
+    () => isMangaDex ? toReaderChapterSourceFilter(translationSource, mangaDexGroupId) : '__all_sources__',
+    [isMangaDex, mangaDexGroupId, translationSource]
   );
 
   useEffect(() => {
@@ -920,6 +914,11 @@ const MangaDetail = () => {
             </div>
 
             <div className="flex flex-wrap gap-3 mt-6">
+              {!fetchedManga && fastDetailQuery.isFetching && (
+                <button disabled className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary/60 text-primary-foreground text-sm font-bold">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Đang tải chương
+                </button>
+              )}
               {startChapter && (
                 <Link
                   to={`/chapter/${startChapter.id}`}
@@ -982,7 +981,7 @@ const MangaDetail = () => {
                   </div>
                 </div>
 
-                {(fastDetailQuery.isFetching || fullDetailQuery.isFetching || languageCatalogQuery.isFetching) && (
+                {(fastDetailQuery.isFetching || fullDetailQuery.isFetching) && (
                   <span className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border/70 bg-background px-2.5 text-xs font-semibold text-muted-foreground">
                     <Loader2 className="h-3.5 w-3.5 animate-spin" /> Đang tải
                   </span>

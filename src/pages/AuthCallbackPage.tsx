@@ -104,7 +104,7 @@ const VerifyOtpPage = () => {
       window.history.replaceState(null, "", window.location.pathname);
 
       if (type === "recovery") {
-        if (refreshToken) setTokens(accessToken, refreshToken);
+        setTokens(accessToken);
         setVerified(true);
         toast({ title: "Xác minh thành công!", description: "Đặt mật khẩu mới bên dưới." });
         setLoading(false);
@@ -166,12 +166,8 @@ const VerifyOtpPage = () => {
   };
 
   const handleResetPassword = async () => {
-    if (!newPassword || newPassword.length < 8) {
-      toast({ variant: "destructive", title: "Mật khẩu quá ngắn", description: "Mật khẩu phải ít nhất 8 ký tự." });
-      return;
-    }
-    if (!/[A-Z]/.test(newPassword) || !/[a-z]/.test(newPassword) || !/\d/.test(newPassword)) {
-      toast({ variant: "destructive", title: "Mật khẩu chưa đủ mạnh", description: "Mật khẩu cần có chữ hoa, chữ thường và số." });
+    if (Array.from(newPassword).length < 15 || Array.from(newPassword).length > 128) {
+      toast({ variant: "destructive", title: "Mật khẩu chưa đủ mạnh", description: "Mật khẩu mới phải từ 15 đến 128 ký tự. Có thể dùng một cụm từ dài." });
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -275,7 +271,7 @@ const VerifyOtpPage = () => {
               <div className="space-y-3">
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-foreground">Mật khẩu mới</label>
-                  <Input type="password" placeholder="Ít nhất 8 ký tự" value={newPassword} onChange={e => setNewPassword(e.target.value)} />
+                  <Input type="password" placeholder="Từ 15 đến 128 ký tự" value={newPassword} onChange={e => setNewPassword(e.target.value)} />
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-foreground">Xác nhận mật khẩu</label>

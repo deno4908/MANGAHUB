@@ -23,7 +23,7 @@ from fastapi_app.dependencies import (
     require_role,
 )
 from fastapi_app.models.schemas import BanUser, ChangeRole, NotifyRequest, VipUpdate
-from fastapi_app.services import mangadex_service, otruyen_service
+from fastapi_app.services import mangadex_service, truyenqq_service
 from fastapi_app.utils.upload_security import IMAGE_EXT_BY_CONTENT_TYPE, read_upload_limited
 from maintenance import get_maintenance_state, set_maintenance_state
 from vip_access import revoke_expired_vips
@@ -981,24 +981,17 @@ async def delete_site_announcement(
 async def _refresh_external_counts() -> None:
     """Background task — fetches external manga counts and caches for 30 min.
     Never blocks the stats endpoint."""
-    if _cache_get("admin_stats_ext") is not None:
+    if _cache_get("admin_stats_ext:truyenqq") is not None:
         return  # still fresh
     try:
         otruyen_res, mdx_res = await asyncio.gather(
-            otruyen_service.get_list("truyen-moi", 1),
+            truyenqq_service.get_total_count(),
             mangadex_service.get_total_vi_manga_count(),
             return_exceptions=True,
         )
-        total_ot = 0
-        if isinstance(otruyen_res, dict):
-            total_ot = int(
-                (otruyen_res.get("data", {}).get("params", {}).get("pagination", {}) or {}).get(
-                    "totalItems"
-                )
-                or 0
-            )
+        total_ot = int(otruyen_res) if isinstance(otruyen_res, int) else 0
         total_mdx = int(mdx_res) if isinstance(mdx_res, int) else 0
-        _cache_set("admin_stats_ext", (total_ot, total_mdx), 30 * 60)  # 30 min
+        _cache_set("admin_stats_ext:truyenqq", (total_ot, total_mdx), 30 * 60)  # 30 min
     except Exception:
         pass
 
@@ -1011,7 +1004,7 @@ async def admin_stats(admin=Depends(require_role("moderator", "admin")), db=Depe
     asyncio.create_task(_refresh_external_counts())
 
     # External counts: latest available value (background-refreshed separately)
-    ext_cached: tuple[int, int] = _cache_get("admin_stats_ext") or (0, 0)
+    ext_cached: tuple[int, int] = _cache_get("admin_stats_ext:truyenqq") or (0, 0)
     total_ot, total_mdx = ext_cached
 
     cached = _cache_get("admin_stats")
@@ -1261,7 +1254,7 @@ async def _compute_admin_analytics_and_cache(db: Any) -> dict[str, Any]:
     except Exception:
         pass
 
-    # source_map is empty (OTruyen API calls removed for performance)
+    # source_map is empty (TruyenQQ API calls removed for performance)
     # Titles resolved entirely from reading_history (title_map) below
     source_map: dict[str, str] = {}
 
@@ -1388,7 +1381,7 @@ async def _compute_admin_analytics_and_cache(db: Any) -> dict[str, Any]:
                 async def _resolve_otruyen_title(slug_value: str) -> tuple[str, str]:
                     try:
                         detail = await asyncio.wait_for(
-                            otruyen_service.get_manga_detail(slug_value),
+                            truyenqq_service.get_manga_detail(slug_value),
                             timeout=ADMIN_ANALYTICS_OTRUYEN_TITLE_TIMEOUT_SECONDS,
                         )
                         item = (detail or {}).get("data", {}).get("item", {}) if isinstance(detail, dict) else {}
@@ -1563,7 +1556,7 @@ async def admin_manga_list(
     page: int = Query(1, ge=1),
     limit: int = Query(30, ge=1, le=100),
     search: str = Query(None),
-    source: str = Query("db"),       # "db" | "otruyen" | "mangadex" | "uploaded"
+    source: str = Query("db"),       # "db" | "truyenqq" | "mangadex" | "uploaded"
     filter_hidden: str = Query(None), # "hidden" | "visible" | None = all
     admin=Depends(require_role("moderator", "admin")),
     db=Depends(get_supabase),
@@ -1571,11 +1564,11 @@ async def admin_manga_list(
     """
     All manga from all sources:
     - source=db       : manga_views (interacted) + manga_uploads
-    - source=otruyen  : browse/search OTruyen full catalog via API
+    - source=truyenqq : browse/search TruyenQQ catalog via bundled scraper
     - source=mangadex : search MangaDex Vi catalog
     - source=uploaded : only manga_uploads table
     """
-    from fastapi_app.services import otruyen_service, mangadex_service
+    from fastapi_app.services import truyenqq_service, mangadex_service
 
     def _coerce_views(*values: Any) -> int:
         for value in values:
@@ -1817,19 +1810,22 @@ async def admin_manga_list(
 
     raw_items: list[dict] = []
     total = 0
+    source_total_pages = None
 
-    # ── OTruyen ───────────────────────────────────────────────
-    if source == "otruyen":
+    # ── TruyenQQ ──────────────────────────────────────────────
+    if source == "truyenqq":
         if search:
-            resp = await otruyen_service.search_manga(search, page)
+            resp = await truyenqq_service.search_manga(search, page)
         else:
-            resp = await otruyen_service.get_list("truyen-moi", page)
+            resp = await truyenqq_service.get_list("truyen-moi", page)
 
         if isinstance(resp, dict) and resp.get("status") != "error":
             data = resp.get("data", {})
             items = data.get("items") or []
             pagination = (data.get("params") or {}).get("pagination") or {}
-            total = int(pagination.get("totalItems") or len(items))
+            total = pagination.get("totalItems")
+            source_total_pages = max(1, int(pagination.get("totalPages") or 1))
+            limit = int(pagination.get("totalItemsPerPage") or limit)
             for it in items:
                 slug = str(it.get("slug") or "")
                 if not slug:
@@ -1837,9 +1833,9 @@ async def admin_manga_list(
                 raw_items.append({
                     "slug": slug,
                     "title": str(it.get("name") or it.get("title") or slug),
-                    "cover_url": otruyen_service.get_image_url(str(it.get("thumb_url") or "")),
+                    "cover_url": truyenqq_service.get_image_url(str(it.get("thumb_url") or "")),
                     "views": _coerce_views(it.get("views"), it.get("view_count"), it.get("view")),
-                    "source": "otruyen",
+                    "source": "truyenqq",
                     "upload_status": None,
                 })
 
@@ -2035,7 +2031,7 @@ async def admin_manga_list(
                     return slug_value, cached_title.strip()
                 try:
                     detail = await asyncio.wait_for(
-                        otruyen_service.get_manga_detail(slug_value),
+                        truyenqq_service.get_manga_detail(slug_value),
                         timeout=5.0,
                     )
                     item = (detail or {}).get("data", {}).get("item", {}) if isinstance(detail, dict) else {}
@@ -2084,7 +2080,7 @@ async def admin_manga_list(
 
     # External sources often do not provide reliable views.
     # Merge in local tracked views to avoid showing all-zero rows.
-    if source in {"otruyen", "mangadex"} and raw_items:
+    if source in {"truyenqq", "mangadex"} and raw_items:
         source_slugs = [str(item.get("slug") or "") for item in raw_items if str(item.get("slug") or "")]
         if source_slugs:
             try:
@@ -2206,7 +2202,9 @@ async def admin_manga_list(
             "admin_notes": override.get("admin_notes"),
         })
 
-    return {"manga": result_rows, "total": total, "page": page, "limit": limit}
+    return {"manga": result_rows, "total": total, "page": page, "limit": limit,
+            "total_pages": source_total_pages if source_total_pages is not None
+            else max(1, ((total or 0) + limit - 1) // limit)}
 
 
 @router.post("/manga/{slug}/hide")

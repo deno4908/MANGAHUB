@@ -1,3 +1,5 @@
+import { mangaApi } from "@/lib/api";
+
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const MANGADEX_EDGE_BASE = String(
   import.meta.env.VITE_MANGADEX_EDGE_URL ||
@@ -6,6 +8,46 @@ const MANGADEX_EDGE_BASE = String(
       : ""),
 ).replace(/\/+$/, "");
 let edgeUnavailableUntil = 0;
+const pendingChapters = new Map<string, Promise<string[]>>();
+
+/** Give the nearby edge a short head start; a stalled edge must not delay reading. */
+export function loadMangaDexChapterPages(chapterId: string): Promise<string[]> {
+  const existing = pendingChapters.get(chapterId);
+  if (existing) return existing;
+  const task = new Promise<string[]>((resolve, reject) => {
+    let settled = false;
+    let failed = 0;
+    let backendStarted = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const succeed = (pages: string[]) => {
+      if (!pages.length) throw new Error("Chương chưa có trang ảnh");
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(pages);
+    };
+    const fail = (error: unknown) => {
+      failed += 1;
+      if (failed === 2 && !settled) {
+        settled = true;
+        reject(error);
+      }
+    };
+    const startBackend = () => {
+      if (backendStarted || settled) return;
+      backendStarted = true;
+      mangaApi.getMangaDexChapterPages(chapterId, "saver", false, 8_000)
+        .then((data) => succeed(Array.isArray(data?.image_urls) ? data.image_urls.filter(Boolean) : []))
+        .catch(fail);
+    };
+    timer = setTimeout(startBackend, 150);
+    getLocalMangaDexChapterPages(chapterId)
+      .then(succeed)
+      .catch((error) => { fail(error); startBackend(); });
+  }).finally(() => { pendingChapters.delete(chapterId); });
+  pendingChapters.set(chapterId, task);
+  return task;
+}
 
 type MangaDexAtHomePayload = {
   baseUrl?: string;

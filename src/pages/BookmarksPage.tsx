@@ -6,29 +6,28 @@ import OptimizedImage from '@/components/ui/OptimizedImage';
 import { thumbUrl, thumbFallbackUrl } from '@/lib/adapters';
 import { getMangaDetailPath } from '@/lib/mangaLinks';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-
-function resolveCoverSources(slug: string, thumb?: string): { src: string; fallback?: string } {
+function resolveCoverSources(slug: string, thumb?: string, storedFallback?: string): { src: string; fallback?: string } {
   const raw = String(thumb || '').trim();
   const safeSlug = String(slug || '').trim();
+  const preferredFallback = String(storedFallback || '').trim();
   if (raw && /^https?:\/\//i.test(raw)) {
-    return { src: raw, fallback: thumbFallbackUrl(raw, safeSlug) || undefined };
+    return { src: raw, fallback: thumbFallbackUrl(raw, safeSlug) || preferredFallback || undefined };
   }
   if (raw) {
     const resolved = thumbUrl(raw, safeSlug);
     if (/^https?:\/\/img\.otruyenapi\.com/i.test(resolved)) {
       return {
-        src: `${API_BASE}/api/images/img?url=${encodeURIComponent(resolved)}`,
-        fallback: thumbFallbackUrl(raw, safeSlug) || resolved,
+        src: resolved,
+        fallback: thumbFallbackUrl(raw, safeSlug) || preferredFallback || undefined,
       };
     }
-    return { src: resolved, fallback: thumbFallbackUrl(raw, safeSlug) || undefined };
+    return { src: resolved, fallback: thumbFallbackUrl(raw, safeSlug) || preferredFallback || undefined };
   }
   if (safeSlug) {
     const cdnUrl = thumbUrl('', safeSlug);
     return {
-      src: `${API_BASE}/api/images/img?url=${encodeURIComponent(cdnUrl)}`,
-      fallback: cdnUrl,
+      src: cdnUrl,
+      fallback: thumbFallbackUrl('', safeSlug) || preferredFallback || undefined,
     };
   }
   return { src: '' };
@@ -64,7 +63,7 @@ const BookmarksPage = () => {
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 md:gap-4">
           {bookmarks.map((bm: any, i: number) => {
-            const cover = resolveCoverSources(bm.manga_slug, bm.manga_thumb);
+            const cover = resolveCoverSources(bm.manga_slug, bm.manga_thumb, bm.manga_thumb_fallback);
             return (
             <motion.div
               key={bm.manga_slug}

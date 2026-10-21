@@ -31,7 +31,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
 
     const preloadObserver = new IntersectionObserver(
       ([entry]) => { if (entry.isIntersecting) setInView(true); },
-      { rootMargin: '6000px 0px', threshold: 0 }
+      { rootMargin: '1000px 0px', threshold: 0 }
     );
 
     const visibleObserver = new IntersectionObserver(
@@ -62,7 +62,9 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
 
   const handleRetry = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
+    setLoaded(false);
     setError(false);
+    setUseFallbackSource(false);
     setRetryCount(r => r + 1);
   }, []);
 
@@ -74,6 +76,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
 
   const fallbackSource = fallbackSrc || getMangaDexImageFallback(src);
   const hasExplicitFallback = Boolean(fallbackSrc);
+  const isTruyenQQProxy = /\/api\/manga\/truyenqq\/image\//.test(src);
   const activeSrc = useFallbackSource && fallbackSource ? fallbackSource : src;
   const imgSrc = retryCount > 0 ? `${activeSrc}${activeSrc.includes('?') ? '&' : '?'}retry=${retryCount}` : activeSrc;
 
@@ -90,17 +93,21 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
         return;
       }
       setError(true);
-    }, useFallbackSource
+    // The QQ proxy may try another CDN before responding. Give that request
+    // time to finish instead of aborting it with a new URL every five seconds.
+    }, isTruyenQQProxy
+      ? 25_000
+      : useFallbackSource
       ? 18_000
       : hasExplicitFallback
-        ? (visible || priority ? 2_500 : 4_500)
+        ? (visible ? 8_000 : priority ? 10_000 : 12_000)
         : visible
           ? 5_000
           : priority
             ? 6_500
             : 8_000);
     return () => window.clearTimeout(timeout);
-  }, [inView, visible, loaded, error, useFallbackSource, fallbackSource, retryCount, priority, hasExplicitFallback]);
+  }, [inView, visible, loaded, error, useFallbackSource, fallbackSource, retryCount, priority, hasExplicitFallback, isTruyenQQProxy]);
 
   const placeholderStyle: React.CSSProperties = naturalSize
     ? { aspectRatio: `${naturalSize.w}/${naturalSize.h}` }

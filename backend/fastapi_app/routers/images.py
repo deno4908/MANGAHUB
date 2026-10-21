@@ -15,6 +15,7 @@ import threading
 import re
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from typing import Any
@@ -56,6 +57,7 @@ _image_cache_prune_running = False
 _last_image_cache_prune_at = 0.0
 _cache_fetch_locks: dict[str, asyncio.Lock] = {}
 _cache_fetch_locks_guard = threading.Lock()
+_checked_cache_files = OrderedDict()
 
 REQUEST_TIMEOUT_SECONDS = 25.0
 REQUEST_CONNECT_TIMEOUT_SECONDS = 10.0
@@ -101,7 +103,7 @@ MANGADEX_IMAGE_UPSTREAM_CONCURRENCY = _env_int(
 MANGADEX_IMAGE_THROTTLE_BACKOFF_SECONDS = _env_float(
     "MANGADEX_IMAGE_THROTTLE_BACKOFF_SECONDS", 1.0, minimum=0.1
 )
-MAX_CACHE_SIZE = _env_int("IMAGE_CACHE_MAX_MB", 350, minimum=64) * 1024 * 1024
+MAX_CACHE_SIZE = _env_int("IMAGE_CACHE_MAX_MB", 128, minimum=64) * 1024 * 1024
 IMAGE_CACHE_TARGET_SIZE = int(MAX_CACHE_SIZE * 0.85)
 IMAGE_CACHE_PRUNE_COOLDOWN_SECONDS = _env_float(
     "IMAGE_CACHE_PRUNE_COOLDOWN_SECONDS", 30.0, minimum=1.0
@@ -231,10 +233,18 @@ def _cached_file_is_mangadex_placeholder(path: Path) -> bool:
     try:
         if path.suffix.lower() not in EXT_CONTENT_TYPE:
             return False
-        size = path.stat().st_size
+        stat = path.stat()
+        size = stat.st_size
         if size <= 0 or size > 768 * 1024:
             return False
-        return _looks_like_mangadex_hotlink_placeholder(path.read_bytes())
+        key = (str(path), stat.st_mtime_ns, size)
+        if key in _checked_cache_files:
+            return _checked_cache_files[key]
+        result = _looks_like_mangadex_hotlink_placeholder(path.read_bytes())
+        _checked_cache_files[key] = result
+        while len(_checked_cache_files) > 512:
+            _checked_cache_files.popitem(last=False)
+        return result
     except OSError:
         return False
 
@@ -721,6 +731,7 @@ async def _fetch_once_httpx(url: str) -> tuple[bytes | None, str | None, str, bo
                 "GET",
                 current_url,
                 headers=_request_headers_for_url(current_url),
+                timeout=httpx.Timeout(5 if "/covers/" in current_url else 12, connect=3),
             ) as response:
                 if response.status_code in {301, 302, 303, 307, 308}:
                     location = response.headers.get("location")
@@ -763,7 +774,7 @@ def _fetch_once_curl_sync(url: str) -> tuple[bytes | None, str | None, str, bool
             response = session.get(
                 current_url,
                 headers=_request_headers_for_url(current_url),
-                timeout=REQUEST_TIMEOUT_SECONDS,
+                timeout=5 if "/covers/" in current_url else 12,
                 allow_redirects=False,
                 stream=True,
             )
@@ -810,14 +821,55 @@ async def _fetch_once_curl(url: str) -> tuple[bytes | None, str | None, str, boo
     return await loop.run_in_executor(_curl_executor, _fetch_once_curl_sync, url)
 
 
+async def _fetch_mangadex_candidate(url):
+    transports = _transport_order(url)
+    async def fetch(transport):
+        result = await (_fetch_once_curl(url) if transport == "curl_cffi" else _fetch_once_httpx(url))
+        return (*result, transport)
+    tasks = [asyncio.create_task(fetch(transports[0]))]
+    try:
+        done, _ = await asyncio.wait(tasks, timeout=0.35)
+        if done:
+            first = next(iter(done)).result()
+            if first[0] is not None or _is_throttle_error(first[2]) or len(transports) == 1:
+                return first
+        if len(transports) > 1:
+            tasks.append(asyncio.create_task(fetch(transports[1])))
+        remaining = set(tasks)
+        last = (None, None, "CDN unavailable", False, transports[0])
+        while remaining:
+            done, remaining = await asyncio.wait(remaining, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                last = task.result()
+                if last[0] is not None:
+                    return last
+        return last
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def _fetch_image(url: str, retry_hint: int = 0) -> tuple[bytes | None, str | None, str | None, str | None]:
     last_error = "CDN unavailable"
-    attempts = 3 + max(0, min(retry_hint, 3))
+    attempts = 1 if "/covers/" in url else 2
     candidates = _candidate_urls(url)
     for candidate in candidates:
         candidate_host = (urlparse(candidate).hostname or "").lower()
         candidate_is_mangadex = _is_mangadex_host(candidate_host)
         for attempt in range(attempts):
+            if candidate_is_mangadex:
+                async with _mangadex_image_semaphore:
+                    data, content_type, error_text, retryable, transport = await _fetch_mangadex_candidate(candidate)
+                if data is not None:
+                    return data, candidate, content_type, transport
+                last_error = f"{transport}: {error_text}"
+                if not retryable:
+                    break
+                if _is_throttle_error(error_text):
+                    await asyncio.sleep(MANGADEX_IMAGE_THROTTLE_BACKOFF_SECONDS)
+                continue
             transports = _transport_order(candidate)
             retryable_failure = False
             saw_throttle_signal = False
@@ -866,19 +918,25 @@ async def proxy_image(url: str, request: Request, retry: int = 0):
     key = _cache_key(url)
     cached_path = CACHE_DIR / key
 
-    force_refetch = retry > 0
-    if not force_refetch:
-        cached = _cached_image_response(cached_path, request)
-        if cached is not None:
-            return cached
+    # A frontend retry may arrive while another request has just finished
+    # warming this cache entry. Always reuse a valid cached image instead of
+    # forcing another slow upstream download merely because `retry` is set.
+    cached = _cached_image_response(cached_path, request)
+    if cached is not None:
+        return cached
 
     lock = _cache_lock_for_key(key)
     async with lock:
-        if not force_refetch:
-            cached = _cached_image_response(cached_path, request)
-            if cached is not None:
-                return cached
+        cached = _cached_image_response(cached_path, request)
+        if cached is not None:
+            return cached
         data, fetch_info, content_type, transport = await _fetch_image(url, retry_hint=retry)
+        if data is not None:
+            try:
+                await asyncio.to_thread(_write_cache_atomic, cached_path, data)
+                schedule_image_cache_prune()
+            except OSError as error:
+                logger.debug("Image cache write unavailable: %s", type(error).__name__)
     if data is None:
         stale = _cached_image_response(cached_path, request, cache_status="STALE")
         if stale is not None:
@@ -897,13 +955,7 @@ async def proxy_image(url: str, request: Request, retry: int = 0):
             )
         return Response(status_code=502, content="CDN unavailable")
 
-    try:
-        _write_cache_atomic(cached_path, data)
-        schedule_image_cache_prune()
-    except Exception as e:
-        logger.warning(f"Cache write failed: {e}")
-
-    etag = f'"{hashlib.md5(data).hexdigest()}"'
+    etag = _etag_for_file(cached_path) if cached_path.exists() else f'"{hashlib.md5(data).hexdigest()}"'
     ext = cached_path.suffix
     ct = content_type or EXT_CONTENT_TYPE.get(ext, "image/jpeg")
     return Response(
@@ -934,17 +986,18 @@ async def preload_images(urls: str):
         nonlocal cached
         key = _cache_key(url)
         path = CACHE_DIR / key
-        if path.exists():
-            cached += 1
-            return
-        data, _, _, _ = await _fetch_image(url)
-        if data is None:
-            return
-        try:
-            _write_cache_atomic(path, data)
-            cached += 1
-        except Exception:
-            pass
+        async with _cache_lock_for_key(key):
+            if _is_usable_cache_file(path) and not _cached_file_is_mangadex_placeholder(path):
+                cached += 1
+                return
+            data, _, _, _ = await _fetch_image(url)
+            if data is None:
+                return
+            try:
+                await asyncio.to_thread(_write_cache_atomic, path, data)
+                cached += 1
+            except OSError:
+                pass
 
     await asyncio.gather(*[fetch_one(u) for u in url_list])
     if cached:

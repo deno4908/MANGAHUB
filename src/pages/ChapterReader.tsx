@@ -7,7 +7,7 @@ import { useUserStore } from '@/store/userStore';
 import { historyApi, mangaApi } from '@/lib/api';
 import { adaptChapterPages, adaptMangaDetail, getChapterPageFallback } from '@/lib/adapters';
 import { getMangaDetailPath, normalizeMangaDexId } from '@/lib/mangaLinks';
-import { getLocalMangaDexChapterPages, getMangaDexImageFallback } from '@/lib/mangaDexImages';
+import { loadMangaDexChapterPages, getMangaDexImageFallback } from '@/lib/mangaDexImages';
 import { incrementMangaViewsInQueryCache, invalidateMangaRealtimeQueries } from '@/lib/querySync';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
@@ -255,7 +255,7 @@ function getReaderChapterSource(chapter: ReaderChapter): string {
   if (normalizeMangaDexId(chapter.id) || chapter.translatedLanguage || (chapter.scanlationGroups || []).length > 0) {
     return 'mangadex';
   }
-  return 'otruyen';
+  return 'truyenqq';
 }
 
 function getReaderChapterSourceLabel(chapter: ReaderChapter): string {
@@ -264,7 +264,7 @@ function getReaderChapterSourceLabel(chapter: ReaderChapter): string {
   const source = getReaderChapterSource(chapter);
   if (source === 'mangadex') return 'MangaDex';
   if (source === 'local') return 'Bản dịch web';
-  if (source === 'otruyen') return 'OTruyen';
+  if (source === 'truyenqq') return 'TruyenQQ';
   return source;
 }
 
@@ -500,16 +500,15 @@ const ChapterReader = () => {
     getUniqueChapterCount(stateChapters),
     getUniqueChapterCount(persistedChapters)
   );
-  const shouldFetchFallbackChapterList = knownChapterCount <= 1;
 
   const { data: fallbackChapterList = [], isFetching: isFallbackChapterListLoading } = useQuery({
     queryKey: ['manga', 'detail', safeMangaSlug, 'chapter-list-fallback'],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!safeMangaSlug) return [] as ReaderChapter[];
 
       const mangaDexId = normalizeMangaDexId(safeMangaSlug);
       if (mangaDexId) {
-        const raw = await mangaApi.getMangaDexDetail(mangaDexId, 'all');
+        const raw = await mangaApi.getMangaDexDetail(mangaDexId, 'all', 'vi', { signal });
         const item = raw?.manga || {};
         const chapterRows = Array.isArray(item.chapters) ? item.chapters : [];
         const chapters = chapterRows
@@ -534,11 +533,14 @@ const ChapterReader = () => {
         return chapters;
       }
 
-      const raw = await mangaApi.getDetail(safeMangaSlug);
+      const raw = await mangaApi.getDetail(safeMangaSlug, signal);
       const detail = adaptMangaDetail(raw);
       return normalizeReaderChapters(detail.chapters || []);
     },
-    enabled: !!safeMangaSlug && shouldFetchFallbackChapterList,
+    enabled: !!safeMangaSlug,
+    initialData: () => knownChapterCount > 1
+      ? (stateChapters.length >= persistedChapters.length ? stateChapters : persistedChapters)
+      : undefined,
     staleTime: 10 * 60 * 1000,
   });
 
@@ -620,9 +622,10 @@ const ChapterReader = () => {
 
   useEffect(() => {
     const nextFilter = chapterState.chapterSourceFilter || persistedMeta.chapterSourceFilter || CHAPTER_SOURCE_ALL;
-    if (nextFilter === chapterSourceFilter) return;
-    setChapterSourceFilter(nextFilter);
-  }, [chapterState.chapterSourceFilter, chapterSourceFilter, currentChapterId, persistedMeta.chapterSourceFilter]);
+    // Restore only when navigation metadata changes. An invalid saved filter
+    // must not fight the validation effect above on every render.
+    setChapterSourceFilter((current) => current === nextFilter ? current : nextFilter);
+  }, [chapterState.chapterSourceFilter, currentChapterId, persistedMeta.chapterSourceFilter]);
 
   useEffect(() => {
     if (!id) return;
@@ -667,10 +670,6 @@ const ChapterReader = () => {
   const nextChapter = currentChapterIndex >= 0 && currentChapterIndex < orderedChapters.length - 1
     ? orderedChapters[currentChapterIndex + 1]
     : undefined;
-  const nextNextChapter = currentChapterIndex >= 0 && currentChapterIndex < orderedChapters.length - 2
-    ? orderedChapters[currentChapterIndex + 2]
-    : undefined;
-
   useEffect(() => {
     store.setCurrentPage(0);
     store.setAutoScroll(false);
@@ -705,7 +704,7 @@ const ChapterReader = () => {
     const timeout = window.setTimeout(() => {
       setHorizontalUseFallback(true);
       setHorizontalRetryCount(0);
-    }, 6_000);
+    }, 10_000);
     return () => window.clearTimeout(timeout);
   }, [store.mode, store.currentPage, pages, horizontalLoaded, horizontalUseFallback]);
 
@@ -782,48 +781,10 @@ const ChapterReader = () => {
     const normalizedId = normalizeMangaDexId(chapterId) || chapterId;
     const mangadexId = normalizeMangaDexId(normalizedId);
     if (mangadexId) {
-      try {
-        const localImageUrls = await getLocalMangaDexChapterPages(mangadexId);
-        if (localImageUrls.length > 0) {
-          return {
-            pages: localImageUrls,
-            raw: { data: { item: {} } },
-          };
-        }
-      } catch {
-        // Fall through to backend lookup when direct MangaDex API is blocked.
-      }
-
-      const attempts: Array<{ mode: 'saver'; refresh: boolean }> = [
-        { mode: 'saver', refresh: false },
-        { mode: 'saver', refresh: true },
-      ];
-      let lastError: unknown = null;
-
-      for (const attempt of attempts) {
-        try {
-          const data = await mangaApi.getMangaDexChapterPages(
-            mangadexId,
-            attempt.mode,
-            attempt.refresh,
-            8_000,
-          );
-          const imageUrls = Array.isArray(data?.image_urls)
-            ? (data.image_urls as string[]).filter(Boolean)
-            : [];
-          if (imageUrls.length > 0) {
-            return {
-              pages: imageUrls,
-              raw: { data: { item: {} } },
-            };
-          }
-        } catch (error) {
-          lastError = error;
-        }
-      }
-
-      if (lastError instanceof Error) throw lastError;
-      throw new Error('Không tải được trang chapter MangaDex');
+      return {
+        pages: await loadMangaDexChapterPages(mangadexId),
+        raw: { data: { item: {} } },
+      };
     }
 
     const data = await mangaApi.getChapter(normalizedId);
@@ -997,19 +958,22 @@ const ChapterReader = () => {
       });
     };
 
-    const eagerCount = mode === 'aggressive' ? 12 : mode === 'standard' ? 2 : 8;
+    const eagerCount = mode === 'standard' ? 2 : 3;
 
     // Keep bandwidth focused on the current reading area instead of queueing
     // the whole chapter and delaying images the user is actively viewing.
-    preloadUrls(pages.slice(0, eagerCount), mode === 'aggressive' ? 5 : 3);
+    preloadUrls(pages.slice(0, eagerCount), eagerCount);
   }, [pages, imageLoadingMode]);
 
   // ─── Preload pages around the currently visible page ───
   useEffect(() => {
     if (!pages.length) return;
+    // The initial effect already queues the first 2-3 pages. Wait until the
+    // reader advances before expanding the preload window.
+    if (visiblePage === 0) return;
     const mode = imageLoadingMode;
-    const AHEAD = mode === 'aggressive' ? 20 : mode === 'standard' ? 4 : 12;
-    const HIGH_PRIORITY_AHEAD = mode === 'aggressive' ? 6 : 4;
+    const AHEAD = mode === 'aggressive' ? 5 : mode === 'standard' ? 2 : 3;
+    const HIGH_PRIORITY_AHEAD = mode === 'aggressive' ? 3 : 2;
     const start = visiblePage + 1;
     const end = Math.min(visiblePage + AHEAD + 1, pages.length);
     const preloadImageUrl = (url: string, priority: 'high' | 'low') => {
@@ -1025,52 +989,24 @@ const ChapterReader = () => {
     }
   }, [visiblePage, pages, imageLoadingMode]);
 
-  // ─── Eager prefetch next chapter right after current chapter is ready ───
+  // ─── Prefetch next chapter metadata only when the reader is near the end ───
   useEffect(() => {
     if (imageLoadingMode === 'standard') return;
-    if (prefetchTriggeredRef.current || !nextChapter) return;
+    if (prefetchTriggeredRef.current || !nextChapter || totalPages === 0) return;
+
+    const pagesFromEnd = imageLoadingMode === 'aggressive' ? 5 : 3;
+    const threshold = Math.max(1, totalPages - pagesFromEnd);
+    if (visiblePage < threshold) return;
+
     prefetchTriggeredRef.current = true;
     const nextChapterId = normalizeMangaDexId(nextChapter.id) || nextChapter.id;
     const isMangaDexNextChapter = !!normalizeMangaDexId(nextChapter.id);
     queryClient.prefetchQuery({
       queryKey: ['manga', 'chapter', nextChapterId],
-      queryFn: async () => {
-        const prefetched = await prefetchChapterData(nextChapterId);
-        const pages = prefetched.pages;
-        const eagerPages = pages.slice(0, imageLoadingMode === 'aggressive' ? 10 : 5);
-        eagerPages.forEach((url, index) => {
-          if (!url) return;
-          const priority = index <= (imageLoadingMode === 'aggressive' ? 3 : 1) ? 'high' : 'low';
-          if (!preloadedRef.current.has(url)) {
-            preloadedRef.current.add(url);
-            const img = new Image();
-            img.fetchPriority = priority;
-            img.src = url;
-          }
-        });
-        return prefetched;
-      },
+      queryFn: () => prefetchChapterData(nextChapterId),
       staleTime: isMangaDexNextChapter ? 30 * 1000 : 60 * 60 * 1000,
     });
-  }, [nextChapter, queryClient, prefetchChapterData, imageLoadingMode]);
-
-  // ─── Prefetch one-more chapter when near end ───
-  useEffect(() => {
-    if (imageLoadingMode === 'standard') return;
-    if (!nextNextChapter || totalPages === 0) return;
-    const threshold = imageLoadingMode === 'aggressive'
-      ? Math.max(Math.floor(totalPages * 0.6), totalPages - 8)
-      : Math.max(Math.floor(totalPages * 0.75), totalPages - 5);
-    if (visiblePage >= threshold) {
-      const nextNextChapterId = normalizeMangaDexId(nextNextChapter.id) || nextNextChapter.id;
-      const isMangaDexNextNextChapter = !!normalizeMangaDexId(nextNextChapter.id);
-      queryClient.prefetchQuery({
-        queryKey: ['manga', 'chapter', nextNextChapterId],
-        queryFn: () => prefetchChapterData(nextNextChapterId),
-        staleTime: isMangaDexNextNextChapter ? 30 * 1000 : 60 * 60 * 1000,
-      });
-    }
-  }, [visiblePage, totalPages, nextNextChapter, queryClient, prefetchChapterData, imageLoadingMode]);
+  }, [visiblePage, totalPages, nextChapter, queryClient, prefetchChapterData, imageLoadingMode]);
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     const key = e.key.toLowerCase();
@@ -1375,7 +1311,7 @@ const ChapterReader = () => {
                 imageFit={store.imageFit}
                 pageGap={store.pageGap}
                 onVisible={handlePageVisible}
-                priority={i < 8}
+                priority={i < (imageLoadingMode === 'standard' ? 2 : 3)}
               />
             ))}
             {/* End of chapter + comments */}

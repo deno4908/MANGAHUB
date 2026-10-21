@@ -46,6 +46,7 @@ def create_app() -> Flask:
 
     maintenance_auth_bootstrap_paths = {
         "/auth/login",
+        "/auth/credential-challenge",
         "/auth/logout",
         "/auth/refresh",
         "/auth/google",

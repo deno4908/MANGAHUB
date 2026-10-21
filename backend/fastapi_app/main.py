@@ -18,6 +18,7 @@ from fastapi_app.dependencies import (
 )
 from maintenance import (
     get_maintenance_state,
+    get_maintenance_state_async,
     is_admin_authorized,
     maintenance_payload,
     set_maintenance_state,
@@ -25,6 +26,7 @@ from maintenance import (
 
 from fastapi_app.routers import (
     manga,
+    truyenqq,
     users,
     bookmarks,
     history,
@@ -37,8 +39,10 @@ from fastapi_app.routers import (
     images,
     ratings,
     editor,
+    catalog_updates as catalog_updates_router,
 )
-from fastapi_app.services import otruyen_service
+from fastapi_app.services import truyenqq_service
+from fastapi_app.services.catalog_updates import catalog_updates
 from fastapi_app.services.chapter_checker import chapter_check_loop
 from security_runtime import ensure_security_redis_available
 from vip_access import revoke_expired_vips
@@ -101,7 +105,7 @@ async def _prewarm_detail_cache(list_payloads: list[dict]):
     unique_slugs = list(dict.fromkeys(slugs))[:PREWARM_DETAIL_LIMIT]
     if not unique_slugs:
         return
-    detail_jobs = [otruyen_service.get_manga_detail(slug) for slug in unique_slugs]
+    detail_jobs = [truyenqq_service.get_manga_detail(slug) for slug in unique_slugs]
     await asyncio.gather(*detail_jobs, return_exceptions=True)
 
 
@@ -128,7 +132,7 @@ async def _prewarm_category_cache(category_slugs: list[str], limit: int):
     jobs = []
     for slug in category_slugs[:limit]:
         for page in PREWARM_CATEGORY_PAGES:
-            jobs.append(otruyen_service.get_category_manga(slug, page))
+            jobs.append(truyenqq_service.get_category_manga(slug, page))
     if jobs:
         await asyncio.gather(*jobs, return_exceptions=True)
 
@@ -139,18 +143,18 @@ async def _warmup_cache_core():
     logger = logging.getLogger(__name__)
     logger.info("⏳ Core cache warmup...")
     try:
-        categories_payload = await otruyen_service.get_categories()
-        category_slugs = _collect_category_slugs(categories_payload)
-        await _prewarm_category_cache(category_slugs, CORE_PREWARM_CATEGORY_LIMIT)
-        warmup_jobs = []
+        warmup_jobs = [truyenqq_service.get_filtered(sort="views_desc"), truyenqq_service.get_categories()]
         for list_type in CORE_PREWARM_LIST_TYPES:
             for page in CORE_PREWARM_LIST_PAGES:
-                warmup_jobs.append(otruyen_service.get_list(list_type, page))
+                warmup_jobs.append(truyenqq_service.get_list(list_type, page))
         results = await asyncio.gather(*warmup_jobs, return_exceptions=True)
+        categories_payload = results[1]
+        category_slugs = _collect_category_slugs(categories_payload)
         ok = sum(1 for r in results if r and not isinstance(r, Exception))
         logger.info(f"✅ Core warmup done — {ok}/{len(warmup_jobs)} endpoints cached")
         # Populate random pool from freshly cached data
-        await otruyen_service.refresh_random_pool()
+        await truyenqq_service.refresh_random_pool()
+        await _prewarm_category_cache(category_slugs, CORE_PREWARM_CATEGORY_LIMIT)
     except Exception as e:
         logger.warning(f"Core warmup failed: {e}")
 
@@ -159,16 +163,16 @@ async def _warmup_cache_extended():
     import logging
     logger = logging.getLogger(__name__)
     try:
-        categories_payload = await otruyen_service.get_categories()
+        categories_payload = await truyenqq_service.get_categories()
         category_slugs = _collect_category_slugs(categories_payload)
         await _prewarm_category_cache(category_slugs, PREWARM_CATEGORY_LIMIT)
         warmup_jobs = []
         for list_type in PREWARM_LIST_TYPES:
             for page in PREWARM_LIST_PAGES:
-                warmup_jobs.append(otruyen_service.get_list(list_type, page))
+                warmup_jobs.append(truyenqq_service.get_list(list_type, page))
         results = await asyncio.gather(*warmup_jobs, return_exceptions=True)
-        list_payloads = _collect_list_payloads(results)
-        await _prewarm_detail_cache(list_payloads)
+        # Listing cards already carry cover hints. Fetching twenty complete
+        # comic/chapter lists here delays readers and wastes upstream bandwidth.
         logger.debug("✅ Extended warmup done")
     except Exception as e:
         logger.debug(f"Extended warmup failed: {e}")
@@ -183,7 +187,7 @@ async def _cache_refresh_loop():
         try:
             await _warmup_cache_extended()
             # Refresh random pool with latest data
-            await otruyen_service.refresh_random_pool()
+            await truyenqq_service.refresh_random_pool()
             logger.debug("🔄 Cache refreshed")
         except Exception:
             pass
@@ -250,39 +254,45 @@ async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle — warm cache + start background tasks."""
     await asyncio.to_thread(ensure_security_redis_available)
     images.schedule_image_cache_prune(force=True)
-    await _warmup_cache_core()
+    core_warmup_task = asyncio.create_task(_warmup_cache_core())
     task = asyncio.create_task(chapter_check_loop())
     refresh_task = asyncio.create_task(_cache_refresh_loop())
     deferred_warmup_task = asyncio.create_task(_deferred_warmup_loop())
     admin_dashboard_warmup_task = asyncio.create_task(_prewarm_admin_dashboard_cache())
     database_cleanup_task = asyncio.create_task(_database_cleanup_loop())
     vip_expiry_sweep_task = asyncio.create_task(_vip_expiry_sweep_loop())
+    live_catalog_task = asyncio.create_task(catalog_updates.run())
     # Pre-warm MangaDex vi_catalog in background so /manga loads immediately
     manga.schedule_startup_warmup()
     yield
+    core_warmup_task.cancel()
     task.cancel()
     refresh_task.cancel()
     deferred_warmup_task.cancel()
     admin_dashboard_warmup_task.cancel()
     database_cleanup_task.cancel()
     vip_expiry_sweep_task.cancel()
+    live_catalog_task.cancel()
     try:
         await asyncio.gather(
+            core_warmup_task,
             task,
             refresh_task,
             deferred_warmup_task,
             admin_dashboard_warmup_task,
             database_cleanup_task,
             vip_expiry_sweep_task,
+            live_catalog_task,
             return_exceptions=True,
         )
     except asyncio.CancelledError:
         pass
+    await truyenqq_service.close()
 
 
 app = FastAPI(
     title="Manga-Bliss API",
-    description="REST API for Manga-Bliss — powered by OTruyenAPI + Supabase",
+    description="REST API for Manga-Bliss — powered by TruyenQQ + MangaDex + Supabase",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -388,7 +398,7 @@ async def enforce_maintenance_mode(request: Request, call_next):
     if path in {"/health", "/api/maintenance", "/docs", "/redoc", "/openapi.json"}:
         return await call_next(request)
 
-    state = await asyncio.to_thread(get_maintenance_state)
+    state = await get_maintenance_state_async()
     if not state.get("enabled"):
         return await call_next(request)
 
@@ -440,7 +450,7 @@ async def enforce_api_access_policy(request: Request, call_next):
 
 @app.get("/api/maintenance")
 async def maintenance_status():
-    return {"maintenance": await asyncio.to_thread(get_maintenance_state)}
+    return {"maintenance": await get_maintenance_state_async()}
 
 
 @app.get("/api/admin/maintenance")
@@ -470,7 +480,9 @@ async def admin_set_maintenance(
     }
 
 # Include routers
-app.include_router(manga.router, prefix="/api/manga", tags=["Manga (OTruyenAPI)"])
+app.include_router(manga.router, prefix="/api/manga", tags=["Manga"])
+app.include_router(catalog_updates_router.router, prefix="/api/manga", tags=["Catalog Updates"])
+app.include_router(truyenqq.router, prefix="/api/manga", tags=["TruyenQQ"])
 app.include_router(users.router, prefix="/api/users", tags=["Users"])
 app.include_router(bookmarks.router, prefix="/api/bookmarks", tags=["Bookmarks & Follows"])
 app.include_router(history.router, prefix="/api/history", tags=["Reading History"])

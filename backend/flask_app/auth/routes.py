@@ -6,6 +6,7 @@ import re
 import base64
 import hashlib
 import json
+import jwt
 import logging
 import time
 import urllib.parse
@@ -15,6 +16,8 @@ from threading import Lock
 from flask import Blueprint, request, jsonify, g, make_response
 from supabase import create_client
 from config import config
+from flask_app.auth.credentials import (CredentialError, issue_challenge, open_credentials,
+    derive_password, legacy_passwords, password_strength_error)
 from flask_app.middleware import clear_auth_cache, require_auth, get_current_user_id
 from flask_app import limiter
 from proxy_trust import resolve_client_ip
@@ -37,29 +40,23 @@ _refresh_singleflight_locks: dict[str, Lock] = {}
 _refresh_result_cache: dict[str, tuple[float, dict]] = {}
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-_PASSWORD_HASH_RE = re.compile(r"^mb2\$sha256\$([a-f0-9]{64})$")
-_PBKDF2_PASSWORD_HASH_RE = re.compile(
-    r"^mb[34]\$pbkdf2-sha256\$(\d{5,7})\$([a-f0-9]{64})$"
-)
-_LEGACY_PASSWORD_HASH_RE = re.compile(r"^[a-f0-9]{64}$")
-_MIN_PBKDF2_ITERATIONS = 200_000
 _SIGN_OUT_SCOPES = {"local", "global", "others"}
 _REFRESH_COOKIE_NAME = "mh_refresh_token"
 _OAUTH_VERIFIER_COOKIE_NAME = "mh_oauth_code_verifier"
 _AUTH_CSRF_HEADER_NAME = "X-MangaHub-CSRF"
 _AUTH_CSRF_HEADER_VALUE = "1"
 _AUTH_INTERNAL_ERROR_MESSAGE = "Dịch vụ xác thực tạm thời không khả dụng. Vui lòng thử lại sau."
-_REFRESH_COOKIE_MAX_AGE_SECONDS = max(
+_REFRESH_COOKIE_MAX_AGE_SECONDS = min(30 * 24 * 60 * 60, max(
     60 * 60 * 24,
-    int(getattr(config, "REFRESH_COOKIE_MAX_AGE_SECONDS", 60 * 60 * 24 * 365 * 5)),
-)
+    int(getattr(config, "REFRESH_COOKIE_MAX_AGE_SECONDS", 60 * 60 * 24 * 30)),
+))
 _OAUTH_VERIFIER_COOKIE_MAX_AGE_SECONDS = 10 * 60
 _REFRESH_SINGLEFLIGHT_TTL_SECONDS = 20
 _REFRESH_SINGLEFLIGHT_LOCK_SECONDS = 25
 _REFRESH_SINGLEFLIGHT_WAIT_SECONDS = 25
 _REFRESH_ROTATION_GRACE_SECONDS = max(
     _REFRESH_SINGLEFLIGHT_TTL_SECONDS,
-    int(getattr(config, "REFRESH_ROTATION_GRACE_SECONDS", 2 * 60 * 60)),
+    min(60, int(getattr(config, "REFRESH_ROTATION_GRACE_SECONDS", 30))),
 )
 _EMAIL_VERIFY_TIMEOUT_MINUTES = max(1, int(getattr(config, "EMAIL_VERIFY_TIMEOUT_MINUTES", 15)))
 _DEFAULT_USER_SETTINGS = {
@@ -168,11 +165,8 @@ def enforce_auth_csrf():
 
 
 def _log_auth_exception(context: str, error: Exception) -> None:
-    logger.error(
-        "%s",
-        context,
-        exc_info=(type(error), error, error.__traceback__),
-    )
+    # Provider exceptions can embed request data. Never log credential material.
+    logger.error("%s (%s)", context, type(error).__name__)
 
 
 def _auth_internal_error(context: str, error: Exception):
@@ -312,7 +306,7 @@ def _remember_refresh_result(cache_key: str, payload: dict, ttl_seconds: int | N
         return
     ttl = max(
         _REFRESH_SINGLEFLIGHT_TTL_SECONDS,
-        int(ttl_seconds or _REFRESH_ROTATION_GRACE_SECONDS),
+        min(60, int(ttl_seconds or _REFRESH_ROTATION_GRACE_SECONDS)),
     )
     now = time.monotonic()
     with _refresh_singleflight_guard:
@@ -327,7 +321,7 @@ def _remember_refresh_result(cache_key: str, payload: dict, ttl_seconds: int | N
         return
     try:
         client.setex(
-            f"mh:auth:refresh-result:{cache_key}",
+            f"mh:auth:refresh-result:v2:{cache_key}",
             ttl,
             json.dumps(payload, separators=(",", ":")),
         )
@@ -348,7 +342,7 @@ def _load_cached_refresh_result(cache_key: str) -> dict | None:
     if not client:
         return None
     try:
-        raw = client.get(f"mh:auth:refresh-result:{cache_key}")
+        raw = client.get(f"mh:auth:refresh-result:v2:{cache_key}")
         if not raw:
             return None
         payload = json.loads(raw)
@@ -472,49 +466,6 @@ def _refresh_session_singleflight(refresh_token: str) -> dict:
             return payload
         finally:
             _release_redis_refresh_lock(redis_client, redis_lock_key, redis_lock_owner)
-
-
-def _is_sha256_hex(value: str) -> bool:
-    return bool(re.fullmatch(r"[a-f0-9]{64}", value or ""))
-
-
-def _normalize_password_hash(value: str) -> str | None:
-    raw = str(value or "").strip()
-    pbkdf2_match = _PBKDF2_PASSWORD_HASH_RE.fullmatch(raw)
-    if pbkdf2_match:
-        iterations = int(pbkdf2_match.group(1))
-        if iterations >= _MIN_PBKDF2_ITERATIONS:
-            return pbkdf2_match.group(2)
-    match = _PASSWORD_HASH_RE.fullmatch(raw)
-    if match:
-        return match.group(1)
-    if _LEGACY_PASSWORD_HASH_RE.fullmatch(raw):
-        return raw
-    return None
-
-
-def _password_hash_error(field_name: str = "password"):
-    return (
-        f"{field_name} phải là hash hợp lệ dạng "
-        "mb4$pbkdf2-sha256$<iterations>$<64-hex>"
-    )
-
-
-def _password_candidates(data: dict, field_name: str) -> list[str]:
-    values = [
-        data.get(field_name, ""),
-        data.get(f"{field_name}_legacy", ""),
-        data.get(f"{field_name}_legacy_v2", ""),
-        data.get(f"{field_name}_legacy_v3", ""),
-        data.get("legacy_password", "") if field_name == "password" else "",
-        data.get("legacy_password_v2", "") if field_name == "password" else "",
-    ]
-    candidates: list[str] = []
-    for value in values:
-        normalized = _normalize_password_hash(value)
-        if normalized and normalized not in candidates:
-            candidates.append(normalized)
-    return candidates
 
 
 def _client_ip() -> str:
@@ -778,23 +729,6 @@ def _validate_username(username: str) -> str | None:
     return None
 
 
-def _validate_password_strength(password: str) -> str | None:
-    """Return error message if password is weak, otherwise None."""
-    # Allow pre-hashed payloads when frontend hashing is enabled.
-    if _is_sha256_hex(password):
-        return None
-
-    if len(password) < 8:
-        return "Mật khẩu phải có ít nhất 8 ký tự"
-    if not re.search(r"[A-Z]", password):
-        return "Mật khẩu cần có ít nhất 1 chữ hoa"
-    if not re.search(r"[a-z]", password):
-        return "Mật khẩu cần có ít nhất 1 chữ thường"
-    if not re.search(r"\d", password):
-        return "Mật khẩu cần có ít nhất 1 chữ số"
-    return None
-
-
 def _get_sb():
     # Supabase/Gotrue auth clients keep the last session in memory after
     # sign-in/refresh. Reusing one anon client across users can make refresh
@@ -937,13 +871,27 @@ def _email_exists(email: str, matched_auth_users: list | None = None) -> bool:
     return False
 
 
+@auth_bp.errorhandler(CredentialError)
+def invalid_credential(error):
+    return jsonify({"error": str(error)}), 400
+
+
+@auth_bp.route("/credential-challenge", methods=["GET"])
+@limiter.limit("20 per minute")
+def credential_challenge():
+    return jsonify(issue_challenge(request.args.get("purpose", "")))
+
+
 @auth_bp.route("/register", methods=["POST"])
 @limiter.limit("5 per minute")
 def register():
     """Register a new user."""
-    data = request.get_json(silent=True) or {}
+    data = open_credentials(request.get_json(silent=True), "register")
     email = _normalize_email(data.get("email", ""))
-    password = _normalize_password_hash(data.get("password", ""))
+    strength_error = password_strength_error(data.get("password"))
+    if strength_error:
+        return jsonify({"error": strength_error}), 400
+    password = derive_password(data["password"], email)
     username = data.get("username", "").strip()
     display_name = data.get("displayName", username)
     captcha_ok, captcha_error = _require_recaptcha(data)
@@ -952,8 +900,6 @@ def register():
 
     if not email or not data.get("password", "") or not username:
         return jsonify({"error": "Email, password và username là bắt buộc"}), 400
-    if not password:
-        return jsonify({"error": _password_hash_error("password")}), 400
 
     if not _is_valid_email(email):
         return jsonify({"error": "Email không hợp lệ"}), 400
@@ -1031,10 +977,9 @@ def register():
 @limiter.limit("10 per minute")
 def login():
     """Login with email and password."""
-    data = request.get_json(silent=True) or {}
+    data = open_credentials(request.get_json(silent=True), "login")
     email = _normalize_email(data.get("email", ""))
     raw_password = data.get("password", "")
-    password_candidates = _password_candidates(data, "password")
     captcha_ok, captcha_error = _require_recaptcha(data)
     if not captcha_ok:
         return jsonify({"error": captcha_error}), 400
@@ -1045,22 +990,15 @@ def login():
     if not _is_valid_email(email):
         return jsonify({"error": "Email không hợp lệ"}), 400
 
-    if not password_candidates:
-        return jsonify({"error": _password_hash_error("password")}), 400
-
     try:
-        same_email_auth_users = _get_auth_users_by_email(email)
-        _purge_expired_unverified_users(same_email_auth_users, _EMAIL_VERIFY_TIMEOUT_MINUTES)
-        same_email_auth_users = _get_auth_users_by_email(email)
-        if _has_active_unverified_user(same_email_auth_users, _EMAIL_VERIFY_TIMEOUT_MINUTES):
-            return jsonify({
-                "error": "Email chưa được xác thực. Vui lòng kiểm tra hộp thư để xác thực trước khi đăng nhập."
-            }), 403
-
+        primary_password = derive_password(raw_password, email)
+        def candidates():
+            yield primary_password
+            yield from legacy_passwords(raw_password)
         result = None
         used_password = ""
         last_auth_error = ""
-        for candidate in password_candidates:
+        for candidate in candidates():
             try:
                 candidate_result = _get_sb().auth.sign_in_with_password({
                     "email": email,
@@ -1071,19 +1009,18 @@ def login():
                     used_password = candidate
                     break
             except Exception as auth_error:
-                last_auth_error = str(auth_error)
+                code = str(getattr(auth_error, "code", "") or "")
+                message = str(auth_error).lower()
+                if code == "email_not_confirmed" or "email not confirmed" in message:
+                    return jsonify({"error": "Email chưa được xác thực. Vui lòng kiểm tra hộp thư."}), 403
+                if code == "invalid_credentials" or "invalid login credentials" in message:
+                    last_auth_error = "invalid credentials"
+                else:
+                    # Provider timeouts/rate limits must not try two legacy KDFs
+                    # and repeat the same failing upstream call.
+                    raise
 
         if result and result.user and result.session:
-            primary_password = password_candidates[0]
-            if primary_password and used_password and used_password != primary_password:
-                try:
-                    _get_sb_admin().auth.admin.update_user_by_id(
-                        str(result.user.id),
-                        {"password": primary_password},
-                    )
-                except Exception:
-                    pass
-
             # Get profile data
             profile = _get_sb_admin().table("profiles").select("*").eq(
                 "id", str(result.user.id)
@@ -1092,6 +1029,19 @@ def login():
                 profile.data if profile.data else None,
                 _get_sb_admin(),
             )
+
+            if profile_data and profile_data.get("is_banned"):
+                _get_sb_admin().auth.admin.sign_out(result.session.access_token, "local")
+                return _json({"error": "BANNED", "reason": profile_data.get("ban_reason", "")},
+                             403, clear_refresh=True)
+            if primary_password and used_password and used_password != primary_password:
+                try:
+                    _get_sb_admin().auth.admin.update_user_by_id(
+                        str(result.user.id),
+                        {"password": primary_password},
+                    )
+                except Exception:
+                    pass
 
             return _json({
                 "message": "Đăng nhập thành công",
@@ -1219,12 +1169,16 @@ def verify_otp():
 @limiter.limit("5 per minute")
 def reset_password():
     """Reset password from a recovery session; revokes all sessions after update."""
-    data = request.get_json(silent=True) or {}
-    new_password = _normalize_password_hash(data.get("password", ""))
-    if not data.get("password", ""):
-        return jsonify({"error": "password là bắt buộc"}), 400
-    if not new_password:
-        return jsonify({"error": _password_hash_error("password")}), 400
+    if not _is_recent_recovery_session(str(getattr(g, "access_token", "") or "")):
+        return jsonify({"error": "Vui lòng mở liên kết đặt lại mật khẩu mới từ email."}), 403
+    data = open_credentials(request.get_json(silent=True), "reset-password")
+    strength_error = password_strength_error(data.get("password"))
+    if strength_error:
+        return jsonify({"error": strength_error}), 400
+    user_email = _normalize_email(getattr(getattr(g, "current_user", None), "email", ""))
+    if not user_email:
+        return jsonify({"error": "Không xác thực được email tài khoản"}), 401
+    new_password = derive_password(data["password"], user_email)
 
     try:
         user_id = get_current_user_id()
@@ -1249,24 +1203,32 @@ def reset_password():
         return _auth_internal_error("Password reset failed", e)
 
 
+def _is_recent_recovery_session(token: str) -> bool:
+    # require_auth has already verified this exact token with Supabase. Inspect
+    # its signed AMR claim; a normal login token cannot bypass current-password
+    # verification by calling /reset-password directly.
+    try:
+        claims = jwt.decode(token, options={"verify_signature": False})
+        now = time.time()
+        return any(isinstance(entry, dict) and entry.get("method") == "recovery"
+                   and 0 <= now - float(entry.get("timestamp", 0)) <= 15 * 60
+                   for entry in claims.get("amr", []))
+    except Exception:
+        return False
+
+
 @auth_bp.route("/change-password", methods=["POST"])
 @require_auth
 @limiter.limit("5 per minute")
 def change_password():
     """Change password from settings; verifies current password first."""
-    data = request.get_json(silent=True) or {}
-    current_password_candidates = _password_candidates(data, "current_password")
-    new_password = _normalize_password_hash(data.get("password", ""))
-
-    if not data.get("current_password", ""):
+    data = open_credentials(request.get_json(silent=True), "change-password")
+    strength_error = password_strength_error(data.get("password"))
+    if strength_error:
+        return jsonify({"error": strength_error}), 400
+    if not data.get("current_password"):
         return jsonify({"error": "Mật khẩu hiện tại là bắt buộc"}), 400
-    if not current_password_candidates:
-        return jsonify({"error": _password_hash_error("current_password")}), 400
-    if not data.get("password", ""):
-        return jsonify({"error": "Mật khẩu mới là bắt buộc"}), 400
-    if not new_password:
-        return jsonify({"error": _password_hash_error("password")}), 400
-    if new_password in current_password_candidates:
+    if data["password"] == data["current_password"]:
         return jsonify({"error": "Mật khẩu mới phải khác mật khẩu hiện tại"}), 400
 
     try:
@@ -1275,12 +1237,13 @@ def change_password():
         if not user_id or not user_email:
             return jsonify({"error": "Không xác thực được tài khoản"}), 401
 
-        verified, verify_error, used_password = _verify_current_password_any(
-            user_email,
-            current_password_candidates,
-        )
+        current_password = derive_password(data["current_password"], user_email)
+        verified, verify_error = _verify_current_password(user_email, current_password)
+        if not verified:
+            verified, verify_error, _ = _verify_current_password_any(user_email, legacy_passwords(data["current_password"]))
         if not verified:
             return jsonify({"error": verify_error}), 401
+        new_password = derive_password(data["password"], user_email)
 
         _get_sb_admin().auth.admin.update_user_by_id(user_id, {"password": new_password})
         profile_marked, profile_error = _mark_session_security_event(user_id, password_changed=True)

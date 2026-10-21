@@ -2,6 +2,8 @@
 Bookmarks & Follows router.
 """
 import logging
+import re
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi_app.dependencies import get_current_user, get_supabase
@@ -17,7 +19,13 @@ LIBRARY_WRITE_LIMIT_PER_10_MINUTES = 180
 def _thumb_from_slug(slug: str, thumb: str = "") -> str:
     if thumb:
         return thumb
-    return f"https://img.otruyenapi.com/uploads/comics/{slug}-thumb.jpg"
+    slug = str(slug or "").strip()
+    if not slug:
+        return ""
+    manga_id = re.sub(r"^mangadex[-:]", "", slug, flags=re.I)
+    if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", manga_id, re.I):
+        return f"/api/manga/mangadex-cover/{manga_id}"
+    return f"/api/manga/truyenqq/cover/{quote(slug, safe='')}"
 
 
 def _enforce_library_write_limit(user_id: str) -> None:

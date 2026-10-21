@@ -1,4 +1,4 @@
-export type MangaSource = "otruyen" | "mangadex";
+export type MangaSource = "truyenqq" | "mangadex";
 
 export const MANGADEX_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -101,7 +101,8 @@ export function normalizeMangaDexId(value?: string | null): string | null {
 
 function normalizeSource(value?: string | null): MangaSource | null {
   const normalized = cleanRouteToken(value).toLowerCase();
-  if (normalized === "otruyen" || normalized === "mangadex") {
+  if (normalized === "otruyen") return "truyenqq";
+  if (normalized === "truyenqq" || normalized === "mangadex") {
     return normalized;
   }
   return null;
@@ -113,8 +114,8 @@ export function getMangaSource(
 ): MangaSource {
   const explicitSource = normalizeSource(source);
   if (explicitSource) return explicitSource;
-  if (normalizeOTruyenObjectId(identifier)) return "otruyen";
-  return normalizeMangaDexId(identifier) ? "mangadex" : "otruyen";
+  if (normalizeOTruyenObjectId(identifier)) return "truyenqq";
+  return normalizeMangaDexId(identifier) ? "mangadex" : "truyenqq";
 }
 
 export function getMangaDetailPath(

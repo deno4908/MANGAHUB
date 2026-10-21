@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from "./http";
 /**
  * API client — centralized HTTP calls to backend.
  * FastAPI: http://localhost:8000  |  Flask Auth: http://localhost:5000
@@ -19,87 +20,6 @@ const HOMEPAGE_REFRESH_STORAGE_KEY = "mb:homepage-refresh:signal";
 let homepageRefreshChannel: BroadcastChannel | null = null;
 let authTokenChannel: BroadcastChannel | null = null;
 
-// Client-side password derivation. The backend accepts v4 and falls back to
-// older v3/v2 hashes during login/change-password migration.
-const PASSWORD_HASH_VERSION = "mb4";
-const PASSWORD_HASH_ALGORITHM = "pbkdf2-sha256";
-const PASSWORD_HASH_ITERATIONS = 600_000;
-const PASSWORD_HASH_SALT_PREFIX = "MangaHub_v4_password_pbkdf2";
-const LEGACY_PBKDF2_PASSWORD_HASH_VERSION = "mb3";
-const LEGACY_PBKDF2_PASSWORD_HASH_ITERATIONS = 310_000;
-const LEGACY_PBKDF2_PASSWORD_HASH_SALT = "MangaHub_v3_password_pbkdf2";
-const LEGACY_PASSWORD_HASH_VERSION = "mb2";
-const LEGACY_PASSWORD_HASH_ALGORITHM = "sha256";
-const LEGACY_PASSWORD_HASH_SALT = "MangaHub_v2_";
-
-function bytesToHex(bytes: ArrayBuffer) {
-  return Array.from(new Uint8Array(bytes))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function normalizePasswordAccountHint(value: string): string {
-  return String(value || "").trim().toLowerCase();
-}
-
-async function derivePbkdf2PasswordHash(
-  password: string,
-  salt: string,
-  iterations: number,
-  version: string,
-): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(password),
-    "PBKDF2",
-    false,
-    ["deriveBits"],
-  );
-  const hashBuffer = await crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      hash: "SHA-256",
-      salt: encoder.encode(salt),
-      iterations,
-    },
-    key,
-    256,
-  );
-  return `${version}$${PASSWORD_HASH_ALGORITHM}$${iterations}$${bytesToHex(hashBuffer)}`;
-}
-
-async function hashPassword(password: string, accountHint: string): Promise<string> {
-  const normalizedHint = normalizePasswordAccountHint(accountHint);
-  return derivePbkdf2PasswordHash(
-    password,
-    `${PASSWORD_HASH_SALT_PREFIX}:${normalizedHint}`,
-    PASSWORD_HASH_ITERATIONS,
-    PASSWORD_HASH_VERSION,
-  );
-}
-
-async function hashPasswordV3(password: string): Promise<string> {
-  return derivePbkdf2PasswordHash(
-    password,
-    LEGACY_PBKDF2_PASSWORD_HASH_SALT,
-    LEGACY_PBKDF2_PASSWORD_HASH_ITERATIONS,
-    LEGACY_PBKDF2_PASSWORD_HASH_VERSION,
-  );
-}
-
-async function hashPasswordLegacy(password: string): Promise<string> {
-  const data = new TextEncoder().encode(LEGACY_PASSWORD_HASH_SALT + password);
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hex = Array.from(new Uint8Array(hashBuffer))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  return `${LEGACY_PASSWORD_HASH_VERSION}$${LEGACY_PASSWORD_HASH_ALGORITHM}$${hex}`;
-}
-
-// ─── Token management ───
-// Refresh token lives in an HttpOnly cookie set by Flask Auth. The frontend only
-// keeps the short-lived access token in memory.
 try {
   localStorage.removeItem("access_token");
   localStorage.removeItem("refresh_token");
@@ -157,7 +77,8 @@ function getAuthTokenChannel() {
   if (!authTokenChannel) {
     authTokenChannel = new BroadcastChannel(AUTH_TOKEN_CHANNEL);
     authTokenChannel.onmessage = (event: MessageEvent<AuthTokenMessage>) => {
-      const message = event.data || {};
+      const message = event.data;
+      if (!message || typeof message !== "object") return;
       if (message.source === refreshTabId) return;
 
       if (message.type === "request-token") {
@@ -655,20 +576,6 @@ type ApiRequestInit = RequestInit & {
   suppressForbiddenRedirect?: boolean;
 };
 
-function fetchWithTimeout(
-  url: string,
-  options: RequestInit,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
-): Promise<Response> {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(url, {
-    credentials: "include",
-    ...options,
-    signal: controller.signal,
-  }).finally(() => clearTimeout(id));
-}
-
 function mutationDedupeKey(url: string, options: ApiRequestInit): string | null {
   const method = String(options.method || "GET").toUpperCase();
   if (method === "GET" || method === "HEAD") return null;
@@ -1070,13 +977,22 @@ export const systemApi = {
   getMaintenance: () => api<any>("/api/maintenance", { skipAuth: true, timeoutMs: 6_000 }),
 };
 
+// Public catalog browsing must not wait for an expired account's refresh.
+function publicApi<T>(path: string, options: ApiRequestInit = {}) {
+  return api<T>(path, { skipAuth: true, ...options });
+}
+
 export const mangaApi = {
-  getHome: () => api<any>("/api/manga/home"),
-  getHomepage: (options: { includeFeatured?: boolean } = {}) => {
+  getCardMetadata: (identifiers: string[]) => publicApi<{ items: Record<string, any> }>(
+    '/api/manga/metadata/batch', { method: 'POST', body: JSON.stringify({ identifiers }), timeoutMs: 20_000 }),
+  getLatestCardChapters: (identifiers: string[]) => publicApi<{ items: Record<string, any> }>(
+    '/api/manga/chapters/latest/batch', { method: 'POST', body: JSON.stringify({ identifiers }), timeoutMs: 6_000 }),
+  getHome: () => publicApi<any>("/api/manga/home"),
+  getHomepage: (options: { includeFeatured?: boolean; timeoutMs?: number } = {}) => {
     const query = options.includeFeatured ? "?include_featured=true" : "";
-    return api<any>(`/api/manga/homepage${query}`);
+    return publicApi<any>(`/api/manga/homepage${query}`, { timeoutMs: options.timeoutMs ?? 20_000 });
   },
-  getFeatured: (limit = 12) => api<any>(`/api/manga/featured?limit=${limit}`),
+  getFeatured: (limit = 12) => publicApi<any>(`/api/manga/featured?limit=${limit}`),
   getMangaDexHomeBanner: (
     options: {
       limit?: number;
@@ -1086,11 +1002,11 @@ export const mangaApi = {
     } = {},
   ) => {
     const query = new URLSearchParams({
-      limit: String(Math.max(1, Math.min(16, Math.floor(Number(options.limit || 8))))),
+      limit: String(Math.max(1, Math.min(24, Math.floor(Number(options.limit || 8))))),
       show_mature: String(options.showMature ?? false),
       filter_hidden: String(options.filterHidden ?? true),
     });
-    return api<any>(`/api/manga/mangadex/home-banner?${query.toString()}`, {
+    return publicApi<any>(`/api/manga/mangadex/home-banner?${query.toString()}`, {
       timeoutMs: options.timeoutMs ?? 15_000,
     });
   },
@@ -1101,6 +1017,7 @@ export const mangaApi = {
       attachOverrides?: boolean;
       filterHidden?: boolean;
       preferLatest?: boolean;
+      timeoutMs?: number;
     },
   ) => {
     const query = new URLSearchParams({
@@ -1110,7 +1027,7 @@ export const mangaApi = {
       filter_hidden: String(options?.filterHidden ?? true),
       prefer_latest: String(options?.preferLatest ?? false),
     });
-    return api<any>(`/api/manga/mangadex/vi-catalog?${query.toString()}`);
+    return publicApi<any>(`/api/manga/mangadex/vi-catalog?${query.toString()}`, { timeoutMs: options?.timeoutMs ?? 20_000 });
   },
   getMangaDexLatestChapters: (
     ids: string[],
@@ -1139,7 +1056,7 @@ export const mangaApi = {
     if (translatedLanguage) {
       query.set("translated_language", translatedLanguage);
     }
-    return api<any>(
+    return publicApi<any>(
       `/api/manga/mangadex/latest-chapters?${query.toString()}`,
       { timeoutMs: 18_000 },
     );
@@ -1159,7 +1076,7 @@ export const mangaApi = {
       show_mature: String(options.showMature ?? false),
       filter_hidden: String(options.filterHidden ?? true),
     });
-    return api<any>(`/api/manga/mangadex/latest-feed?${query.toString()}`, {
+    return publicApi<any>(`/api/manga/mangadex/latest-feed?${query.toString()}`, {
       timeoutMs: options.timeoutMs ?? 18_000,
     });
   },
@@ -1177,6 +1094,7 @@ export const mangaApi = {
       attachRatings?: boolean;
       filterHidden?: boolean;
       timeoutMs?: number;
+      signal?: AbortSignal;
     } = {},
   ) => {
     const query = new URLSearchParams({
@@ -1203,8 +1121,9 @@ export const mangaApi = {
     if (options.status) {
       query.set("status", String(options.status));
     }
-    return api<any>(`/api/manga/mangadex/search?${query.toString()}`, {
+    return publicApi<any>(`/api/manga/mangadex/search?${query.toString()}`, {
       timeoutMs: options.timeoutMs ?? 18_000,
+      signal: options.signal,
     });
   },
   getMangaDexDetail: (
@@ -1214,6 +1133,7 @@ export const mangaApi = {
     options?: {
       scanlationGroupId?: string;
       timeoutMs?: number;
+      signal?: AbortSignal;
       skipAuth?: boolean;
     },
   ) => {
@@ -1224,9 +1144,10 @@ export const mangaApi = {
     if (options?.scanlationGroupId) {
       query.set("scanlation_group_id", options.scanlationGroupId);
     }
-    return api<any>(`/api/manga/mangadex/detail/${mangaId}?${query.toString()}`, {
+    return publicApi<any>(`/api/manga/mangadex/detail/${mangaId}?${query.toString()}`, {
       timeoutMs: options?.timeoutMs ?? 60_000,
-      skipAuth: options?.skipAuth ?? false,
+      signal: options?.signal,
+      skipAuth: options?.skipAuth ?? true,
     });
   },
   getMangaDexLookup: (
@@ -1236,9 +1157,9 @@ export const mangaApi = {
       skipAuth?: boolean;
     },
   ) =>
-    api<any>(`/api/manga/mangadex/lookup/${mangaId}`, {
+    publicApi<any>(`/api/manga/mangadex/lookup/${mangaId}`, {
       timeoutMs: options?.timeoutMs ?? 6_000,
-      skipAuth: options?.skipAuth ?? false,
+      skipAuth: options?.skipAuth ?? true,
     }),
   getMangaDexChapterPages: (
     chapterId: string,
@@ -1246,33 +1167,33 @@ export const mangaApi = {
     refresh = false,
     timeoutMs = 12_000,
   ) =>
-    api<any>(
+    publicApi<any>(
       `/api/manga/mangadex/chapter-pages/${encodeURIComponent(chapterId)}?mode=${mode}&refresh=${refresh ? "1" : "0"}`,
       { timeoutMs, skipAuth: true },
     ),
   getList: (type = "truyen-moi", page = 1) =>
-    api<any>(`/api/manga/list/${type}?page=${page}`),
+    publicApi<any>(`/api/manga/list/${type}?page=${page}`),
   getListBatch: (type = "truyen-moi", pages: number[], attachRatings = false) => {
     const pageParam = pages
       .map((page) => Math.max(1, Math.floor(Number(page) || 1)))
       .filter((page, index, values) => values.indexOf(page) === index)
       .join(",");
-    return api<any>(
+    return publicApi<any>(
       `/api/manga/list/${type}/batch?pages=${encodeURIComponent(pageParam)}&attach_ratings=${attachRatings ? "1" : "0"}`,
       { timeoutMs: 20_000, skipAuth: true },
     );
   },
   getCombinedList: (type = "truyen-moi", page = 1, maxChapters = 120) =>
-    api<any>(`/api/manga/list-combined/${type}?page=${page}&max_chapters=${maxChapters}`),
-  getCategories: () => api<any>("/api/manga/categories"),
+    publicApi<any>(`/api/manga/list-combined/${type}?page=${page}&max_chapters=${maxChapters}`),
+  getCategories: () => publicApi<any>("/api/manga/categories"),
   getCategoryManga: (slug: string, page = 1) =>
-    api<any>(`/api/manga/category/${slug}?page=${page}`),
+    publicApi<any>(`/api/manga/category/${slug}?page=${page}`),
   getCategoryMangaBatch: (slug: string, pages: number[], attachRatings = false) => {
     const pageParam = pages
       .map((page) => Math.max(1, Math.floor(Number(page) || 1)))
       .filter((page, index, values) => values.indexOf(page) === index)
       .join(",");
-    return api<any>(
+    return publicApi<any>(
       `/api/manga/category/${encodeURIComponent(slug)}/batch?pages=${encodeURIComponent(pageParam)}&attach_ratings=${attachRatings ? "1" : "0"}`,
       { timeoutMs: 20_000, skipAuth: true },
     );
@@ -1304,12 +1225,12 @@ export const mangaApi = {
     if (options.baseSlug) {
       query.set("base_slug", String(options.baseSlug));
     }
-    return api<any>(`/api/manga/otruyen-filtered?${query.toString()}`, {
+    return publicApi<any>(`/api/manga/truyenqq-filtered?${query.toString()}`, {
       timeoutMs: 20_000,
       skipAuth: true,
     });
   },
-  getDetail: (slug: string) => api<any>(`/api/manga/detail/${slug}`),
+  getDetail: (slug: string, signal?: AbortSignal) => publicApi<any>(`/api/manga/detail/${slug}`, { signal }),
   startViewSession: (
     slug: string,
     payload: {
@@ -1358,6 +1279,7 @@ export const mangaApi = {
       mangaDexAttachLatest?: boolean;
       skipAuth?: boolean;
       timeoutMs?: number;
+      signal?: AbortSignal;
     },
   ) => {
     const includeMangaDex = options?.includeMangaDex ?? true;
@@ -1383,23 +1305,32 @@ export const mangaApi = {
     if (typeof options?.mangaDexAttachLatest === 'boolean') {
       query.set("mangadex_attach_latest", options.mangaDexAttachLatest ? "1" : "0");
     }
-    return api<any>(`/api/manga/search?${query.toString()}`, {
-      skipAuth: options?.skipAuth ?? false,
+    return publicApi<any>(`/api/manga/search?${query.toString()}`, {
+      skipAuth: options?.skipAuth ?? true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   },
-  getChapter: (id: string) => api<any>(`/api/manga/chapter/${id}`),
-  getRandom: () => api<any>("/api/manga/random"),
-  getTrending: (limit = 20, source: "all" | "otruyen" | "mangadex" = "all") => {
+  getChapter: (id: string) => publicApi<any>(`/api/manga/chapter/${id}`),
+  getRandom: () => publicApi<any>("/api/manga/random"),
+  getTrending: (limit = 20, source: "all" | "truyenqq" | "mangadex" = "all") => {
     const query = new URLSearchParams({
       limit: String(limit),
       source,
     });
-    return api<any>(`/api/manga/trending?${query.toString()}`);
+    return publicApi<any>(`/api/manga/trending?${query.toString()}`);
   },
 };
 
 // ─── Auth API (Flask) ───
+async function credentialBody(purpose: import("./credentials").CredentialPurpose, fields: Record<string, string | undefined>) {
+  const challenge = await auth<import("./credentials").CredentialChallenge>(
+    `/auth/credential-challenge?purpose=${encodeURIComponent(purpose)}`, { skipAuth: true, timeoutMs: 10_000, cache: "no-store" },
+  );
+  const { sealCredentials } = await import("./credentials");
+  return JSON.stringify(await sealCredentials(fields, purpose, challenge));
+}
+
 export const authApi = {
   register: async (
     email: string,
@@ -1408,31 +1339,16 @@ export const authApi = {
     displayName?: string,
     recaptchaToken?: string,
   ) => {
-    const hashed = await hashPassword(password, email);
     return auth<any>("/auth/register", {
       method: "POST",
-      body: JSON.stringify({
-        email,
-        password: hashed,
-        username,
-        displayName,
-        recaptcha_token: recaptchaToken || "",
-      }),
+      skipAuth: true,
+      body: await credentialBody("register", { email, password, username, displayName, recaptcha_token: recaptchaToken || "" }),
     });
   },
   login: async (email: string, password: string, recaptchaToken?: string) => {
-    const hashed = await hashPassword(password, email);
-    const legacyPbkdf2Hash = await hashPasswordV3(password);
-    const legacyHash = await hashPasswordLegacy(password);
     const data = await auth<any>("/auth/login", {
-      method: "POST",
-      body: JSON.stringify({
-        email,
-        password: hashed,
-        password_legacy: legacyPbkdf2Hash,
-        legacy_password: legacyHash,
-        recaptcha_token: recaptchaToken || "",
-      }),
+      method: "POST", skipAuth: true,
+      body: await credentialBody("login", { email, password, recaptcha_token: recaptchaToken || "" }),
     });
     if (data.session) {
       setTokens(data.session.access_token);
@@ -1457,29 +1373,15 @@ export const authApi = {
       body: JSON.stringify({ token, type }),
     }),
   resetPassword: async (password: string) => {
-    const me = await authApi.getMe().catch(() => null);
-    const accountHint = me?.auth_email || me?.profile?.email || "";
-    const hashed = await hashPassword(password, accountHint);
     return auth<any>("/auth/reset-password", {
       method: "POST",
-      body: JSON.stringify({ password: hashed }),
+      body: await credentialBody("reset-password", { password }),
     });
   },
   changePassword: async (currentPassword: string, newPassword: string) => {
-    const me = await authApi.getMe().catch(() => null);
-    const accountHint = me?.auth_email || me?.profile?.email || "";
-    const currentHash = await hashPassword(currentPassword, accountHint);
-    const currentLegacyPbkdf2Hash = await hashPasswordV3(currentPassword);
-    const currentLegacyHash = await hashPasswordLegacy(currentPassword);
-    const newHash = await hashPassword(newPassword, accountHint);
     return auth<any>("/auth/change-password", {
       method: "POST",
-      body: JSON.stringify({
-        current_password: currentHash,
-        current_password_legacy: currentLegacyPbkdf2Hash,
-        current_password_legacy_v2: currentLegacyHash,
-        password: newHash,
-      }),
+      body: await credentialBody("change-password", { current_password: currentPassword, password: newPassword }),
     });
   },
   refresh: async (options: AuthRefreshOptions = {}) => {

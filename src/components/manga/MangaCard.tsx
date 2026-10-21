@@ -8,6 +8,8 @@ import { adaptMangaDetail } from '@/lib/adapters';
 import { getMangaDetailPath, getMangaSource } from '@/lib/mangaLinks';
 import OptimizedImage from '@/components/ui/OptimizedImage';
 import { useCallback } from 'react';
+import { useCardMetadata } from '@/hooks/useCardMetadata';
+import { useCardChapter } from '@/hooks/useCardChapter';
 
 interface MangaCardProps {
   manga: Manga;
@@ -193,16 +195,10 @@ function isPlaceholderChapter(ch: Manga['chapters'][number] | undefined): boolea
 
 function chapterTimeLabel(
   ch: Manga['chapters'][number] | undefined,
-  mangaLastUpdated?: string,
 ): string {
-  if (ch && !isPlaceholderChapter(ch)) {
-    const chapterTime = timeAgoVi(ch.uploadDate);
-    if (chapterTime) return chapterTime;
-  }
-
-  const mangaTime = timeAgoVi(mangaLastUpdated || '');
-  if (!mangaTime) return '';
-  return mangaTime;
+  if (!ch || (isPlaceholderChapter(ch) && !ch.translationSource)) return '';
+  // Catalog crawl time is not chapter publication time.
+  return timeAgoVi(ch.uploadDate);
 }
 
 function chapterSortTimestamp(ch?: Manga['chapters'][number]): number {
@@ -225,12 +221,16 @@ function pickLatestChapter(chapters: Manga['chapters']): Manga['chapters'][numbe
   })[0];
 }
 
-const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) => {
+const MangaCard = ({ manga: originalManga, index = 0, variant = 'default' }: MangaCardProps) => {
+  const manga = useCardChapter(useCardMetadata(originalManga));
   const lastChapter = pickLatestChapter(manga.chapters);
-  const chapterTime = chapterTimeLabel(lastChapter, manga.lastUpdated);
+  const chapterTime = manga.chapterAvailability ? '' : chapterTimeLabel(lastChapter);
   const queryClient = useQueryClient();
   const isMangaDexItem = getMangaSource(manga.id, manga.source) === 'mangadex';
-  const chapterLabel = chapterDisplay(lastChapter, manga.status, isMangaDexItem);
+  const isOTruyenItem = !isMangaDexItem && manga.source !== 'uploaded';
+  const chapterLabel = manga.chapterAvailability === 'unavailable' ? 'Chưa tìm thấy trên QQ'
+    : manga.chapterAvailability === 'empty' ? (isMangaDexItem ? 'Chưa có chương tiếng Việt' : 'Chưa có chương')
+    : chapterDisplay(lastChapter, manga.status, isMangaDexItem);
   const chapterMetaLabel = chapterTime ? `${chapterLabel} - ${chapterTime}` : chapterLabel;
   const safeCoverFallback = String(manga.coverProxy || '').trim() || DEFAULT_CARD_COVER_FALLBACK;
   const mangaDexCatalogCover = resolveMangaDexCardCover(manga.cover, manga.coverProxy);
@@ -241,9 +241,9 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
   const coverFallbackSrc = isMangaDexItem
     ? (mangaDexCurrentCover || (isUsableCoverSrc(mangaDexCatalogCover) ? mangaDexCatalogCover : DEFAULT_CARD_COVER_FALLBACK))
     : safeCoverFallback;
-  const coverFallbackDelayMs = isMangaDexItem ? 1800 : undefined;
+  const coverFallbackDelayMs = isMangaDexItem ? 8000 : isOTruyenItem ? 10_000 : undefined;
   const coverPriority = variant === 'horizontal' ? index < 3 : index < 4;
-  const coverMaxRetries = isMangaDexItem ? 2 : 1;
+  const coverMaxRetries = isMangaDexItem || isOTruyenItem ? 2 : 1;
   const detailLinkState = { previewManga: manga };
   const detailPath = getMangaDetailPath(manga.id);
   const ratingLabel = Number(manga.rating).toFixed(1);
@@ -289,7 +289,7 @@ const MangaCard = ({ manga, index = 0, variant = 'default' }: MangaCardProps) =>
   const prefetchDetail = useCallback(() => {
     if (manga.externalUrl || isMangaDexItem) return;
     const detailLookupId = manga.slug || manga.id;
-    const prefetchKey = ['manga', 'detail', detailLookupId, 'otruyen', 'otruyen'] as const;
+    const prefetchKey = ['manga', 'detail', detailLookupId, 'truyenqq', 'truyenqq'] as const;
     if (queryClient.getQueryData(prefetchKey)) return;
     queryClient.prefetchQuery({
       queryKey: prefetchKey,

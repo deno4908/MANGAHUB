@@ -1404,7 +1404,7 @@ const UploadChapter = () => {
                                 <p className="text-[11px] text-muted-foreground line-clamp-1">{compactAuthorText(item.author || 'Chưa rõ tác giả')}</p>
                               </div>
                               <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide ${toMangaDexId(item.id) ? 'bg-primary/15 text-primary' : 'bg-secondary text-muted-foreground'}`}>
-                                {toMangaDexId(item.id) ? 'MangaDex' : 'OTruyen'}
+                                {toMangaDexId(item.id) ? 'MangaDex' : 'TruyenQQ'}
                               </span>
                             </button>
                           ))}

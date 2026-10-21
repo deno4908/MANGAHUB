@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from fastapi_app.services.cache_service import cache
+from fastapi_app.services.request_coalescing import coalesce_reads
 
 try:
     from curl_cffi.requests import Session as CurlSession
@@ -74,8 +75,8 @@ REQUEST_TIMEOUT_SECONDS = _env_float("MANGADEX_TIMEOUT_SECONDS", 12.0, minimum=5
 REQUEST_CONNECT_TIMEOUT_SECONDS = _env_float("MANGADEX_CONNECT_TIMEOUT_SECONDS", 10.0, minimum=1.0)
 REQUEST_CONNECT_TIMEOUT_SECONDS = min(REQUEST_CONNECT_TIMEOUT_SECONDS, REQUEST_TIMEOUT_SECONDS)
 REQUEST_RETRY_BACKOFF_SECONDS = _env_float("MANGADEX_RETRY_BACKOFF_SECONDS", 0.35, minimum=0.05)
-HTTP_KEEPALIVE_CONNECTIONS = _env_int("MANGADEX_HTTP_KEEPALIVE_CONNECTIONS", 0, minimum=0)
-HTTP_KEEPALIVE_EXPIRY_SECONDS = _env_float("MANGADEX_HTTP_KEEPALIVE_EXPIRY_SECONDS", 5.0, minimum=0.1)
+HTTP_KEEPALIVE_CONNECTIONS = _env_int("MANGADEX_HTTP_KEEPALIVE_CONNECTIONS", 8, minimum=0)
+HTTP_KEEPALIVE_EXPIRY_SECONDS = _env_float("MANGADEX_HTTP_KEEPALIVE_EXPIRY_SECONDS", 30.0, minimum=0.1)
 CURL_WORKERS = _env_int("MANGADEX_CURL_WORKERS", 8, minimum=1)
 CURL_IMPERSONATE = str(os.getenv("MANGADEX_CURL_IMPERSONATE", "chrome131") or "chrome131").strip() or "chrome131"
 DETAIL_CHAPTER_PAGE_CONCURRENCY = _env_int(
@@ -117,7 +118,7 @@ CHAPTER_PAGES_TTL = 120
 TOTAL_COUNT_TTL = 600
 STALE_TTL = 3600
 VI_CATALOG_LOOKUP_INDEX_TTL = 90
-LATEST_CHAPTER_CACHE_VERSION = 3
+LATEST_CHAPTER_CACHE_VERSION = 4
 LATEST_CHAPTER_LOW_CONFIDENCE_FALLBACK_MAX = _env_int(
     "MANGADEX_LATEST_LOW_CONFIDENCE_FALLBACK_MAX", 16, minimum=1
 )
@@ -230,9 +231,50 @@ def _load_json_cache_payload(cache_key: str) -> dict[str, Any] | None:
         cache.delete(cache_key)
         return None
     if isinstance(data, dict):
+        if cache_key.startswith("mangadex:vi-catalog:") and isinstance(data.get("mangas"), list):
+            _overlay_live_catalog_chapters(data)
         return data
     cache.delete(cache_key)
     return None
+
+
+def _overlay_live_catalog_chapters(payload: dict[str, Any]) -> None:
+    """Keep large discovery snapshots current without crawling the catalog again."""
+    probe = _load_json_cache_payload("catalog:probe:mangadex") or {}
+    by_manga = {}
+    for raw in probe.get("data") or []:
+        manga_id = _extract_manga_id_from_chapter(raw)
+        if manga_id:
+            by_manga.setdefault(manga_id, []).append(raw)
+    for manga in payload["mangas"]:
+        if not isinstance(manga, dict):
+            continue
+        rows = by_manga.get(manga.get("id"))
+        if not rows:
+            continue
+        chapters = manga.get("chapters")
+        if not isinstance(chapters, list):
+            chapters = manga["chapters"] = []
+        by_id = {chapter.get("id"): chapter for chapter in chapters if isinstance(chapter, dict)}
+        for raw in rows:
+            attributes = raw.get("attributes") or {}
+            if attributes.get("translatedLanguage") != "vi":
+                continue
+            groups = _parse_scanlation_groups(_relation_bucket(raw).get("scanlation_group", []))
+            number = str(attributes.get("chapter") or "0")
+            entry = {"id": raw.get("id"), "chapter": number, "title": attributes.get("title", ""),
+                     "translated_language": "vi", "external_url": attributes.get("externalUrl", ""),
+                     "publish_at": attributes.get("publishAt", ""), "readable_at": attributes.get("readableAt", ""),
+                     "created_at": attributes.get("createdAt", ""), "updated_at": attributes.get("updatedAt", ""),
+                     "scanlation_groups": groups, "chapter_with_groups": _build_chapter_with_groups(number, groups),
+                     "translation_source": "mangadex", "translation_source_label": "MangaDex"}
+            if entry["id"] in by_id:
+                by_id[entry["id"]].update(entry)
+            else:
+                chapters.append(entry)
+            timestamp = entry["readable_at"] or entry["publish_at"] or entry["updated_at"]
+            if timestamp and timestamp > str(manga.get("local_last_published_at") or ""):
+                manga["local_last_published_at"] = timestamp
 
 
 def _load_non_empty_vi_catalog_fallback(max_chapters: int | None) -> dict[str, Any] | None:
@@ -699,19 +741,28 @@ def _request_fingerprint(path: str, params: dict[str, Any] | None) -> str:
     return f"{path}?{body}"
 
 
+def _live_revision(manga_id: str = "") -> str:
+    key = (f"catalog:book-version:mangadex:{manga_id}" if manga_id else
+           "catalog:source-version:mangadex")
+    value = cache.get(key)
+    return value if isinstance(value, str) else ""
+
+
 async def _request_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    key = _request_fingerprint(path, params)
+    key = _request_fingerprint(path, params) + ":rev=" + _live_revision()
     existing = _inflight_request_tasks.get(key)
     if existing and not existing.done():
         return await asyncio.shield(existing)
 
     task = asyncio.create_task(_request_json_direct(path, params))
     _inflight_request_tasks[key] = task
-    try:
-        return await asyncio.shield(task)
-    finally:
+    def finished(done):
         if _inflight_request_tasks.get(key) is task:
             _inflight_request_tasks.pop(key, None)
+        if not done.cancelled():
+            done.exception()
+    task.add_done_callback(finished)
+    return await asyncio.shield(task)
 
 
 async def _request_json_direct(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -911,18 +962,18 @@ async def _get_mangadex_tag_id_by_slug() -> dict[str, str]:
     return tag_map
 
 
-async def _resolve_mangadex_tag_ids(slugs: list[str] | None) -> list[str]:
+async def _resolve_mangadex_tag_ids(slugs: list[str] | None) -> list[str] | None:
     normalized = [_slugify_tag(slug) for slug in (slugs or [])]
-    normalized = [slug for slug in dict.fromkeys(normalized) if slug]
+    normalized = [slug for slug in dict.fromkeys(normalized) if slug and slug not in {"all", "any", "*"}]
     if not normalized:
         return []
     try:
         tag_map = await _get_mangadex_tag_id_by_slug()
-    except Exception:
-        return []
-    if any(slug in {"all", "any", "*"} for slug in normalized):
-        return list(dict.fromkeys(str(tag_id) for tag_id in tag_map.values() if tag_id))
-    return [tag_map[slug] for slug in normalized if slug in tag_map]
+    except Exception as error:
+        raise RuntimeError("Không tải được bộ lọc thể loại MangaDex") from error
+    if any(slug not in tag_map for slug in normalized):
+        return None  # Unknown filters cannot silently broaden the request.
+    return list(dict.fromkeys(tag_map[slug] for slug in normalized))
 
 
 def _relation_bucket(item: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -1293,6 +1344,7 @@ def _latest_chapter_info_from_cached_catalog(manga_id: str) -> dict[str, str] | 
             ):
                 best_entry = candidate_entry
                 best_info = {
+                    "id": candidate_entry["id"],
                     "chapter_name": chapter_name or "0",
                     "chapter_title": chapter_title,
                     "publish_at": publish_at,
@@ -1301,24 +1353,7 @@ def _latest_chapter_info_from_cached_catalog(manga_id: str) -> dict[str, str] | 
     if best_info and str(best_info.get("chapter_name") or "").strip():
         return best_info
 
-    last_chapter = str(
-        manga.get("latest_chapter")
-        or manga.get("last_chapter")
-        or manga.get("chapter_newest")
-        or ""
-    ).strip()
-    if not last_chapter:
-        return None
-    if _chapter_number_value(last_chapter) <= 0 and last_chapter.replace(",", ".") not in {"0", "0.0"}:
-        matched = _CHAPTER_NUMBER_RE.search(last_chapter)
-        if not matched:
-            return None
-
-    return {
-        "chapter_name": last_chapter,
-        "chapter_title": "",
-        "publish_at": manga_updated_at,
-    }
+    return None
 
 
 def _normalize_latest_chapter_language(value: str) -> str:
@@ -1330,18 +1365,22 @@ def _normalize_latest_chapter_language(value: str) -> str:
 
 def _latest_chapter_cache_key(manga_id: str, translated_language: str) -> str:
     language = _normalize_latest_chapter_language(translated_language)
+    revision = _live_revision(manga_id)
+    suffix = f":rev={revision}" if revision else ""
     # Keep the established Vietnamese key warm while separating every other
     # translation so a VI chapter is never shown for a Japanese result.
     if language == "vi":
-        return f"mangadex:latest-chapter:v{LATEST_CHAPTER_CACHE_VERSION}:{manga_id}"
-    return f"mangadex:latest-chapter:v{LATEST_CHAPTER_CACHE_VERSION}:lang={language}:{manga_id}"
+        return f"mangadex:latest-chapter:v{LATEST_CHAPTER_CACHE_VERSION}:{manga_id}{suffix}"
+    return f"mangadex:latest-chapter:v{LATEST_CHAPTER_CACHE_VERSION}:lang={language}:{manga_id}{suffix}"
 
 
+@coalesce_reads(revision=lambda: _live_revision())
 async def _get_latest_vi_chapter_for_manga(
     manga_id: str,
     *,
     translated_language: str = "vi",
     ignore_cache: bool = False,
+    raise_on_error: bool = False,
 ) -> dict[str, str]:
     language = _normalize_latest_chapter_language(translated_language)
     cache_key = _latest_chapter_cache_key(manga_id, language)
@@ -1361,10 +1400,11 @@ async def _get_latest_vi_chapter_for_manga(
         data = payload.get("data") or []
         for chapter in data:
             attributes = (chapter or {}).get("attributes") or {}
-            chapter_name = str(attributes.get("chapter") or "").strip()
+            raw_chapter = attributes.get("chapter")
+            chapter_name = str(raw_chapter if raw_chapter is not None else "").strip()
             candidate_info = {
                 "id": str((chapter or {}).get("id") or "").strip(),
-                "chapter_name": chapter_name or "0",
+                "chapter_name": chapter_name,
                 "chapter_title": str(attributes.get("title") or ""),
                 "publish_at": str(attributes.get("publishAt") or ""),
             }
@@ -1386,33 +1426,22 @@ async def _get_latest_vi_chapter_for_manga(
             {
                 "manga": manga_id,
                 "translatedLanguage[]": language,
+                "contentRating[]": ["safe", "suggestive", "erotica", "pornographic"],
                 "order[chapter]": "desc",
                 "order[publishAt]": "desc",
-                "limit": 80,
+                "limit": 1,
                 "offset": 0,
             },
         )
         _ingest_payload(payload_by_chapter)
 
-        # Second pass: add recent chapters as fallback/tie-break.
-        needs_publish_probe = best_entry is None or _chapter_number_from_entry(best_entry) <= 1
-        if needs_publish_probe:
-            payload_by_publish = await _request_json(
-                "/chapter",
-                {
-                    "manga": manga_id,
-                    "translatedLanguage[]": language,
-                    "order[publishAt]": "desc",
-                    "limit": 120,
-                    "offset": 0,
-                },
-            )
-            _ingest_payload(payload_by_publish)
     except RuntimeError:
-        pass
+        if raise_on_error:
+            raise
 
     # Only cache if we got a real result — don't lock in empty data
-    if str(chapter_info.get("chapter_name") or "").strip():
+    if chapter_info.get("id"):
+        chapter_info["verified_head"] = True
         cache.set(cache_key, json.dumps(chapter_info, ensure_ascii=False), ttl=VI_CATALOG_TTL)
     return chapter_info
 
@@ -1424,193 +1453,41 @@ def _extract_manga_id_from_chapter(chapter: dict[str, Any]) -> str:
     return str((relations[0] or {}).get("id") or "")
 
 
+@coalesce_reads(revision=lambda: _live_revision())
 async def _get_latest_vi_chapter_for_manga_ids(
-    manga_ids: list[str],
-    *,
-    translated_language: str = "vi",
-    allow_individual_fallback: bool = True,
+    manga_ids: list[str], *, translated_language: str = "vi", allow_individual_fallback: bool = True,
 ) -> dict[str, dict[str, str]]:
     language = _normalize_latest_chapter_language(translated_language)
-    normalized_ids = [str(manga_id or "").strip() for manga_id in manga_ids]
-    normalized_ids = [manga_id for manga_id in dict.fromkeys(normalized_ids) if manga_id]
-    result: dict[str, dict[str, str]] = {}
-    missing_ids: list[str] = []
-
-    for manga_id in normalized_ids:
-        cache_key = _latest_chapter_cache_key(manga_id, language)
-        cached = cache.get(cache_key)
-        if cached:
-            try:
-                result[manga_id] = json.loads(cached)
-                continue
-            except Exception:
-                cache.delete(cache_key)
-        missing_ids.append(manga_id)
-
-    if missing_ids:
-        found: dict[str, dict[str, str]] = {}
-        found_entries: dict[str, dict[str, Any]] = {}
-        # Batch request — use a generous limit so we don't miss manga
-        batch_limit = 500 if not allow_individual_fallback else min(500, max(50, len(missing_ids) * 10))
-
-        async def _fetch_batch_payload(order_params: dict[str, str]) -> dict[str, Any] | None:
-            request = _request_json(
-                "/chapter",
-                {
-                    "manga[]": missing_ids,
-                    "translatedLanguage[]": language,
-                    "includes[]": "manga",
-                    **order_params,
-                    "limit": batch_limit,
-                    "offset": 0,
-                },
-            )
-            if allow_individual_fallback:
-                return await request
-            return await asyncio.wait_for(
-                request,
-                timeout=LATEST_CHAPTER_BATCH_TIMEOUT_SECONDS,
-            )
-
-        def _ingest_batch_payload(payload: dict[str, Any] | None) -> None:
-            if not isinstance(payload, dict):
-                return
-            for chapter in payload.get("data") or []:
-                manga_id = _extract_manga_id_from_chapter(chapter)
-                if not manga_id:
-                    continue
-                attributes = chapter.get("attributes") or {}
-                chapter_name = str(attributes.get("chapter") or "").strip()
-                candidate_info = {
-                    "id": str(chapter.get("id") or "").strip(),
-                    "chapter_name": chapter_name or "0",
-                    "chapter_title": str(attributes.get("title") or ""),
-                    "publish_at": str(attributes.get("publishAt") or ""),
-                }
-                candidate_entry = {
-                    "id": str(chapter.get("id") or ""),
-                    "chapter": candidate_info["chapter_name"],
-                    "chapter_with_groups": candidate_info["chapter_title"],
-                    "publish_at": candidate_info["publish_at"],
-                }
-
-                current_entry = found_entries.get(manga_id)
-                if current_entry is None or _is_preferred_latest_chapter(candidate_entry, current_entry):
-                    found_entries[manga_id] = candidate_entry
-                    found[manga_id] = candidate_info
-
-        try:
-            if allow_individual_fallback:
-                payload = await _fetch_batch_payload({"order[publishAt]": "desc"})
-                _ingest_batch_payload(payload)
-            else:
-                batch_results = await asyncio.gather(
-                    _fetch_batch_payload({"order[publishAt]": "desc"}),
-                    _fetch_batch_payload({"order[chapter]": "desc", "order[publishAt]": "desc"}),
-                    return_exceptions=True,
-                )
-                for payload in batch_results:
-                    if isinstance(payload, Exception):
-                        continue
-                    _ingest_batch_payload(payload)
-        except (RuntimeError, asyncio.TimeoutError):
-            pass
-
-        # Individual fallback for manga not found in batch, or low-confidence chapter picks.
-        still_missing = [mid for mid in missing_ids if mid not in found]
-        low_confidence_ids = [
-            mid
-            for mid in missing_ids
-            if mid in found_entries and _chapter_number_from_entry(found_entries[mid]) <= 1
-        ]
-        fallback_requests: list[tuple[str, bool]] = []
-        seen_fallback: set[str] = set()
-
-        for manga_id in still_missing:
-            if manga_id in seen_fallback:
-                continue
-            seen_fallback.add(manga_id)
-            fallback_requests.append((manga_id, False))
-
-        low_confidence_count = 0
-        for manga_id in low_confidence_ids:
-            if manga_id in seen_fallback:
-                continue
-            if low_confidence_count >= LATEST_CHAPTER_LOW_CONFIDENCE_FALLBACK_MAX:
-                break
-            seen_fallback.add(manga_id)
-            fallback_requests.append((manga_id, True))
-            low_confidence_count += 1
-
-        if fallback_requests and allow_individual_fallback:
-            semaphore = asyncio.Semaphore(max(1, LATEST_CHAPTER_FALLBACK_CONCURRENCY))
-
-            async def _resolve_fallback(
-                fallback_manga_id: str,
-                fallback_ignore_cache: bool,
-            ) -> tuple[str, dict[str, str] | None]:
-                async with semaphore:
-                    try:
-                        response = await _get_latest_vi_chapter_for_manga(
-                            fallback_manga_id,
-                            translated_language=language,
-                            ignore_cache=fallback_ignore_cache,
-                        )
-                    except Exception:
-                        return fallback_manga_id, None
-
-                if not (isinstance(response, dict) and str(response.get("chapter_name") or "").strip()):
-                    return fallback_manga_id, None
-                return fallback_manga_id, response
-
-            individual_results = await asyncio.gather(
-                *[
-                    _resolve_fallback(mid, ignore_cache)
-                    for mid, ignore_cache in fallback_requests
-                ],
-                return_exceptions=False,
-            )
-
-            for mid, res in individual_results:
-                if not res:
-                    continue
-
-                candidate_entry = {
-                    "id": "",
-                    "chapter": str(res.get("chapter_name") or ""),
-                    "chapter_with_groups": str(res.get("chapter_title") or ""),
-                    "publish_at": str(res.get("publish_at") or ""),
-                }
-                current_entry = found_entries.get(mid)
-                if current_entry is None or _is_preferred_latest_chapter(candidate_entry, current_entry):
-                    found_entries[mid] = candidate_entry
-                    found[mid] = res
-
-        for manga_id in missing_ids:
-            catalog_fallback = None if allow_individual_fallback else _latest_chapter_info_from_cached_catalog(manga_id)
-            if language != "vi":
-                catalog_fallback = None
-            chapter_info = (
-                found.get(manga_id)
-                or catalog_fallback
-                or {"id": "", "chapter_name": "", "chapter_title": "", "publish_at": ""}
-            )
-            result[manga_id] = chapter_info
-            # Only cache successful lookups — don't cache empty results so next request retries
-            if str(chapter_info.get("chapter_name") or "").strip():
-                cache.set(
-                    _latest_chapter_cache_key(manga_id, language),
-                    json.dumps(chapter_info, ensure_ascii=False),
-                    ttl=VI_CATALOG_TTL,
-                )
-
+    ids = list(dict.fromkeys(str(value).strip().lower() for value in manga_ids
+                            if _MANGADEX_UUID_RE.fullmatch(str(value).strip())))[:100]
+    result = {}
+    missing = []
+    for manga_id in ids:
+        info = _load_json_cache_payload(_latest_chapter_cache_key(manga_id, language))
+        if not info and language == "vi":
+            info = _latest_chapter_info_from_cached_catalog(manga_id)
+        if info:
+            result[manga_id] = info
+        else:
+            missing.append(manga_id)
+    # /chapter accepts one manga UUID, not manga[]. A failed array query used
+    # to trigger up to two additional requests for every visible card.
+    # Fast card hydration is cache-only; opening a title fetches its real feed.
+    if allow_individual_fallback:
+        semaphore = asyncio.Semaphore(2)
+        async def fetch(manga_id):
+            async with semaphore:
+                info = await _get_latest_vi_chapter_for_manga(manga_id, translated_language=language)
+                if info.get("id"):
+                    result[manga_id] = info
+        await asyncio.gather(*(fetch(manga_id) for manga_id in missing))
     return result
 
 
 def _to_legacy_item(manga: dict[str, Any], latest_chapter: dict[str, str] | None = None) -> dict[str, Any]:
     category = [{"name": genre, "slug": genre.lower().replace(" ", "-")} for genre in manga.get("genres", [])]
     chapter_id = str((latest_chapter or {}).get("id") or "").strip()
-    chapter_name = str((latest_chapter or {}).get("chapter_name") or manga.get("last_chapter") or "")
+    chapter_name = str((latest_chapter or {}).get("chapter_name") or "")
     chapter_title = str((latest_chapter or {}).get("chapter_title") or "")
     publish_at = str((latest_chapter or {}).get("publish_at") or manga.get("updated_at") or "")
     chapters_latest: list[dict[str, Any]] = []
@@ -1638,7 +1515,7 @@ def _to_legacy_item(manga: dict[str, Any], latest_chapter: dict[str, str] | None
         "local_last_published_at": publish_at,
         "category": category,
         "chaptersLatest": chapters_latest,
-        "last_chapter": str(manga.get("last_chapter") or ""),
+        "last_chapter": chapter_name,
         "rating_average": 0,
         "view_count": 0,
         "content_rating": str(manga.get("content_rating") or "").strip().lower(),
@@ -1896,6 +1773,7 @@ def _payload_has_latest_sort_signal(payload: Any) -> bool:
     return False
 
 
+@coalesce_reads(revision=lambda: _live_revision())
 async def get_vi_catalog(
     max_chapters: int | None = 2000,
     *,
@@ -2277,12 +2155,14 @@ async def get_latest_vi_chapters_for_manga_ids(
     )
 
 
+@coalesce_reads(revision=lambda: _live_revision())
 async def get_latest_vi_chapter_feed(
     page: int = 1,
     limit: int = 24,
     *,
     content_ratings: list[str] | None = None,
     excluded_manga_ids: list[str] | None = None,
+    snapshot: bool = False,
 ) -> dict[str, Any]:
     """Return latest MangaDex VI updates as unique manga pages.
 
@@ -2316,9 +2196,9 @@ async def get_latest_vi_chapter_feed(
         ).hexdigest()[:12]
 
     cache_key = (
-        f"mangadex:latest-vi-feed:v2:{page}:{limit}:"
+        f"mangadex:latest-vi-feed:v3:{page}:{limit}:snapshot={int(snapshot)}:"
         f"rating={','.join(normalized_content_ratings)}:"
-        f"excluded={excluded_cache_token}"
+        f"excluded={excluded_cache_token}:rev={_live_revision()}"
     )
     cached = cache.get(cache_key)
     if cached:
@@ -2332,20 +2212,22 @@ async def get_latest_vi_chapter_feed(
     total = 0
     offset = 0
     request_limit = min(100, max(24, int(LATEST_FEED_CHAPTER_PAGE_SIZE or 100)))
-    max_batches = max(2, min(LATEST_FEED_MAX_BATCHES, page * 4 + 4))
+    max_batches = 1 if snapshot else max(2, min(LATEST_FEED_MAX_BATCHES, page * 4 + 4))
 
     for _ in range(max_batches):
-        payload = await _request_json(
-            "/chapter",
-            {
-                "translatedLanguage[]": "vi",
-                "includes[]": ["user", "scanlation_group", "manga"],
-                "contentRating[]": normalized_content_ratings,
-                "order[readableAt]": "desc",
-                "limit": request_limit,
-                "offset": offset,
-            },
-        )
+        payload = _load_json_cache_payload("catalog:probe:mangadex") if snapshot and page == 1 else None
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            payload = await _request_json(
+                "/chapter",
+                {
+                    "translatedLanguage[]": "vi",
+                    "includes[]": ["user", "scanlation_group", "manga"],
+                    "contentRating[]": normalized_content_ratings,
+                    "order[readableAt]": "desc",
+                    "limit": request_limit,
+                    "offset": offset,
+                },
+            )
         total = max(total, int(payload.get("total") or 0))
         chapters = payload.get("data") or []
         if not chapters:
@@ -2362,6 +2244,8 @@ async def get_latest_vi_chapter_feed(
             manga_relation = manga_relations[0]
             manga_id = str(manga_relation.get("id") or "").strip()
             manga_attributes = manga_relation.get("attributes") or {}
+            if manga_attributes.get("contentRating", "safe") not in normalized_content_ratings:
+                continue
             if not manga_id or not isinstance(manga_attributes, dict):
                 continue
             if manga_id.lower() in normalized_excluded_ids:
@@ -2444,6 +2328,10 @@ async def get_latest_vi_chapter_feed(
             item["chaptersLatest"][0]["chapter_api_data"] = str(latest.get("id") or "")
             item["chaptersLatest"][0]["publish_at"] = str(latest.get("readable_at") or latest.get("publish_at") or latest_time)
             item["chaptersLatest"][0]["updated_at"] = str(latest.get("updated_at") or latest.get("readable_at") or latest.get("publish_at") or latest_time)
+        if latest.get("id"):
+            info = {"id": latest["id"], "chapter_name": str(latest.get("chapter") or "0"),
+                    "chapter_title": str(latest.get("chapter_with_groups") or ""), "publish_at": latest_time}
+            cache.set(_latest_chapter_cache_key(manga_id, "vi"), json.dumps(info), ttl=VI_CATALOG_TTL)
         items.append(item)
 
     result = {
@@ -2485,6 +2373,7 @@ async def get_total_vi_manga_count() -> int:
     return total
 
 
+@coalesce_reads(revision=lambda: _live_revision())
 async def search_manga(
     keyword: str,
     page: int = 1,
@@ -2512,6 +2401,9 @@ async def search_manga(
     if normalized_sort not in {"relevance", "latest", "popular", "updated", "title"}:
         normalized_sort = "relevance"
     tag_ids = await _resolve_mangadex_tag_ids(included_tag_slugs)
+    if tag_ids is None:
+        return {"data": {"items": [], "params": {"pagination": {
+            "totalItems": 0, "totalItemsPerPage": limit, "currentPage": page, "totalPages": 1}}}}
     normalized_tags_mode = str(included_tags_mode or "AND").strip().upper()
     if normalized_tags_mode not in {"AND", "OR"}:
         normalized_tags_mode = "AND"
@@ -2571,11 +2463,11 @@ async def search_manga(
     ] or ["safe", "suggestive"]
     manga_ids_key = hashlib.sha1(",".join(normalized_manga_ids).encode("utf-8")).hexdigest() if normalized_manga_ids else ""
     cache_key = (
-        f"mangadex:search:v3:{normalized_keyword.lower()}:{page}:{limit}:offset={offset}:"
+        f"mangadex:search:v4:{normalized_keyword.lower()}:{page}:{limit}:offset={offset}:"
         f"lang={normalized_language}:latest={1 if should_attach_latest else 0}:"
         f"tags={','.join(tag_ids)}:tag_mode={normalized_tags_mode}:status={','.join(normalized_statuses)}:"
         f"orig_lang={','.join(normalized_original_languages)}:"
-        f"sort={normalized_sort}:rating={','.join(normalized_content_ratings)}:ids={manga_ids_key}"
+        f"sort={normalized_sort}:rating={','.join(normalized_content_ratings)}:ids={manga_ids_key}:rev={_live_revision()}"
     )
     cached = cache.get(cache_key)
     if cached:
@@ -2617,6 +2509,9 @@ async def search_manga(
         params["excludedTagsMode"] = "OR"
     if normalized_statuses:
         params["status[]"] = normalized_statuses
+    # The title filter applies to every ordering, including latest/popular.
+    if normalized_keyword and not is_mangadex_tag:
+        params["title"] = normalized_keyword
     if is_mangadex_tag:
         params["order[latestUploadedChapter]"] = "desc"
     elif normalized_sort == "latest":
@@ -2629,7 +2524,6 @@ async def search_manga(
         params["order[title]"] = "asc"
     else:
         if normalized_keyword:
-            params["title"] = normalized_keyword
             params["order[relevance]"] = "desc"
         else:
             params["order[latestUploadedChapter]"] = "desc"
@@ -2681,12 +2575,13 @@ async def search_manga(
         latest_map = await _get_latest_vi_chapter_for_manga_ids(
             [str(parsed.get("id") or "") for parsed in parsed_items],
             translated_language=normalized_language,
+            allow_individual_fallback=False,
         )
     items: list[dict[str, Any]] = []
     for parsed in parsed_items:
         manga_id = str(parsed.get("id") or "")
         default_latest = {
-            "chapter_name": str(parsed.get("last_chapter") or ""),
+            "chapter_name": "",
             "chapter_title": "",
             "publish_at": str(parsed.get("updated_at") or ""),
         }
@@ -2711,12 +2606,40 @@ async def search_manga(
     return result
 
 
+@coalesce_reads(revision=lambda: _live_revision())
+async def _get_manga_metadata(manga_id: str) -> dict[str, Any]:
+    key = f"mangadex:metadata:{manga_id}:rev={_live_revision(manga_id)}"
+    cached = _load_json_cache_payload(key)
+    if cached is not None:
+        return cached
+    payload = await _request_json(f"/manga/{manga_id}", {"includes[]": ["author", "artist", "cover_art"]})
+    if payload.get("data"):
+        _cache_payload(key, payload, ttl=MANGA_DETAIL_TTL)
+    return payload
+
+
+@coalesce_reads(revision=lambda: _live_revision())
+async def _get_manga_chapter_page(params: dict[str, Any]) -> dict[str, Any]:
+    # The quick detail and the full chapter list request the same first page.
+    # Keep it briefly so progressive loading does not download it twice.
+    digest = hashlib.sha256(_request_fingerprint("/chapter", params).encode()).hexdigest()
+    key = f"mangadex:detail-chapter-page:{params.get('manga', '')}:{digest}:rev={_live_revision(params.get('manga', ''))}"
+    cached = _load_json_cache_payload(key)
+    if cached is not None:
+        return cached
+    payload = await _request_json("/chapter", params)
+    if isinstance(payload.get("data"), list):
+        cache.set(key, json.dumps(payload, ensure_ascii=False), ttl=30)
+    return payload
+
+
+@coalesce_reads(revision=lambda: _live_revision())
 async def get_manga_lookup(manga_id: str) -> dict[str, Any]:
     normalized_manga_id = str(manga_id or "").strip().lower()
     if not normalized_manga_id:
         return {"manga": None}
 
-    cache_key = f"mangadex:lookup:{normalized_manga_id}"
+    cache_key = f"mangadex:lookup:{normalized_manga_id}:rev={_live_revision(normalized_manga_id)}"
     cached = cache.get(cache_key)
     if cached:
         try:
@@ -2727,10 +2650,7 @@ async def get_manga_lookup(manga_id: str) -> dict[str, Any]:
     stale_payload = _load_json_cache_payload(f"{cache_key}:stale")
 
     try:
-        manga_payload = await _request_json(
-            f"/manga/{normalized_manga_id}",
-            {"includes[]": ["author", "artist", "cover_art"]},
-        )
+        manga_payload = await _get_manga_metadata(normalized_manga_id)
     except RuntimeError as error:
         if stale_payload is not None:
             logger.warning(
@@ -2771,6 +2691,7 @@ async def get_manga_lookup(manga_id: str) -> dict[str, Any]:
     return result
 
 
+@coalesce_reads(revision=lambda: _live_revision())
 async def get_manga_detail(
     manga_id: str,
     max_chapters: int | None = 200,
@@ -2787,7 +2708,7 @@ async def get_manga_detail(
     cache_key = (
         f"mangadex:detail:v{MANGA_DETAIL_CACHE_VERSION}:{manga_id}:"
         f"{'all' if max_chapters is None else max_chapters}:"
-        f"lang={normalized_language}:group={normalized_group_id or 'all'}"
+        f"lang={normalized_language}:group={normalized_group_id or 'all'}:rev={_live_revision(manga_id)}"
     )
     cached = cache.get(cache_key)
     if cached:
@@ -2802,7 +2723,7 @@ async def get_manga_detail(
             fallback_key = (
                 f"mangadex:detail:v{MANGA_DETAIL_CACHE_VERSION}:{manga_id}:"
                 f"{'all' if fallback_cap is None else fallback_cap}:"
-                f"lang={normalized_language}:group={normalized_group_id or 'all'}:stale"
+                f"lang={normalized_language}:group={normalized_group_id or 'all'}:rev={_live_revision(manga_id)}:stale"
             )
             fallback_payload = _load_json_cache_payload(fallback_key)
             if isinstance(fallback_payload, dict) and isinstance(fallback_payload.get("manga"), dict):
@@ -2811,6 +2732,7 @@ async def get_manga_detail(
 
     if (
         not normalized_group_id
+        and not _live_revision(manga_id)
         and normalized_language == "vi"
         and max_chapters is not None
         and int(max_chapters) <= 1
@@ -2843,46 +2765,6 @@ async def get_manga_detail(
             }
             _cache_payload(cache_key, quick_result, ttl=60)
             return quick_result
-
-    person_cache: dict[str, dict[str, str]] = {}
-    try:
-        manga_payload = await _request_json(
-            f"/manga/{manga_id}",
-            {"includes[]": ["author", "artist", "cover_art"]},
-        )
-    except RuntimeError as error:
-        if stale_payload is not None:
-            logger.warning(
-                "MangaDex detail using stale cache for %s: %s",
-                manga_id,
-                error,
-            )
-            return stale_payload
-        raise
-
-    manga_data = manga_payload.get("data") or {}
-    if not manga_data:
-        return {"manga": None}
-
-    attributes = manga_data.get("attributes") or {}
-    relationships = manga_data.get("relationships") or []
-    author_ids = _extract_related_ids(relationships, "author")
-    artist_ids = _extract_related_ids(relationships, "artist")
-    cover_url = _extract_cover_url(manga_id, relationships)
-    authors = _extract_people_from_relationships(relationships, "author")
-    artists = _extract_people_from_relationships(relationships, "artist")
-
-    if not authors:
-        authors = [await _safe_get_person_by_id(author_id, person_cache) for author_id in author_ids]
-    if not artists:
-        artists = [await _safe_get_person_by_id(artist_id, person_cache) for artist_id in artist_ids]
-    manga = _parse_manga(
-        attributes=attributes,
-        manga_id=manga_id,
-        authors=authors,
-        artists=artists,
-        cover_url=cover_url,
-    )
 
     chapters: list[dict[str, Any]] = []
     fetched_chapters = 0
@@ -2942,21 +2824,54 @@ async def get_manga_detail(
             if max_chapters is not None and fetched_chapters >= max_chapters:
                 break
 
-    first_limit = step if max_chapters is None else min(step, max_chapters)
-    first_data: list[dict[str, Any]] = []
+    person_cache: dict[str, dict[str, str]] = {}
     try:
-        first_payload = await _request_json("/chapter", _chapter_params(limit=first_limit, offset=0))
-        first_data = first_payload.get("data") or []
-        total = int(first_payload.get("total", 0))
+        first_limit = step if max_chapters is None else min(step, max_chapters)
+        manga_payload, first_payload = await asyncio.gather(
+            _get_manga_metadata(manga_id),
+            _get_manga_chapter_page(_chapter_params(limit=first_limit, offset=0)),
+        )
     except RuntimeError as error:
         if stale_payload is not None:
             logger.warning(
-                "MangaDex detail chapters using stale cache for %s: %s",
+                "MangaDex detail using stale cache for %s: %s",
                 manga_id,
                 error,
             )
             return stale_payload
-        logger.warning("MangaDex detail chapters unavailable for %s: %s", manga_id, error)
+        raise
+
+    manga_data = manga_payload.get("data") or {}
+    if not manga_data:
+        return {"manga": None}
+
+    attributes = manga_data.get("attributes") or {}
+    relationships = manga_data.get("relationships") or []
+    author_ids = _extract_related_ids(relationships, "author")
+    artist_ids = _extract_related_ids(relationships, "artist")
+    cover_url = _extract_cover_url(manga_id, relationships)
+    authors = _extract_people_from_relationships(relationships, "author")
+    artists = _extract_people_from_relationships(relationships, "artist")
+
+    if not authors or not artists:
+        missing_ids = list(dict.fromkeys((author_ids if not authors else []) + (artist_ids if not artists else [])))
+        people = await asyncio.gather(*[_safe_get_person_by_id(person_id, person_cache) for person_id in missing_ids])
+        people_by_id = dict(zip(missing_ids, people))
+        if not authors:
+            authors = [people_by_id[person_id] for person_id in author_ids]
+        if not artists:
+            artists = [people_by_id[person_id] for person_id in artist_ids]
+    manga = _parse_manga(
+        attributes=attributes,
+        manga_id=manga_id,
+        authors=authors,
+        artists=artists,
+        cover_url=cover_url,
+    )
+
+    first_data = first_payload.get("data") or []
+    total = int(first_payload.get("total", 0))
+    chapters_complete = True
 
     if first_data:
         _append_chapters(first_data)
@@ -2974,7 +2889,7 @@ async def get_manga_detail(
         for batch_start in range(0, len(offset_plan), batch_size):
             plan_batch = offset_plan[batch_start : batch_start + batch_size]
             tasks = [
-                _request_json("/chapter", _chapter_params(limit=limit, offset=offset))
+                _get_manga_chapter_page(_chapter_params(limit=limit, offset=offset))
                 for offset, limit in plan_batch
             ]
             payloads = await asyncio.gather(*tasks, return_exceptions=True)
@@ -2985,6 +2900,7 @@ async def get_manga_detail(
             )
             for (offset, _limit), payload in ordered:
                 if isinstance(payload, Exception):
+                    chapters_complete = False
                     logger.warning(
                         "MangaDex detail chapter page failed for %s at offset=%s: %s",
                         manga_id,
@@ -3032,10 +2948,13 @@ async def get_manga_detail(
         },
         "manga": manga,
     }
-    _cache_payload(cache_key, result, ttl=MANGA_DETAIL_TTL)
+    result["meta"]["chapters_complete"] = chapters_complete
+    if chapters_complete:
+        _cache_payload(cache_key, result, ttl=MANGA_DETAIL_TTL)
     return result
 
 
+@coalesce_reads(revision=lambda: _live_revision())
 async def get_chapter_pages(chapter_id: str, mode: str = "data", refresh: bool = False) -> dict[str, Any]:
     chapter_id = str(chapter_id or "").strip()
     normalized_mode = "data-saver" if str(mode or "").lower() in {"saver", "data-saver"} else "data"

@@ -101,11 +101,13 @@ const FilterPanel = () => {
   const toggleGenre = (slug: string) => {
     const genres = filters.genres.includes(slug)
       ? filters.genres.filter(g => g !== slug)
-      : [slug]; // OTruyen only supports 1 genre at a time
+      : [...filters.genres, slug];
     setFilter('genres', genres);
   };
 
-  const statuses = ['ongoing', 'completed', 'hiatus', 'cancelled'] as const;
+  const statuses = isMangaDexSource
+    ? ['ongoing', 'completed', 'hiatus', 'cancelled'] as const
+    : ['ongoing', 'completed'] as const;
   const years = Array.from({ length: 10 }, (_, i) => new Date().getFullYear() - i);
   const sorts = [
     { value: 'popular' as const, label: 'Phổ biến', icon: TrendingUp },

@@ -1,6 +1,7 @@
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { CatalogUpdates } from '@/hooks/useCatalogUpdates';
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Link, Navigate, Routes, Route, useLocation, useNavigate } from "react-router-dom";
 import { Component, useEffect, lazy, Suspense, useState, type ErrorInfo, type ReactNode } from "react";
@@ -780,6 +781,7 @@ const App = () => (
       <Toaster />
       <Sonner />
       <BrowserRouter>
+        <CatalogUpdates />
         <AppContent />
       </BrowserRouter>
     </TooltipProvider>

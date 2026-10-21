@@ -6,6 +6,7 @@ import os
 import threading
 import time
 import atexit
+from collections import OrderedDict
 from typing import Optional
 
 try:
@@ -40,7 +41,7 @@ class _InMemoryCache:
     """Fallback in-memory cache when Redis is not available."""
 
     def __init__(self):
-        self._store: dict = {}
+        self._store: OrderedDict = OrderedDict()
         self._lock = threading.Lock()
         self._dirty = False
         self._stop_event = threading.Event()
@@ -60,11 +61,11 @@ class _InMemoryCache:
                 raw = json.load(f)
             if isinstance(raw, dict):
                 now = time.time()
-                loaded = {
-                    k: (v[0], float(v[1]))
+                loaded = OrderedDict(
+                    (k, (v[0], float(v[1])))
                     for k, v in raw.items()
                     if isinstance(v, list) and len(v) == 2 and float(v[1]) > now
-                }
+                )
                 self._store = loaded
                 loaded_count = len(self._store)
                 self._prune_locked()
@@ -75,7 +76,7 @@ class _InMemoryCache:
                 if len(self._store) != loaded_count or file_size > RUNTIME_CACHE_MAX_PERSIST_BYTES:
                     self._dirty = True
         except Exception:
-            self._store = {}
+            self._store = OrderedDict()
 
     def _flush_loop(self):
         while not self._stop_event.is_set():
@@ -99,25 +100,14 @@ class _InMemoryCache:
             if total_size <= RUNTIME_CACHE_MAX_MEMORY_BYTES:
                 return
 
-        # Drop entries expiring soonest first. This keeps hot long-lived catalog
-        # snapshots around while preventing the local fallback cache from growing
-        # until JSON persistence starts stuttering the dev server.
-        ordered_keys = [
-            key
-            for key, _value in sorted(
-                self._store.items(),
-                key=lambda item: (float(item[1][1]), len(str(item[1][0]))),
-            )
-        ]
+        # Evict least recently used entries. Expiry is not popularity: a day-old
+        # cover hint must not immediately evict newly fetched one-hour metadata.
         total_size = sum(self._value_size(value) for value, _ in self._store.values())
-        while ordered_keys and (
+        while self._store and (
             len(self._store) > RUNTIME_CACHE_MAX_ENTRIES or
             total_size > RUNTIME_CACHE_MAX_MEMORY_BYTES
         ):
-            key = ordered_keys.pop(0)
-            item = self._store.pop(key, None)
-            if item is None:
-                continue
+            _key, item = self._store.popitem(last=False)
             total_size -= self._value_size(item[0])
 
     def _persistent_snapshot_locked(self) -> dict:
@@ -129,16 +119,16 @@ class _InMemoryCache:
                 continue
             candidates.append((key, value, expires_at, size))
 
-        candidates.sort(key=lambda item: item[2], reverse=True)
         snapshot = {}
         total_size = 2
-        for key, value, expires_at, size in candidates:
+        for key, value, expires_at, size in reversed(candidates):
             entry_size = len(key.encode("utf-8", errors="ignore")) + size + 64
             if total_size + entry_size > RUNTIME_CACHE_MAX_PERSIST_BYTES:
                 continue
             snapshot[key] = (value, expires_at)
             total_size += entry_size
-        return snapshot
+        # Preserve the LRU order when the same bounded snapshot is loaded again.
+        return dict(reversed(snapshot.items()))
 
     def _persist_to_disk(self):
         with self._lock:
@@ -169,11 +159,13 @@ class _InMemoryCache:
                 del self._store[key]
                 self._dirty = True
                 return None
+            self._store.move_to_end(key)
             return value
 
     def set(self, key: str, value: str, ttl: int = 300):
         with self._lock:
             self._store[key] = (value, time.time() + ttl)
+            self._store.move_to_end(key)
             self._prune_locked()
             self._dirty = True
 
@@ -183,10 +175,13 @@ class _InMemoryCache:
             self._dirty = True
 
     def flush_pattern(self, pattern: str):
-        """Delete keys matching a simple prefix pattern (e.g. 'otruyen:*')."""
+        """Delete matching keys without invalidating unrelated cache entries."""
+        self.flush_patterns([pattern])
+
+    def flush_patterns(self, patterns):
+        from fnmatch import fnmatchcase
         with self._lock:
-            prefix = pattern.rstrip("*")
-            keys_to_delete = [k for k in self._store if k.startswith(prefix)]
+            keys_to_delete = [k for k in self._store if any(fnmatchcase(k, pattern) for pattern in patterns)]
             for k in keys_to_delete:
                 del self._store[k]
             self._dirty = True
@@ -209,9 +204,33 @@ class _RedisCache:
 
     def flush_pattern(self, pattern: str):
         """Delete keys matching a pattern."""
-        keys = self._client.keys(pattern)
-        if keys:
-            self._client.delete(*keys)
+        batch = []
+        for key in self._client.scan_iter(match=pattern, count=200):
+            batch.append(key)
+            if len(batch) >= 200:
+                self._client.delete(*batch)
+                batch.clear()
+        if batch:
+            self._client.delete(*batch)
+
+    def flush_patterns(self, patterns):
+        """Scan each namespace once, even when hundreds of books changed."""
+        from fnmatch import fnmatchcase
+        groups = {}
+        for pattern in patterns:
+            root = pattern.split(":", 1)[0] if ":" in pattern else ""
+            namespace = root + ":*" if root and not any(c in root for c in "*?[") else "*"
+            groups.setdefault(namespace, []).append(pattern)
+        for namespace, matchers in groups.items():
+            batch = []
+            for key in self._client.scan_iter(match=namespace, count=500):
+                if any(fnmatchcase(key, pattern) for pattern in matchers):
+                    batch.append(key)
+                    if len(batch) >= 200:
+                        self._client.delete(*batch)
+                        batch.clear()
+            if batch:
+                self._client.delete(*batch)
 
 
 # Export single cache instance

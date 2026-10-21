@@ -16,6 +16,8 @@ dist-ssr
 .env.production
 
 # Python generated/runtime files
+.auth-credential-key.json
+.auth-credential-*
 __pycache__/
 *.py[cod]
 *$py.class
@@ -29,6 +31,18 @@ htmlcov/
 venv/
 .venv/
 backend/venv/
+
+# Rebuildable scraper and image caches
+backend/.image_cache/
+backend/.runtime_cache.json
+backend/truyenapi/.inspection/
+backend/truyenapi/.logs/
+backend/truyenapi/.runtime.json
+backend/truyenapi/data/
+backend/truyenapi/build/
+*.egg-info/
+*.tsbuildinfo
+vite.config.*.timestamp-*.mjs
 
 # Editor directories and files
 .vscode/*

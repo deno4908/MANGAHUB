@@ -378,13 +378,8 @@ def _can_view_public_profile(
 
 
 def _fallback_manga_thumb(slug: object, thumb: object = "") -> str:
-    thumb_text = str(thumb or "").strip()
-    if thumb_text:
-        return thumb_text
-    slug_text = str(slug or "").strip()
-    if not slug_text or len(slug_text) >= 32:
-        return ""
-    return f"https://img.otruyenapi.com/uploads/comics/{slug_text}-thumb.jpg"
+    from fastapi_app.routers.bookmarks import _thumb_from_slug
+    return _thumb_from_slug(str(slug or "").strip(), str(thumb or "").strip())
 
 
 def _fetch_public_manga_rows(

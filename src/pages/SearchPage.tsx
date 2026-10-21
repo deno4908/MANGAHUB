@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   useSearch,
   useHomepage,
@@ -25,106 +25,15 @@ const normalizeTag = (value: string) =>
     .replace(/đ/g, "d")
     .trim();
 
-const SEARCH_PAGE_SIZE = 24;
-const MANGADEX_SEARCH_INITIAL_LIMIT = 3000;
-const MANGADEX_SEARCH_LIMIT_STEP = 1500;
-const MANGADEX_SEARCH_MAX_LIMIT = 10000;
-const MANGADEX_SEARCH_PREFETCH_PAGES = 4;
-const SEARCH_PAGE_PREFETCH_COUNT = 1;
-
 const parseSearchPage = (value: string | null) => {
   const page = Number.parseInt(String(value || ""), 10);
   return Number.isFinite(page) && page > 0 ? page : 1;
-};
-
-type MangaDexCatalogItem = {
-  id: string;
-  title?: string;
-  cover_url?: string;
-  authors_text?: string;
-  updated_at?: string;
-  local_last_published_at?: string;
-  last_chapter?: string;
-  content_rating?: string;
-  genres?: string[];
-  chapters?: Array<{
-    id?: string;
-    chapter?: string;
-    publish_at?: string;
-    readable_at?: string;
-    created_at?: string;
-    updated_at?: string;
-    chapter_with_groups?: string;
-  }>;
 };
 
 const toSlug = (value: string) =>
   normalizeTag(value)
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
-
-const pickMangaDexChapterDate = (
-  chapter?: MangaDexCatalogItem["chapters"][number],
-  fallback?: string,
-) =>
-  String(
-    chapter?.publish_at ||
-      chapter?.readable_at ||
-      chapter?.created_at ||
-      chapter?.updated_at ||
-      fallback ||
-      "",
-  ).trim();
-
-const mangaDexCatalogToManga = (items: MangaDexCatalogItem[]): Manga[] => {
-  if (!items.length) return [];
-  return adaptListData({
-    data: {
-      items: items.map((item) => {
-        const latestChapter = Array.isArray(item.chapters) ? item.chapters[0] : undefined;
-        const chapterName = String(latestChapter?.chapter || item.last_chapter || "").trim();
-        const chapterDate = pickMangaDexChapterDate(
-          latestChapter,
-          item.local_last_published_at || item.updated_at,
-        );
-
-        return {
-          name: item.title || "MangaDex",
-          slug: String(item.id || "").trim().toLowerCase(),
-          origin_name: [item.title || "MangaDex"],
-          author: [item.authors_text || "MangaDex"],
-          status: "ongoing",
-          thumb_url: item.cover_url || "",
-          cover_url: item.cover_url || "",
-          updatedAt: chapterDate || item.local_last_published_at || item.updated_at || "",
-          local_last_published_at: item.local_last_published_at || chapterDate || "",
-          category: (item.genres || []).map((genre) => ({
-            name: genre,
-            slug: toSlug(genre),
-          })),
-          chaptersLatest: chapterName
-            ? [{
-                chapter_name: chapterName,
-                chapter_title: latestChapter?.chapter_with_groups || "",
-                chapter_api_data: latestChapter?.id || "",
-                publish_at: chapterDate,
-              }]
-            : [],
-          last_chapter: chapterName,
-          content_rating: item.content_rating || "",
-          source: "mangadex",
-        };
-      }),
-      params: {
-        pagination: {
-          totalItems: items.length,
-          totalItemsPerPage: items.length || SEARCH_PAGE_SIZE,
-          currentPage: 1,
-        },
-      },
-    },
-  }).items;
-};
 
 const dedupeManga = (items: Manga[]): Manga[] => {
   const seen = new Set<string>();
@@ -139,7 +48,6 @@ const dedupeManga = (items: Manga[]): Manga[] => {
 };
 
 const SearchPage = () => {
-  const queryClient = useQueryClient();
   const showMatureContent = useSettingsStore((s) => s.settings.privacy.showMatureContent);
   const [searchParams, setSearchParams] = useSearchParams();
   const urlQuery = searchParams.get("q") || "";
@@ -147,7 +55,6 @@ const SearchPage = () => {
   const page = parseSearchPage(searchParams.get("page"));
   const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
   const [debouncedQuery, setDebouncedQuery] = useState(urlQuery);
-  const [mangaDexSearchLimit, setMangaDexSearchLimit] = useState(MANGADEX_SEARCH_INITIAL_LIMIT);
   const queryRef = useRef(urlQuery);
   const skipNextQueryUrlWriteRef = useRef(false);
   const hasInitializedQuerySyncRef = useRef(false);
@@ -222,37 +129,34 @@ const SearchPage = () => {
   }, [query, setSearchLocation]);
 
   const trimmedDebouncedQuery = debouncedQuery.trim();
-  const serverSearchPage = selectedGenres.length > 0 ? 1 : page;
-  const {
-    data: searchData,
-    isLoading,
-    isFetching: isSearchFetching,
-    isPlaceholderData: isSearchPlaceholderData,
-  } = useSearch(trimmedDebouncedQuery, serverSearchPage);
-  const { data: homepageData } = useHomepage();
+  const serverSearchPage = page;
+  const combinedQuery = useSearch(trimmedDebouncedQuery, page, selectedGenres.length === 0);
+  const { data: homepageData } = useHomepage(!trimmedDebouncedQuery && selectedGenres.length === 0);
   const { data: categories = [] } = useCategories();
-  const shouldLoadMangaDexCatalog = selectedGenres.length > 0;
-  const mangaDexCatalogQuery = useQuery({
-    queryKey: ["search", "mangadex-catalog", mangaDexSearchLimit],
+  const selectedSlugs = selectedGenres.map(name => categories.find(cat => cat.name === name)?.slug || toSlug(name));
+  const filteredQuery = useQuery({
+    queryKey: ["search", "filtered-v2", trimmedDebouncedQuery, selectedSlugs, page, showMatureContent],
+    enabled: selectedGenres.length > 0,
     queryFn: async () => {
-      const payload = await mangaApi.getMangaDexViCatalog(mangaDexSearchLimit, {
-        attachRatings: false,
-        attachOverrides: false,
-        filterHidden: true,
-        preferLatest: true,
-      });
-      const mangas = (payload?.mangas || []) as MangaDexCatalogItem[];
-      return Array.isArray(mangas) ? mangas : [];
+      const requests = [mangaApi.searchMangaDex({ keyword: trimmedDebouncedQuery, genreSlugs: selectedSlugs,
+        page, sort: trimmedDebouncedQuery ? "relevance" : "latest", showMature: showMatureContent })];
+      if (!trimmedDebouncedQuery) requests.push(mangaApi.getOTruyenFiltered({ genreSlugs: selectedSlugs, page, sort: "latest", showMature: showMatureContent }));
+      else requests.push(mangaApi.search(trimmedDebouncedQuery, page, { includeMangaDex: false, attachRatings: false }));
+      const settled = await Promise.allSettled(requests);
+      const pages = settled.filter((item): item is PromiseFulfilledResult<any> => item.status === "fulfilled")
+        .map(item => adaptListData(item.value));
+      if (!pages.length) throw new Error("Search unavailable");
+      return { items: dedupeManga(pages.flatMap(value => value.items)), currentPage: page,
+        totalItems: pages.reduce((sum, value) => sum + value.totalItems, 0),
+        totalPages: Math.max(1, ...pages.map(value => value.totalPages)) };
     },
-    enabled: shouldLoadMangaDexCatalog,
-    staleTime: 45 * 1000,
-    gcTime: 2 * 60 * 1000,
-    placeholderData: (previousData) => previousData,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-    retry: 1,
+    staleTime: 2 * 60 * 1000, retry: 1, refetchOnWindowFocus: false,
   });
-
+  const activeQuery = selectedGenres.length ? filteredQuery : combinedQuery;
+  const searchData = activeQuery.data;
+  const isLoading = activeQuery.isLoading;
+  const isSearchFetching = activeQuery.isFetching;
+  const isSearchPlaceholderData = activeQuery.isPlaceholderData;
   const toggleGenre = (g: string) => {
     setPage(1);
     setSelectedGenres((prev) =>
@@ -260,144 +164,33 @@ const SearchPage = () => {
     );
   };
 
-  useEffect(() => {
-    setMangaDexSearchLimit(MANGADEX_SEARCH_INITIAL_LIMIT);
-  }, [debouncedQuery, selectedGenres]);
-
-  useEffect(() => {
-    if (!trimmedDebouncedQuery || selectedGenres.length > 0) return;
-    if (isLoading || isSearchFetching || isSearchPlaceholderData) return;
-    if (Number(searchData?.currentPage || 0) !== page) return;
-    const totalPages = Number(searchData?.totalPages || 0);
-    if (!Number.isFinite(totalPages) || totalPages <= 1) return;
-
-    const targets = Array.from(
-      { length: SEARCH_PAGE_PREFETCH_COUNT },
-      (_, index) => page + index + 1,
-    ).filter((targetPage) => targetPage <= totalPages);
-
-    Array.from(new Set(targets)).forEach((targetPage) => {
-      void queryClient.prefetchQuery({
-        queryKey: ["manga", "search", trimmedDebouncedQuery, targetPage],
-        queryFn: async () => {
-          const data = await mangaApi.search(trimmedDebouncedQuery, targetPage, {
-            skipAuth: true,
-            timeoutMs: 10_000,
-          });
-          return adaptListData(data);
-        },
-        staleTime: 5 * 60 * 1000,
-        gcTime: 10 * 60 * 1000,
-      });
-    });
-  }, [
-    isLoading,
-    isSearchFetching,
-    isSearchPlaceholderData,
-    page,
-    queryClient,
-    searchData?.currentPage,
-    searchData?.totalPages,
-    selectedGenres.length,
-    trimmedDebouncedQuery,
-  ]);
-
-  const mangaDexCatalogItems = useMemo(
-    () => mangaDexCatalogToManga(mangaDexCatalogQuery.data || []),
-    [mangaDexCatalogQuery.data],
-  );
-
   const allResults = useMemo(() => {
-    let items = debouncedQuery.trim()
+    let items = debouncedQuery.trim() || selectedGenres.length > 0
       ? searchData?.items || []
       : homepageData?.latest?.items || [];
     if (!showMatureContent) {
       items = items.filter((m) => !isMatureManga(m));
     }
-    if (selectedGenres.length === 0) return items;
-    const q = normalizeTag(debouncedQuery);
+    if (selectedGenres.length === 0 || !trimmedDebouncedQuery) return items;
     const selected = selectedGenres.map(normalizeTag);
 
     const filteredBaseItems = items.filter((m) =>
-      selected.every((g) => m.genres.map(normalizeTag).includes(g)),
+      m.source === 'mangadex' || selected.every((g) => m.genres.map(normalizeTag).includes(g)),
     );
 
-    const mangaDexMatches = mangaDexCatalogItems.filter((m) => {
-      if (!showMatureContent && isMatureManga(m)) return false;
-      if (
-        q &&
-        !normalizeTag(m.title).includes(q) &&
-        !normalizeTag(m.author).includes(q) &&
-        !(m.genres || []).some((g) => normalizeTag(g).includes(q))
-      ) {
-        return false;
-      }
-      return selected.every((g) => m.genres.map(normalizeTag).includes(g));
-    });
-
-    return dedupeManga([...filteredBaseItems, ...mangaDexMatches]);
-  }, [
-    debouncedQuery,
-    searchData,
-    homepageData,
-    showMatureContent,
-    selectedGenres,
-    mangaDexCatalogItems,
-  ]);
-
-  const useClientPagination = selectedGenres.length > 0;
-  const totalClientPages = Math.max(1, Math.ceil(allResults.length / SEARCH_PAGE_SIZE));
-  const currentPage = useClientPagination ? Math.min(page, totalClientPages) : page;
-  const results = useMemo(
-    () =>
-      useClientPagination
-        ? allResults.slice((currentPage - 1) * SEARCH_PAGE_SIZE, currentPage * SEARCH_PAGE_SIZE)
-        : allResults,
-    [allResults, currentPage, useClientPagination],
-  );
-
-  useEffect(() => {
-    if (!shouldLoadMangaDexCatalog) return;
-    if (mangaDexCatalogQuery.isFetching) return;
-    if (mangaDexSearchLimit >= MANGADEX_SEARCH_MAX_LIMIT) return;
-
-    const remainingItems = allResults.length - currentPage * SEARCH_PAGE_SIZE;
-    const nearLoadedEdge =
-      currentPage >= Math.max(1, totalClientPages - MANGADEX_SEARCH_PREFETCH_PAGES);
-    const lowBuffer = remainingItems <= SEARCH_PAGE_SIZE * MANGADEX_SEARCH_PREFETCH_PAGES;
-    if (!nearLoadedEdge && !lowBuffer) return;
-
-    const timer = window.setTimeout(() => {
-      setMangaDexSearchLimit((limit) =>
-        Math.min(MANGADEX_SEARCH_MAX_LIMIT, limit + MANGADEX_SEARCH_LIMIT_STEP),
-      );
-    }, 220);
-    return () => window.clearTimeout(timer);
-  }, [
-    shouldLoadMangaDexCatalog,
-    mangaDexCatalogQuery.isFetching,
-    mangaDexSearchLimit,
-    allResults.length,
-    currentPage,
-    totalClientPages,
-  ]);
+    return filteredBaseItems;
+  }, [debouncedQuery, searchData, homepageData, showMatureContent, selectedGenres]);
+  const results = allResults;
 
   const loadingState =
     (isLoading && allResults.length === 0) ||
     (
-      !useClientPagination &&
       Boolean(trimmedDebouncedQuery) &&
       isSearchFetching &&
       (isSearchPlaceholderData || Number(searchData?.currentPage || 0) !== serverSearchPage)
-    ) ||
-    (
-      shouldLoadMangaDexCatalog &&
-      mangaDexCatalogQuery.isLoading &&
-      allResults.length === 0
     );
   const showBackgroundLoading =
     !loadingState &&
-    !useClientPagination &&
     Boolean(trimmedDebouncedQuery) &&
     isSearchFetching;
 
@@ -458,13 +251,7 @@ const SearchPage = () => {
             {results.length > 0 ? (
               <>
                 <MangaGrid manga={results} />
-                {useClientPagination ? (
-                  <MangaPagination
-                    currentPage={currentPage}
-                    totalPages={totalClientPages}
-                    onPageChange={setPage}
-                  />
-                ) : debouncedQuery.trim() ? (
+                {debouncedQuery.trim() || selectedGenres.length > 0 ? (
                   <MangaPagination
                     currentPage={page}
                     totalPages={searchData?.totalPages || 1}
@@ -476,8 +263,9 @@ const SearchPage = () => {
               <div className="text-center py-20">
                 <SearchIcon className="w-10 h-10 text-muted-foreground/30 mx-auto mb-3" />
                 <p className="text-muted-foreground font-medium">
-                  Không tìm thấy truyện nào. Thử từ khoá khác nhé!
+                  {activeQuery.isError ? 'Chưa tải được kết quả. Vui lòng thử lại.' : 'Không tìm thấy truyện nào. Thử từ khoá khác nhé!'}
                 </p>
+                {activeQuery.isError && <button className="mt-3 px-4 py-2 rounded-lg bg-primary text-primary-foreground" onClick={() => void activeQuery.refetch()}>Thử lại</button>}
               </div>
             )}
           </>

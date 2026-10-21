@@ -1,3 +1,4 @@
+import type { LucideIcon } from "lucide-react";
 import { useUserStore } from '@/store/userStore';
 import { useBookmarks, useFollows, useHistory, useToggleFollow, useToggleBookmark } from '@/hooks/useApi';
 import { historyApi, commentApi, mangaApi, ratingApi, userApi } from '@/lib/api';
@@ -30,6 +31,7 @@ import { getMangaDetailPath } from '@/lib/mangaLinks';
 type ProfileTab = 'overview' | 'following' | 'bookmarks' | 'history' | 'comments' | 'lists';
 
 type ProfileListItem = {
+  manga_id?: string;
   manga_slug: string;
   manga_title: string;
   manga_thumb?: string;
@@ -40,6 +42,17 @@ type ProfileListItem = {
   last_read_at?: string;
   score?: number;
   meta?: string;
+};
+
+type ProfileListCard = {
+  id: string;
+  name: string;
+  description: string;
+  icon: LucideIcon;
+  tab: ProfileTab | null;
+  items: ProfileListItem[];
+  loading?: boolean;
+  customId?: string;
 };
 
 type ProfileCustomList = {
@@ -1218,7 +1231,7 @@ const ListsTab = ({
     [comments, mangaTitleBySlug],
   );
 
-  const smartLists = useMemo(() => [
+  const smartLists = useMemo<ProfileListCard[]>(() => [
     {
       id: 'bookmarks',
       name: 'Đã lưu',
@@ -1262,7 +1275,7 @@ const ListsTab = ({
     },
   ], [bookmarkedManga, commentManga, followedManga, historyItems, mangaTitleBySlug, ratedLoading, ratedManga]);
 
-  const customListCards = useMemo(() => customLists.map((list) => ({
+  const customListCards = useMemo<ProfileListCard[]>(() => customLists.map((list) => ({
     id: `custom:${list.id}`,
     name: list.name,
     description: 'Danh sách tự tạo, lưu trên trình duyệt của bạn.',

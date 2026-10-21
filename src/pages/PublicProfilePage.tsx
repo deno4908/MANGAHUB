@@ -1,4 +1,3 @@
-import { useMemo } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
@@ -17,7 +16,8 @@ import {
   Shield,
 } from 'lucide-react';
 import OptimizedImage from '@/components/ui/OptimizedImage';
-import { mangaApi, userApi } from '@/lib/api';
+import { userApi } from '@/lib/api';
+import { useCanonicalMangaRecords } from '@/hooks/useCardMetadata';
 import { useUserStore } from '@/store/userStore';
 import {
   getNameEffectClass,
@@ -44,16 +44,9 @@ type PublicActivityItem = {
   likes?: number;
 };
 
-type MangaDexMeta = {
-  title?: string;
-  cover?: string;
-};
-
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const MANGADEX_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LOCAL_COVER_FALLBACK = '/no-cover.svg';
-const MANGADEX_META_LOOKUP_LIMIT = 8;
-const MANGADEX_META_LOOKUP_TIMEOUT_MS = 3_000;
 
 const formatDate = (value?: string) => {
   const time = Date.parse(String(value || ''));
@@ -100,7 +93,7 @@ const resolveCoverSources = (item: PublicActivityItem) => {
       }
       return { src: thumb, fallbackSrc: safeCoverFallback(fallback) };
     }
-    if (thumb.startsWith('/api/images/img')) {
+    if (thumb.startsWith('/api/')) {
       return { src: `${API_BASE}${thumb}`, fallbackSrc: safeCoverFallback(fallback) };
     }
     return { src: thumb, fallbackSrc: safeCoverFallback(fallback) };
@@ -115,40 +108,12 @@ const resolveCoverSources = (item: PublicActivityItem) => {
   }
 
   if (slug) {
-    const direct = `https://img.otruyenapi.com/uploads/comics/${slug}-thumb.jpg`;
-    return { src: proxyImage(direct), fallbackSrc: direct };
+    const direct = `${API_BASE}/api/manga/truyenqq/cover/${encodeURIComponent(slug)}`;
+    return { src: direct, fallbackSrc: LOCAL_COVER_FALLBACK };
   }
 
   return { src: LOCAL_COVER_FALLBACK, fallbackSrc: LOCAL_COVER_FALLBACK };
 };
-
-const isGenericMangaTitle = (title: string, slug: string) => {
-  const normalizedTitle = title.trim().toLowerCase();
-  const normalizedSlug = slug.trim().toLowerCase();
-  if (!normalizedTitle) return true;
-  if (normalizedTitle === normalizedSlug) return true;
-  if (normalizedTitle === 'mangadex' || normalizedTitle === 'truyện mangadex') return true;
-  return Boolean(normalizeMangaDexId(slug) && MANGADEX_ID_RE.test(normalizedTitle));
-};
-
-const enrichItems = (
-  items: PublicActivityItem[] = [],
-  metaById: Record<string, MangaDexMeta> = {},
-) => items.map((item) => {
-  const slug = String(item.manga_slug || '').trim();
-  const mangaDexId = normalizeMangaDexId(slug);
-  const meta = mangaDexId ? metaById[mangaDexId] : undefined;
-  const title = String(item.manga_title || '').trim();
-  const cover = String(item.manga_thumb || '').trim();
-  const metaCover = String(meta?.cover || '').trim();
-
-  return {
-    ...item,
-    manga_title: !isGenericMangaTitle(title, slug) ? title : (meta?.title || title),
-    manga_thumb: cover || metaCover,
-    manga_thumb_fallback: item.manga_thumb_fallback || (metaCover && isMangaDexImageUrl(metaCover) ? metaCover : ''),
-  };
-});
 
 const visibilityLabel = (value?: string) => {
   if (value === 'private') return 'Riêng tư';
@@ -304,58 +269,11 @@ const PublicProfilePage = () => {
     refetchOnWindowFocus: false,
   });
   const rawActivity = data?.activity || {};
-  const mangaDexIds = useMemo(() => {
-    const candidates = [
-      ...(rawActivity.following || []),
-      ...(rawActivity.history || []),
-      ...(rawActivity.comments || []),
-    ] as PublicActivityItem[];
-    const ids = candidates
-      .filter((item) => {
-        const slug = String(item.manga_slug || '').trim();
-        const title = String(item.manga_title || '').trim();
-        const cover = String(item.manga_thumb || '').trim();
-        return Boolean(normalizeMangaDexId(slug)) && (isGenericMangaTitle(title, slug) || !cover);
-      })
-      .map((item) => normalizeMangaDexId(item.manga_slug))
-      .filter(Boolean);
-    return Array.from(new Set(ids)).slice(0, MANGADEX_META_LOOKUP_LIMIT);
-  }, [rawActivity.following, rawActivity.history, rawActivity.comments]);
-  const { data: mangaDexMetaById = {} } = useQuery({
-    queryKey: ['public-profile', 'mangadex-meta', mangaDexIds.join(',')],
-    enabled: mangaDexIds.length > 0,
-    retry: false,
-    staleTime: 10 * 60 * 1000,
-    gcTime: 15 * 60 * 1000,
-    placeholderData: (previousData) => previousData,
-    refetchOnWindowFocus: false,
-    queryFn: async () => {
-      const entries = await Promise.allSettled(
-        mangaDexIds.map(async (id) => {
-          const payload = await mangaApi.getMangaDexLookup(id, {
-            timeoutMs: MANGADEX_META_LOOKUP_TIMEOUT_MS,
-            skipAuth: true,
-          });
-          const manga = payload?.manga || {};
-          const title = String(manga.title || '').trim();
-          const cover = String(manga.cover_url || manga.thumb_url || '').trim();
-          return [id, { title, cover }] as const;
-        }),
-      );
-      const meta: Record<string, MangaDexMeta> = {};
-      for (const entry of entries) {
-        if (entry.status === 'fulfilled') {
-          meta[entry.value[0]] = entry.value[1];
-        }
-      }
-      return meta;
-    },
-  });
-  const activity = useMemo(() => ({
-    following: enrichItems(rawActivity.following || [], mangaDexMetaById),
-    history: enrichItems(rawActivity.history || [], mangaDexMetaById),
-    comments: enrichItems(rawActivity.comments || [], mangaDexMetaById),
-  }), [rawActivity.following, rawActivity.history, rawActivity.comments, mangaDexMetaById]);
+  const activity = {
+    following: useCanonicalMangaRecords(rawActivity.following, { fillMissingCovers: true }) || [],
+    history: useCanonicalMangaRecords(rawActivity.history, { fillMissingCovers: true }) || [],
+    comments: useCanonicalMangaRecords(rawActivity.comments, { fillMissingCovers: true }) || [],
+  };
 
   if (isLoading) {
     return (

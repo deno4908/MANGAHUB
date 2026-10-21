@@ -67,7 +67,7 @@ type MangaDexCatalogItem = {
   }>;
 };
 type OTruyenListData = ReturnType<typeof adaptListData>;
-type BrowseSourceTab = 'otruyen' | 'mangadex';
+type BrowseSourceTab = 'truyenqq' | 'mangadex';
 const MANGADEX_CATALOG_LIMIT_DEFAULT = 500;
 const MANGADEX_CATALOG_LIMIT_WITH_MATURE = 800;
 const MANGADEX_CATALOG_LIMIT_TAB_DEFAULT = 10000;
@@ -915,7 +915,7 @@ const buildTrendingChapterFallback = (
     const chapterNum = parseChapterNumberFromText(chapterRaw);
     if (isValidChapterNumber(chapterNum)) {
       return [{
-        id: `ch-${slug}-trending`,
+        id: String((row as any).latest_chapter_id || `ch-${slug}-trending`),
         mangaId: slug,
         number: chapterNum,
         title: chapterLabelFromNumber(chapterNum),
@@ -1303,7 +1303,7 @@ const getStableBrowseItemKey = (item: Partial<Manga>): string => {
 
 const assertOTruyenPayload = (payload: any) => {
   if (String(payload?.status || '').trim().toLowerCase() !== 'error') return;
-  throw new Error(String(payload?.message || 'OTruyen unavailable'));
+  throw new Error(String(payload?.message || 'TruyenQQ unavailable'));
 };
 
 const applyBatchRatingToManga = (
@@ -1631,8 +1631,8 @@ const BrowseManga = () => {
     [searchParams],
   );
   const sourceParam = searchParams.get('source');
-  const activeSource: BrowseSourceTab = sourceParam === 'mangadex' ? 'mangadex' : 'otruyen';
-  const isOTruyenSourceTab = activeSource === 'otruyen';
+  const activeSource: BrowseSourceTab = sourceParam === 'mangadex' ? 'mangadex' : 'truyenqq';
+  const isOTruyenSourceTab = activeSource === 'truyenqq';
   const isMangaDexSourceTab = activeSource === 'mangadex';
   const setPage = (nextPage: number) => {
     const safePage = Math.max(1, Math.floor(Number(nextPage) || 1));
@@ -1684,6 +1684,14 @@ const BrowseManga = () => {
     searchParams.get('lang') ||
     searchParams.get('translatedLanguage') ||
     searchParams.get('availableTranslatedLanguage');
+  const browseUrlStateKey = [activeSource, parseBrowseGenreParams(genreParam || tagParam || '').join(','),
+    normalizeBrowseSortParam(sortParam) || 'popular', normalizeBrowseStatusParam(statusParam),
+    parseBrowseYearParam(yearParam) || '', parseBrowseMinRatingParam(minRatingParam),
+    isMangaDexSourceTab ? normalizeTranslatedLanguageParam(translatedLanguageParam) : 'vi'].join('|');
+  const browseFilterStateKey = [activeSource, filters.genres.map(toSlug).filter(Boolean).join(','),
+    filters.sort || 'popular', filters.status || '', filters.year || '', Number(filters.minRating || 0),
+    isMangaDexSourceTab ? filters.translatedLanguage || 'vi' : 'vi'].join('|');
+  const browseUrlReady = browseUrlStateKey === browseFilterStateKey;
   const browsePageMemoryKey = useMemo(
     () => buildBrowsePageMemoryKey(activeSource, filters),
     [
@@ -1710,7 +1718,7 @@ const BrowseManga = () => {
     if (nextSource === activeSource) return;
 
     const nextParams = new URLSearchParams(searchParams);
-    if (nextSource === 'otruyen') {
+    if (nextSource === 'truyenqq') {
       nextParams.delete('source');
     } else {
       nextParams.set('source', nextSource);
@@ -1785,10 +1793,11 @@ const BrowseManga = () => {
     selectedGenreAliasGroups.length > 0 &&
     (!useOTruyenCategory || selectedGenreAliasGroups.length > 1);
 
-  const shouldFetchTrendingForPopular =
-    isOTruyenSourceTab && filters.sort === 'popular' && !hasSearch;
+  // QQ provides a paginated popularity sort directly. Avoid the old secondary
+  // trending crawl and its synthetic chapter hints on the browse screen.
+  const shouldFetchTrendingForPopular = false;
   const popularTrendingSource: 'all' | BrowseSourceTab = isOTruyenSourceTab
-    ? 'otruyen'
+    ? 'truyenqq'
     : isMangaDexSourceTab
       ? 'mangadex'
       : 'all';
@@ -1874,7 +1883,7 @@ const BrowseManga = () => {
     ],
   );
   const fetchMangaDexServerSearchPage = useCallback(
-    async (targetPage: number) => {
+    async (targetPage: number, signal?: AbortSignal) => {
       const requestPage = async (
         sort: string,
         options: { page?: number; limit?: number; timeoutMs?: number } = {},
@@ -1889,41 +1898,11 @@ const BrowseManga = () => {
         showMature: showMatureContent,
         attachRatings: filters.sort === 'rating' && sort === mangaDexServerSearchSort,
         filterHidden: true,
+        signal,
         timeoutMs: options.timeoutMs ?? (sort === 'popular' ? 24_000 : 12_000),
       }));
 
-      const requestPopularFallbackPage = async () => {
-        // This is an availability fallback, not the global popular ranking.
-        // Request the actual page: slicing a small page-1 window by a high
-        // offset made pages such as 277 look empty although MangaDex had data.
-        const fallback = await requestPage('latest', {
-          page: targetPage,
-          limit: BROWSE_PAGE_SIZE,
-          timeoutMs: 16_000,
-        });
-        return {
-          ...fallback,
-          items: sortBrowseWindowItems(fallback.items || [], 'popular'),
-        };
-      };
-
-      try {
-        const data = await requestPage(mangaDexServerSearchSort);
-        if (mangaDexServerSearchSort === 'popular' && data.items.length === 0 && data.totalItems > 0) {
-          const fallback = await requestPopularFallbackPage();
-          if (fallback.items.length > 0) {
-            return {
-              ...fallback,
-              totalItems: Math.max(data.totalItems, fallback.totalItems),
-              totalPages: Math.max(data.totalPages, fallback.totalPages),
-            };
-          }
-        }
-        return data;
-      } catch (error) {
-        if (mangaDexServerSearchSort !== 'popular') throw error;
-        return requestPopularFallbackPage();
-      }
+      return requestPage(mangaDexServerSearchSort);
     },
     [
       normalizedSearch,
@@ -1968,10 +1947,10 @@ const BrowseManga = () => {
         totalItems: Math.max(0, Number(firstPage?.totalItems || 0)),
       };
     },
-    enabled: wantsGlobalClientSortMode,
+    enabled: browseUrlReady && wantsGlobalClientSortMode,
     staleTime: 10 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
-    refetchOnMount: false,
+    refetchOnMount: true,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
@@ -2016,8 +1995,7 @@ const BrowseManga = () => {
     !isClientPaginationMode &&
     !hasSearch &&
     !hasLocalClientFilters &&
-    (Boolean(filters.status) || filters.sort === 'popular') &&
-    directOTruyenFilterGenreSlugs.length > 0 &&
+    (Boolean(filters.status) || filters.sort === 'popular' || directOTruyenFilterGenreSlugs.length > 0) &&
     directOTruyenFilterGenreSlugs.length === filters.genres.length &&
     !useCombinedList &&
     !useGlobalClientSortMode;
@@ -2078,9 +2056,9 @@ const BrowseManga = () => {
         return { listData, mangadex };
       }
     },
-    enabled: useCombinedList,
+    enabled: browseUrlReady && useCombinedList,
     staleTime: 2 * 60 * 1000,
-    refetchOnMount: false,
+    refetchOnMount: true,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
@@ -2125,7 +2103,7 @@ const BrowseManga = () => {
     },
     staleTime: isMangaDexSourceTab ? 45 * 1000 : 10 * 60 * 1000,
     gcTime: isMangaDexSourceTab ? 5 * 60 * 1000 : 8 * 60 * 1000,
-    enabled: isMangaDexSourceTab && !useCombinedList && !useTrendingPopularMode && !useMangaDexServerSearchMode && !useMangaDexLatestFeedMode,
+    enabled: browseUrlReady && isMangaDexSourceTab && !useCombinedList && !useTrendingPopularMode && !useMangaDexServerSearchMode && !useMangaDexLatestFeedMode,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     placeholderData: (prev) => prev,
@@ -2135,11 +2113,11 @@ const BrowseManga = () => {
 
   const mangaDexServerSearchQuery = useQuery({
     queryKey: getMangaDexServerSearchQueryKey(page),
-    queryFn: () => fetchMangaDexServerSearchPage(page),
-    enabled: useMangaDexServerSearchMode,
+    queryFn: ({ signal }) => fetchMangaDexServerSearchPage(page, signal),
+    enabled: browseUrlReady && useMangaDexServerSearchMode,
     staleTime: 2 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
-    refetchOnMount: false,
+    refetchOnMount: true,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     retry: false,
@@ -2174,10 +2152,10 @@ const BrowseManga = () => {
   const mangaDexLatestFeedQuery = useQuery({
     queryKey: getMangaDexLatestFeedQueryKey(page),
     queryFn: () => fetchMangaDexLatestFeedPage(page),
-    enabled: useMangaDexLatestFeedMode,
+    enabled: browseUrlReady && useMangaDexLatestFeedMode,
     staleTime: 90 * 1000,
     gcTime: 8 * 60 * 1000,
-    refetchOnMount: false,
+    refetchOnMount: true,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     retry: 1,
@@ -2252,10 +2230,10 @@ const BrowseManga = () => {
         throw listError;
       }
     },
-    enabled: isOTruyenSourceTab && !useOTruyenCategory && !useCombinedList && !useGlobalClientSortMode && !useOTruyenFilteredServerMode,
+    enabled: browseUrlReady && isOTruyenSourceTab && !useOTruyenCategory && !useCombinedList && !useGlobalClientSortMode && !useOTruyenFilteredServerMode,
     staleTime: 10 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
-    refetchOnMount: false,
+    refetchOnMount: true,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
@@ -2286,33 +2264,12 @@ const BrowseManga = () => {
         return adaptListData(payload);
       };
 
-      try {
-        const data = await requestPage(filters.sort);
-        if (filters.sort === 'popular' && data.items.length === 0 && data.totalItems > 0) {
-          const fallback = await requestPage('latest');
-          if (fallback.items.length > 0) {
-            return {
-              ...fallback,
-              totalItems: Math.max(data.totalItems, fallback.totalItems),
-              totalPages: Math.max(data.totalPages, fallback.totalPages),
-              items: sortBrowseWindowItems(fallback.items, 'popular'),
-            };
-          }
-        }
-        return data;
-      } catch (error) {
-        if (filters.sort !== 'popular') throw error;
-        const fallback = await requestPage('latest');
-        return {
-          ...fallback,
-          items: sortBrowseWindowItems(fallback.items, 'popular'),
-        };
-      }
+      return requestPage(filters.sort);
     },
-    enabled: useOTruyenFilteredServerMode,
+    enabled: browseUrlReady && useOTruyenFilteredServerMode,
     staleTime: 10 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
-    refetchOnMount: false,
+    refetchOnMount: true,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     retry: 1,
@@ -2490,10 +2447,10 @@ const BrowseManga = () => {
         hasEnoughForPage: visibleCount >= targetVisibleItems,
       };
     },
-    enabled: useOTruyenStatusFillMode && (!useOTruyenCategory || Boolean(activeCategorySlug)),
+    enabled: browseUrlReady && useOTruyenStatusFillMode && (!useOTruyenCategory || Boolean(activeCategorySlug)),
     staleTime: 10 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
-    refetchOnMount: false,
+    refetchOnMount: true,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     retry: 1,
@@ -2534,10 +2491,10 @@ const BrowseManga = () => {
         fetchedPages: 1,
       };
     },
-    enabled: useGlobalClientSortMode,
+    enabled: browseUrlReady && useGlobalClientSortMode,
     staleTime: 10 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
-    refetchOnMount: false,
+    refetchOnMount: true,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
@@ -3066,22 +3023,13 @@ const BrowseManga = () => {
     return map;
   }, [mangaDexItems, selectedGenreAliasGroups]);
 
-  // Keep browse page per source/filter/search tab. New contexts still start at page 1.
+  // The URL owns the page. Hydrating URL filters must not overwrite a deep
+  // link with a remembered page from a different filter context.
   useEffect(() => {
-    const previous = lastBrowsePageStateRef.current;
-    if (previous.key && previous.key !== browsePageMemoryKey) {
-      rememberBrowsePage(previous.key, previous.page);
-      const rememberedPage = getRememberedBrowsePage(browsePageMemoryKey);
-      lastBrowsePageStateRef.current = { key: browsePageMemoryKey, page: rememberedPage };
-      if (rememberedPage !== page) {
-        setPage(rememberedPage);
-      }
-      return;
-    }
-
+    if (!browseUrlReady) return;
     lastBrowsePageStateRef.current = { key: browsePageMemoryKey, page };
     rememberBrowsePage(browsePageMemoryKey, page);
-  }, [browsePageMemoryKey, page]);
+  }, [browseUrlReady, browsePageMemoryKey, page]);
 
   useEffect(() => {
     if (defaultSortInitializedRef.current) return;
@@ -3203,6 +3151,7 @@ const BrowseManga = () => {
 
     const nextParams = new URLSearchParams(searchParams);
     applyBrowseFiltersToSearchParams(nextParams, activeSource, filters);
+    if (filterStateKey !== currentUrlStateKey) nextParams.delete('page');
     if (nextParams.toString() === searchParams.toString()) {
       return;
     }
@@ -3230,7 +3179,7 @@ const BrowseManga = () => {
   // Prefetch the 'latest' list in the background when page first loads with popular sort
   // so switching to 'Mới nhất' tab is instant
   useEffect(() => {
-    if (!isOTruyenSourceTab || filters.sort !== 'popular' || useOTruyenCategory || useCombinedList) return;
+    if (!browseUrlReady || !isOTruyenSourceTab || filters.sort !== 'popular' || useOTruyenCategory || useCombinedList) return;
     const prefetchKey = ['manga', 'list', 'truyen-moi', 1] as const;
     const existing = queryClient.getQueryData(prefetchKey);
     if (existing) return;
@@ -3457,10 +3406,10 @@ const BrowseManga = () => {
 
       return [] as TrendingMangaItem[];
     },
-    enabled: shouldFetchTrendingForPopular,
+    enabled: browseUrlReady && shouldFetchTrendingForPopular,
     staleTime: 10 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
-    refetchOnMount: false,
+    refetchOnMount: true,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     retry: 1,
@@ -3643,8 +3592,8 @@ const BrowseManga = () => {
       overlays.push({
         id: slug,
         title: resolvedTitle || 'Chưa có tiêu đề',
-        author: isMdx ? 'MangaDex' : 'OTruyen',
-        artist: isMdx ? 'MangaDex' : 'OTruyen',
+        author: isMdx ? 'MangaDex' : 'TruyenQQ',
+        artist: isMdx ? 'MangaDex' : 'TruyenQQ',
         description: '',
         cover,
         coverProxy,
@@ -3707,7 +3656,7 @@ const BrowseManga = () => {
         return { items: [] };
       }
     },
-    enabled: canUseUserRatings,
+    enabled: browseUrlReady && canUseUserRatings,
     staleTime: 5 * 60 * 1000,
     refetchOnMount: false,
     refetchOnWindowFocus: false,
@@ -3744,7 +3693,7 @@ const BrowseManga = () => {
         return { items: [] };
       }
     },
-    enabled: useGlobalTopRatedMode,
+    enabled: browseUrlReady && useGlobalTopRatedMode,
     staleTime: 2 * 60 * 1000,
     retry: 1,
     placeholderData: (previousData) => previousData,
@@ -3797,7 +3746,7 @@ const BrowseManga = () => {
           const detailId = toMangaDexDetailId(slug);
 
           if (detailId) {
-            const payload = await mangaApi.getMangaDexDetail(detailId, 120);
+            const payload = await mangaApi.getMangaDexDetail(detailId, 1);
             const item = (payload?.manga || {}) as any;
             const chapterRows = Array.isArray(item.chapters) ? item.chapters : [];
 
@@ -3885,7 +3834,7 @@ const BrowseManga = () => {
 
       return result;
     },
-    enabled: useGlobalTopRatedMode && guestTopRatedMissingSlugs.length > 0,
+    enabled: browseUrlReady && useGlobalTopRatedMode && guestTopRatedMissingSlugs.length > 0,
     staleTime: 10 * 60 * 1000,
     retry: 0,
     placeholderData: (previousData) => previousData,
@@ -3922,8 +3871,8 @@ const BrowseManga = () => {
       ordered.push({
         id: slug,
         title: pickDisplayTitle(slug) || 'Chưa có tiêu đề',
-        author: isMangaDexSlug(slug) ? 'MangaDex' : 'OTruyen',
-        artist: isMangaDexSlug(slug) ? 'MangaDex' : 'OTruyen',
+        author: isMangaDexSlug(slug) ? 'MangaDex' : 'TruyenQQ',
+        artist: isMangaDexSlug(slug) ? 'MangaDex' : 'TruyenQQ',
         description: '',
         cover: DEFAULT_CARD_COVER_FALLBACK,
         coverProxy: DEFAULT_CARD_COVER_FALLBACK,
@@ -4152,8 +4101,8 @@ const BrowseManga = () => {
       overlays.push({
         id: slug,
         title: resolvedTitle || 'Chưa có tiêu đề',
-        author: isMdx ? 'MangaDex' : 'OTruyen',
-        artist: isMdx ? 'MangaDex' : 'OTruyen',
+        author: isMdx ? 'MangaDex' : 'TruyenQQ',
+        artist: isMdx ? 'MangaDex' : 'TruyenQQ',
         description: '',
         cover,
         coverProxy,
@@ -4251,7 +4200,7 @@ const BrowseManga = () => {
         return { ratings: {}, my_scores: {} };
       }
     },
-    enabled:
+    enabled: browseUrlReady &&
       filters.sort === 'rating' &&
       !useGlobalTopRatedMode &&
       !useLatestLikeRatingLoad &&
@@ -4560,6 +4509,8 @@ const BrowseManga = () => {
     mangaDexLoadedItemCount > 0 &&
     mangaDexRemainingLoadedItems <= MANGADEX_DEMAND_EDGE_REFETCH_ITEMS;
   const shouldRefetchMangaDexEdge =
+    !useMangaDexServerSearchMode &&
+    !useMangaDexLatestFeedMode &&
     !canExpandMangaDexDemand &&
     (isNearMangaDexRefetchEdge || isMangaDexRefetchItemBufferLow) &&
     activeMangaDexSuccess &&
@@ -4756,9 +4707,7 @@ const BrowseManga = () => {
     if (useOTruyenStatusFillMode && otruyenStatusFillItems.length > 0) {
       return sortable.slice((currentPage - 1) * pageSize, currentPage * pageSize);
     }
-    return filters.sort === 'popular' && isOTruyenSourceTab
-      ? sortable.slice(0, pageSize)
-      : sortable;
+    return sortable;
   }, [
     isClientPaginationMode,
     useMangaDexServerSearchMode,
@@ -4814,7 +4763,7 @@ const BrowseManga = () => {
         return { ratings: {}, my_scores: {} };
       }
     },
-    enabled: shouldRunVisibleRatingHydrate && visibleRatingBatchSlugs.length > 0,
+    enabled: browseUrlReady && shouldRunVisibleRatingHydrate && visibleRatingBatchSlugs.length > 0,
     staleTime: 5 * 60 * 1000,
     refetchOnMount: false,
     refetchOnWindowFocus: false,
@@ -4925,7 +4874,7 @@ const BrowseManga = () => {
 
       return result;
     },
-    enabled: Boolean(mangaDexLatestChapterLanguage) && visibleMangaDexIds.length > 0,
+    enabled: browseUrlReady && Boolean(mangaDexLatestChapterLanguage) && visibleMangaDexIds.length > 0,
     staleTime: 5 * 60 * 1000,
     retry: 0,
     placeholderData: () => ({
@@ -4934,145 +4883,6 @@ const BrowseManga = () => {
   });
 
   const mangaDexLatestChapterMap = mangaDexLatestChaptersQuery.data || visibleMangaDexChapterSeedMap;
-
-  const mangaDexMissingVisibleChapterIds = useMemo(() => {
-    if (!isMangaDexSourceTab) return [];
-    if (!mangaDexLatestChaptersQuery.isFetched) return [];
-
-    const ids: string[] = [];
-    const seen = new Set<string>();
-    for (const item of pagedItems) {
-      const slug = String(item.id || '').trim().toLowerCase();
-      if (!isMangaDexSlug(slug)) continue;
-
-      const detailId = toMangaDexDetailId(slug);
-      if (!detailId || seen.has(detailId)) continue;
-
-      const meta =
-        mangaDexLatestChapterMap[slug] ||
-        mangaDexLatestChapterMap[detailId] ||
-        mangaDexLatestChapterMap[`mdx-${detailId}`];
-      const seededLatest = pickLatestReadableChapter(item.chapters || []);
-      if (
-        (meta?.latestChapter && hasReadableChapter(meta.latestChapter)) ||
-        (seededLatest && hasReadableChapter(seededLatest))
-      ) {
-        continue;
-      }
-
-      seen.add(detailId);
-      ids.push(detailId);
-      if (ids.length >= MANGADEX_VISIBLE_CHAPTER_FALLBACK_MAX) break;
-    }
-
-    return ids;
-  }, [
-    isMangaDexSourceTab,
-    mangaDexLatestChaptersQuery.isFetched,
-    mangaDexLatestChapterMap,
-    pagedItems,
-  ]);
-
-  const { data: mangaDexVisibleChapterFallbackMap = {} } = useQuery({
-    queryKey: [
-      'manga',
-      'mangadex',
-      'visible-chapter-fallback-v2',
-      mangaDexLatestChapterLanguage,
-      mangaDexMissingVisibleChapterIds,
-    ],
-    queryFn: async () => {
-      const result: Record<string, { latestChapter?: Manga['chapters'][number]; lastUpdated?: string }> = {};
-      const queue = [...mangaDexMissingVisibleChapterIds];
-      const workerCount = Math.min(MANGADEX_VISIBLE_CHAPTER_FALLBACK_CONCURRENCY, queue.length);
-
-      const fetchOne = async (detailId: string) => {
-        const payload = await withTimeout(
-          mangaApi.getMangaDexDetail(
-            detailId,
-            MANGADEX_VISIBLE_CHAPTER_FALLBACK_CHAPTERS,
-            mangaDexLatestChapterLanguage,
-            { timeoutMs: MANGADEX_VISIBLE_CHAPTER_FALLBACK_TIMEOUT_MS },
-          ),
-          MANGADEX_VISIBLE_CHAPTER_FALLBACK_TIMEOUT_MS,
-        );
-        const item = (payload?.manga || {}) as any;
-        const chapterRows = Array.isArray(item.chapters) ? item.chapters : [];
-        const latestRaw = chapterRows
-          .filter(isReadableMangaDexDetailChapter)
-          .map((chapter: any) => {
-            const chapterText = String(chapter.chapter || '').trim();
-            const chapterWithGroupsText = String(chapter.chapter_with_groups || '').trim();
-            const chapterNum =
-              parseChapterNumberFromText(chapterText) ||
-              parseChapterNumberFromText(chapterWithGroupsText);
-            const chapterDate = String(
-              chapter.publish_at ||
-              chapter.readable_at ||
-              chapter.created_at ||
-              chapter.updated_at ||
-              item.updated_at ||
-              ''
-            ).trim();
-
-            return {
-              chapterNum,
-              chapterDate,
-              id: String(chapter.id || '').trim(),
-            };
-          })
-          .sort((a, b) => {
-            const numberDiff = toNumber(a.chapterNum) - toNumber(b.chapterNum);
-            if (numberDiff !== 0) return numberDiff;
-            return parseTime(a.chapterDate) - parseTime(b.chapterDate);
-          })
-          .filter((chapter) => isValidChapterNumber(chapter.chapterNum))
-          .pop();
-
-        if (!latestRaw) return;
-
-        const uploadDate = latestRaw.chapterDate || String(item.updated_at || new Date().toISOString());
-        const latestChapter: Manga['chapters'][number] = {
-          id: latestRaw.id || `mdx-ch-${detailId}-detail-fallback`,
-          mangaId: detailId,
-          number: latestRaw.chapterNum,
-          title: chapterLabelFromNumber(latestRaw.chapterNum),
-          pages: [],
-          uploadDate,
-          scanlationGroup: '',
-        };
-        const meta = {
-          latestChapter,
-          lastUpdated: String(item.updated_at || uploadDate || '').trim() || undefined,
-        };
-
-        result[detailId] = meta;
-        result[`mdx-${detailId}`] = meta;
-      };
-
-      await Promise.allSettled(
-        Array.from({ length: workerCount }, async () => {
-          while (queue.length) {
-            const detailId = queue.shift();
-            if (!detailId) continue;
-            try {
-              await fetchOne(detailId);
-            } catch {
-              // Keep other visible cards moving even if one MangaDex detail is slow.
-            }
-          }
-        }),
-      );
-
-      return result;
-    },
-    enabled:
-      isMangaDexSourceTab &&
-      Boolean(mangaDexLatestChapterLanguage) &&
-      mangaDexMissingVisibleChapterIds.length > 0,
-    staleTime: 10 * 60 * 1000,
-    retry: 0,
-  });
 
   const mangaDexEnrichIds = useMemo(() => {
     if (!shouldEnrichVisibleMangaDex) return [];
@@ -5166,7 +4976,7 @@ const BrowseManga = () => {
 
       return result;
     },
-    enabled: shouldRunHeavyBrowseEnrich && realChapterSyncSlugs.length > 0,
+    enabled: browseUrlReady && shouldRunHeavyBrowseEnrich && realChapterSyncSlugs.length > 0,
     staleTime: 10 * 60 * 1000,
     retry: 0,
     placeholderData: (previousData) => previousData,
@@ -5253,7 +5063,7 @@ const BrowseManga = () => {
 
       return result;
     },
-    enabled: shouldEnrichVisibleMangaDex && mangaDexEnrichIds.length > 0,
+    enabled: browseUrlReady && shouldEnrichVisibleMangaDex && mangaDexEnrichIds.length > 0,
     staleTime: 10 * 60 * 1000,
     retry: 1,
     placeholderData: (previousData) => previousData,
@@ -5268,9 +5078,6 @@ const BrowseManga = () => {
       if (!detailId) return item;
 
       const latestMeta =
-        mangaDexVisibleChapterFallbackMap[slug] ||
-        mangaDexVisibleChapterFallbackMap[detailId] ||
-        mangaDexVisibleChapterFallbackMap[`mdx-${detailId}`] ||
         mangaDexLatestChapterMap[slug] ||
         mangaDexLatestChapterMap[detailId] ||
         mangaDexLatestChapterMap[`mdx-${detailId}`];
@@ -5439,7 +5246,6 @@ const BrowseManga = () => {
     pagedItems,
     mangaDexEnrichMap,
     mangaDexLatestChapterMap,
-    mangaDexVisibleChapterFallbackMap,
     realChapterSyncMap,
     visibleRatingMap,
     visibleRatingMyScores,
@@ -5506,7 +5312,7 @@ const BrowseManga = () => {
     // A filtered OTruyen page can scan a large upstream window. Starting page
     // N + 1 while page N is still loading doubles that work and slows direct
     // jumps such as completed Romance page 25.
-    if (isClientPaginationMode || useOTruyenFilteredServerMode) return;
+    if (!browseUrlReady || isClientPaginationMode || useOTruyenFilteredServerMode) return;
     const nextPage = page + 1;
     if (nextPage > otruyenServerPages) return;
     if (useCombinedList) {
@@ -5589,14 +5395,14 @@ const BrowseManga = () => {
 
       <div className="mb-6 flex items-center gap-2">
         <button
-          onClick={() => setBrowseSource('otruyen')}
+          onClick={() => setBrowseSource('truyenqq')}
           className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition-all ${
             isOTruyenSourceTab
               ? 'bg-primary text-primary-foreground comic-shadow'
               : 'bg-secondary text-muted-foreground hover:text-foreground border border-border/50'
           }`}
         >
-          OTruyen
+          TruyenQQ
         </button>
         <button
           onClick={() => setBrowseSource('mangadex')}

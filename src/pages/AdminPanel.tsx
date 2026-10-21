@@ -3219,11 +3219,12 @@ const MangaSection = ({
   const canManageManga = currentUserRole === "admin";
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [mangaList, setMangaList] = useState<any[]>([]);
-  const [total, setTotal] = useState(0);
+  const [total, setTotal] = useState<number | null>(0);
+  const [sourceTotalPages, setSourceTotalPages] = useState<number | null>(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [bulkHideLoading, setBulkHideLoading] = useState(false);
-  const [source, setSource] = useState<"db" | "otruyen" | "mangadex" | "uploaded">("db");
+  const [source, setSource] = useState<"db" | "truyenqq" | "mangadex" | "uploaded">("db");
   const [filterHidden, setFilterHidden] = useState<"" | "hidden" | "visible">("");
   const [sortBy, setSortBy] = useState<"default" | "title" | "views">("default");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
@@ -3234,7 +3235,7 @@ const MangaSection = ({
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [permissionDeniedMessage, setPermissionDeniedMessage] = useState("");
   const LIMIT = 30;
-  const totalPages = Math.ceil(total / LIMIT);
+  const totalPages = sourceTotalPages ?? Math.ceil((total ?? 0) / LIMIT);
 
   const notifyHomepageRealtimeUpdate = useCallback((reason: string) => {
     queryClient.invalidateQueries({ queryKey: ["manga", "home"] });
@@ -3250,7 +3251,8 @@ const MangaSection = ({
       const d = await adminApi.getMangaList(p, q || undefined, fh || undefined, src);
       setPermissionDeniedMessage("");
       setMangaList(d.manga || []);
-      setTotal(d.total || 0);
+      setTotal(d.total ?? null);
+      setSourceTotalPages(typeof d.total_pages === "number" ? d.total_pages : null);
       setPage(p);
     } catch (err) {
       if (isPermissionDeniedError(err)) {
@@ -3258,6 +3260,7 @@ const MangaSection = ({
         setPermissionDeniedMessage(detail);
         setMangaList([]);
         setTotal(0);
+        setSourceTotalPages(null);
       }
     } finally { setLoading(false); }
   }, [search, filterHidden, source]);
@@ -3320,8 +3323,8 @@ const MangaSection = ({
     }
   }, []);
 
-  const sourceLabel = source === "mangadex" ? "MangaDex" : source === "otruyen" ? "OTruyen" : source;
-  const canBulkHideBySource = canManageManga && (source === "mangadex" || source === "otruyen");
+  const sourceLabel = source === "mangadex" ? "MangaDex" : source === "truyenqq" ? "TruyenQQ" : source;
+  const canBulkHideBySource = canManageManga && (source === "mangadex" || source === "truyenqq");
   const bulkHideCandidates = useMemo(
     () => mangaList.filter((m) => m.source === source && !m.is_hidden),
     [mangaList, source]
@@ -3526,7 +3529,7 @@ const MangaSection = ({
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h1 className="text-2xl font-bold">Quản lý truyện</h1>
-          <p className="text-sm text-muted-foreground">{total.toLocaleString()} truyện trong hệ thống</p>
+          <p className="text-sm text-muted-foreground">{total === null ? `${totalPages.toLocaleString()} trang truyện từ nguồn` : `${total.toLocaleString()} truyện trong hệ thống`}</p>
           {!canManageManga && (
             <p className="text-xs text-amber-300 mt-1">
               Moderator có quyền xem toàn bộ danh sách truyện. Thao tác ẩn/ghim/ghi chú chỉ dành cho admin.
@@ -3559,7 +3562,7 @@ const MangaSection = ({
       <div className="flex gap-1 bg-secondary/30 p-1 rounded-xl overflow-x-auto">
         {([
           { key: "db",       label: "Đã xem",   color: "text-purple-400" },
-          { key: "otruyen",  label: "OTruyen",  color: "text-orange-400" },
+          { key: "truyenqq",  label: "TruyenQQ",  color: "text-orange-400" },
           { key: "mangadex", label: "MangaDex", color: "text-blue-400" },
           { key: "uploaded", label: "Upload",   color: "text-emerald-400" },
         ] as const).map(s => (
@@ -3587,7 +3590,7 @@ const MangaSection = ({
             onChange={e => { setSearch(e.target.value); }}
             placeholder={
               source === "mangadex" ? "Tìm truyện MangaDex (mặc định: tất cả có bản VI)..." :
-              source === "otruyen"  ? "Tìm trên OTruyen..." :
+              source === "truyenqq"  ? "Tìm trên OTruyen..." :
               source === "uploaded" ? "Tìm theo tên / slug upload..." :
               "Tìm theo slug / tên truyện đã đọc..."
             }
@@ -3700,12 +3703,12 @@ const MangaSection = ({
                   <td className="px-4 py-3 hidden sm:table-cell">
                     <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
                       m.source === "uploaded"  ? "bg-emerald-500/15 text-emerald-400" :
-                      m.source === "otruyen"   ? "bg-orange-500/15 text-orange-400" :
+                      m.source === "truyenqq"   ? "bg-orange-500/15 text-orange-400" :
                       m.source === "mangadex"  ? "bg-blue-500/15 text-blue-400" :
                                                 "bg-purple-500/15 text-purple-400"
                     }`}>
                       {m.source === "uploaded" ? "Upload" :
-                       m.source === "otruyen"  ? "OTruyen" :
+                       m.source === "truyenqq"  ? "TruyenQQ" :
                        m.source === "mangadex" ? "MangaDex" : "External"}
                     </span>
                   </td>

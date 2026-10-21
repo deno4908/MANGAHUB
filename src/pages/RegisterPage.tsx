@@ -33,11 +33,7 @@ const RegisterPage = () => {
 
   const passwordChecks = useMemo(
     () => [
-      { label: "Ít nhất 8 ký tự", valid: password.length >= 8 },
-      { label: "Có chữ hoa (A-Z)", valid: /[A-Z]/.test(password) },
-      { label: "Có chữ thường (a-z)", valid: /[a-z]/.test(password) },
-      { label: "Có số (0-9)", valid: /\d/.test(password) },
-      { label: "Có ký tự đặc biệt (!@#$...)", valid: /[^A-Za-z0-9]/.test(password) },
+      { label: "Từ 15 đến 128 ký tự; có thể dùng một cụm từ dài", valid: Array.from(password).length >= 15 && Array.from(password).length <= 128 },
     ],
     [password],
   );
@@ -228,11 +224,11 @@ const RegisterPage = () => {
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                 <Input
                   type={showPassword ? "text" : "password"}
-                  placeholder="Tối thiểu 8 ký tự"
+                  placeholder="Tối thiểu 15 ký tự"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="pl-10 pr-10"
-                  minLength={8}
+                  minLength={15}
                   required
                 />
                 <button
@@ -285,7 +281,7 @@ const RegisterPage = () => {
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   className="pl-10"
-                  minLength={8}
+                  minLength={15}
                   required
                 />
               </div>

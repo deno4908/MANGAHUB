@@ -2,7 +2,7 @@
  * Adapters — transform OTruyenAPI responses into frontend types.
  */
 import type { Manga, Chapter } from "@/types/manga";
-import { toOTruyenRouteId } from "@/lib/mangaLinks";
+import { normalizeMangaDexId, toOTruyenRouteId } from "@/lib/mangaLinks";
 
 const IMG_CDN = "https://img.otruyenapi.com/uploads/comics/";
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -289,7 +289,14 @@ function pickChapterTime(ch: any, item?: any): string {
 /** Build full thumbnail URL from OTruyen thumb path */
 export function thumbUrl(thumb: string, slug: string): string {
   const raw = (thumb || "").trim();
-  if (!raw) return `${IMG_CDN}${slug}-thumb.jpg`;
+  if (raw.startsWith("/api/")) return `${API_BASE}${raw}`;
+  if (!raw) {
+    if (!slug) return "/no-cover.svg";
+    const mangaDexId = normalizeMangaDexId(slug);
+    return mangaDexId
+      ? `${API_BASE}/api/manga/mangadex-cover/${mangaDexId}`
+      : `${API_BASE}/api/manga/truyenqq/cover/${encodeURIComponent(slug)}`;
+  }
   if (/^https?:\/\//i.test(raw)) {
     if (isMangaDexImageUrl(raw)) {
       return raw;
@@ -303,34 +310,19 @@ export function thumbUrl(thumb: string, slug: string): string {
   // Prefix with `/uploads/` instead of duplicating `comics/`.
   if (raw.startsWith("/comics/")) return `https://img.otruyenapi.com/uploads${raw}`;
   if (raw.startsWith("comics/")) return `https://img.otruyenapi.com/uploads/${raw}`;
-  // Plain filename (most common for OTruyen API)
+  // Plain filename (most common for TruyenQQ API)
   return `${IMG_CDN}${raw}`;
 }
 
-/** Build alternate OTruyen thumbnail URL when API returns plain filename only. */
+/** Route remote catalog covers through the backend cache when the CDN is slow. */
 export function thumbFallbackUrl(thumb: string, slug: string): string {
   const raw = (thumb || "").trim();
   const normalizedSlug = (slug || "").trim();
-  if (!raw || !normalizedSlug) return "";
+  if (!raw && !normalizedSlug) return "";
 
-  if (raw.startsWith("/uploads/comics/")) {
-    const tail = raw.slice("/uploads/comics/".length);
-    if (tail && !tail.includes("/")) {
-      return `https://img.otruyenapi.com/uploads/comics/${normalizedSlug}/${tail}`;
-    }
-    return "";
-  }
-
-  if (raw.startsWith("uploads/comics/")) {
-    const tail = raw.slice("uploads/comics/".length);
-    if (tail && !tail.includes("/")) {
-      return `https://img.otruyenapi.com/uploads/comics/${normalizedSlug}/${tail}`;
-    }
-    return "";
-  }
-
-  if (raw.startsWith("/") || raw.includes("/")) return "";
-  return `https://img.otruyenapi.com/uploads/comics/${normalizedSlug}/${raw}`;
+  const direct = thumbUrl(raw, normalizedSlug);
+  if (!isOTruyenImageUrl(direct) && !isMangaDexImageUrl(direct)) return "";
+  return toProxyImageUrl(direct);
 }
 
 /** Map OTruyen status → frontend status */
@@ -456,7 +448,7 @@ export function adaptMangaItem(item: any): Manga {
     ? Number(ratingCountRaw)
     : 0;
   const localViewRaw = item.local_view_count ?? item.localViewCount;
-  const viewRaw = item.view_count ?? item.views ?? localViewRaw;
+  const viewRaw = item.source === "truyenqq" ? (localViewRaw ?? 0) : (item.view_count ?? item.views ?? localViewRaw);
   const localViewCount = Number.isFinite(Number(localViewRaw))
     ? Math.max(0, Number(localViewRaw))
     : 0;
@@ -577,7 +569,7 @@ export function adaptMangaItem(item: any): Manga {
   return {
     id: sourceId || slug,
     slug,
-    source: isUserUpload ? "uploaded" : (isMangaDexSource ? "mangadex" : "otruyen"),
+    source: isUserUpload ? "uploaded" : (isMangaDexSource ? "mangadex" : "truyenqq"),
     title: displayTitle,
     altTitle: altTitleCandidate && altTitleCandidate !== displayTitle
       ? altTitleCandidate
@@ -687,7 +679,8 @@ export function adaptMangaDetail(data: any): Manga {
   const chapters: Chapter[] = serverChapters.map((ch: any, idx: number) => ({
     id: ch.chapter_api_data?.split("/").pop() || repairMojibakeText(ch.chapter_name) || `ch-${idx}`,
     mangaId: slug,
-    number: parseFloat(repairMojibakeText(ch.chapter_name)) || idx + 1,
+    number: Number.isFinite(parseFloat(repairMojibakeText(ch.chapter_name)))
+      ? parseFloat(repairMojibakeText(ch.chapter_name)) : idx + 1,
     title: repairMojibakeText(ch.chapter_title) || `Chương ${repairMojibakeText(ch.chapter_name)}`,
     pages: [], // loaded on chapter open
     uploadDate: pickChapterTime(ch, item),
@@ -737,7 +730,7 @@ export function adaptMangaDetail(data: any): Manga {
   return {
     id: sourceId || slug,
     slug,
-    source: isUserUpload ? "uploaded" : "otruyen",
+    source: isUserUpload ? "uploaded" : "truyenqq",
     title: displayTitle,
     altTitle: altTitleCandidate && altTitleCandidate !== displayTitle
       ? altTitleCandidate
@@ -763,7 +756,8 @@ export function adaptMangaDetail(data: any): Manga {
     ratingCount,
     myRating,
     follows: 0,
-    views: item.view_count || 0,
+    views: isUserUpload ? Number(item.view_count || 0) : Number(item.local_view_count ?? item.localViewCount ?? 0),
+    localViewCount: Number(item.local_view_count ?? item.localViewCount ?? 0),
     year: resolveItemYear(item),
     chapters: chaptersForReading,
     lastUpdated:
@@ -795,6 +789,9 @@ export function adaptChapterPages(data: any): string[] {
 
   return items.map((img: any) => {
     const filename = img.image_file || "";
+    if (!filename) return "";
+    if (filename.startsWith("/api/")) return `${API_BASE}${filename}`;
+    if (/^https?:\/\//i.test(filename)) return filename;
     return `${domain}/${chapterPath}/${filename}`;
   }).filter(Boolean);
 }
@@ -842,14 +839,14 @@ export function adaptListData(data: any): {
     items: items.map(adaptMangaItem),
     totalItems,
     currentPage,
-    totalPages: itemsPerPage > 0 ? Math.ceil(totalItems / itemsPerPage) : 1,
+    totalPages: Number(params.pagination?.totalPages) || (itemsPerPage > 0 ? Math.ceil(totalItems / itemsPerPage) : 1),
   };
 }
 
 /** Adapt OTruyen categories → { slug, name, source }[] */
 export function adaptCategories(data: any): { slug: string; name: string; source?: string }[] {
   const items = data?.data?.items || [];
-  return items.map((c: any) => ({ slug: c.slug || "", name: c.name || "", source: 'otruyen' }));
+  return items.map((c: any) => ({ slug: c.slug || "", name: c.name || "", source: 'truyenqq' }));
 }
 
 /** MangaDex genres that may not appear in OTruyen */
