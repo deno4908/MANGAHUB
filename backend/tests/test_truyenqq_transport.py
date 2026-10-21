@@ -49,7 +49,7 @@ def test_browser_transport_preserves_filters_and_search_form(browser):
 @pytest.mark.parametrize('status', [403, 429, 503])
 def test_browser_transport_keeps_http_errors_for_source_policy(browser, status):
     browser.request.return_value.status_code = status
-    client = SourceClient(Settings(request_delay=0, retries=1), transport=transport.TruyenQQTransport())
+    client = SourceClient(Settings(request_delay=0, retries=1), transport=transport.TruyenQQTransport(edge_url=''))
     try:
         with pytest.raises(httpx.HTTPStatusError) as error:
             client.request('https://truyenqqko.com/doc-truyen')
@@ -109,3 +109,42 @@ def test_browser_network_errors_keep_httpx_retry_semantics(browser, browser_erro
 ])
 def test_source_error_diagnostics_are_bounded_and_not_cacheable(error, code):
     assert _source_error_headers(error) == {'X-TruyenQQ-Error': code, 'Cache-Control': 'no-store'}
+
+
+def test_blocked_datacenter_retries_same_qq_filter_via_edge_then_reuses_it(browser):
+    edge = 'https://worker.example/api/truyenqq-edge'
+    success = browser.request.return_value
+    blocked = SimpleNamespace(status_code=403, content=b'Forbidden', headers=httpx.Headers())
+    browser.request.side_effect = [blocked, success, success]
+    client = SourceClient(Settings(request_delay=0, retries=1), transport=transport.TruyenQQTransport(edge_url=edge))
+    client.http.headers['Authorization'] = 'private-header'
+    client.http.cookies.set('private', 'cookie')
+    try:
+        source = 'https://truyenqqko.com/tim-kiem-nang-cao/trang-2?sort=4&category=26'
+        assert client.request(source).status_code == 200
+        client.request('https://truyenqqko.com/frontend/search/search', data={'search': 'one piece', 'type': 0})
+        calls = browser.request.call_args_list
+        assert calls[0].args[1] == source
+        assert calls[1].args[1] == edge + '/tim-kiem-nang-cao/trang-2?sort=4&category=26'
+        assert calls[2].args[:2] == ('POST', edge + '/frontend/search/search')
+        assert calls[2].kwargs['data'] == b'search=one+piece&type=0'
+        assert client.http.cookies.get('private') == 'cookie'
+        for call in calls[1:]:
+            assert set(call.kwargs['headers']).isdisjoint({'host', 'authorization', 'cookie'})
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize('url, method', [
+    ('https://img.example/cover.jpg', 'GET'),
+    ('https://truyenqqko.com/frontend/comment/list', 'POST'),
+])
+def test_edge_fallback_does_not_relay_other_hosts_or_other_posts(browser, url, method):
+    browser.request.return_value.status_code = 403
+    client = SourceClient(Settings(request_delay=0, retries=1), transport=transport.TruyenQQTransport())
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            client.request(url, data={'x': 'y'} if method == 'POST' else None)
+        assert browser.request.call_count == 1
+    finally:
+        client.close()
