@@ -130,6 +130,7 @@ def test_qq_reader_and_images_do_not_wait_for_catalog_workers(monkeypatch):
 
 
 def test_mangadex_slow_transport_has_a_fast_fallback(monkeypatch):
+    monkeypatch.setattr(images, "_preferred_mangadex_transports", {})
     async def slow(url):
         await asyncio.sleep(5)
         return None, None, "timeout", True
@@ -138,6 +139,62 @@ def test_mangadex_slow_transport_has_a_fast_fallback(monkeypatch):
     monkeypatch.setattr(images, "_fetch_once_httpx", AsyncMock(return_value=(b"image", "image/jpeg", "", False)))
     result = asyncio.run(asyncio.wait_for(images._fetch_mangadex_candidate("https://uploads.mangadex.org/covers/test.jpg"), 1))
     assert result[0] == b"image" and result[4] == "httpx"
+
+
+def test_mangadex_reuses_winning_transport_and_recovers_if_it_fails(monkeypatch):
+    monkeypatch.setattr(images, "_preferred_mangadex_transports", {})
+    monkeypatch.setattr(images, "CurlSession", object())
+    calls = []
+    curl_slow = True
+    httpx_failed = False
+
+    async def curl(url):
+        calls.append(("curl", url))
+        if curl_slow:
+            await asyncio.sleep(5)
+        return b"curl-image", "image/jpeg", "", False
+
+    async def http(url):
+        calls.append(("httpx", url))
+        if httpx_failed:
+            return None, None, "connection failed", True
+        return b"httpx-image", "image/jpeg", "", False
+
+    monkeypatch.setattr(images, "_fetch_once_curl", curl)
+    monkeypatch.setattr(images, "_fetch_once_httpx", http)
+
+    async def check():
+        nonlocal curl_slow, httpx_failed
+        base = "https://uploads.mangadex.org/covers/"
+        assert (await images._fetch_mangadex_candidate(base + "one.jpg"))[4] == "httpx"
+        calls.clear()
+        assert (await images._fetch_mangadex_candidate(base + "two.jpg"))[4] == "httpx"
+        assert calls == [("httpx", base + "two.jpg")]
+        curl_slow, httpx_failed = False, True
+        assert (await images._fetch_mangadex_candidate(base + "three.jpg"))[4] == "curl_cffi"
+        assert images._transport_order(base + "four.jpg") == ["curl_cffi", "httpx"]
+
+    asyncio.run(check())
+
+
+def test_mangadex_transport_preference_expires_and_is_scoped_to_host(monkeypatch):
+    monkeypatch.setattr(images, "CurlSession", object())
+    monkeypatch.setattr(images, "_preferred_mangadex_transports", {
+        "uploads.mangadex.org": ("httpx", time.monotonic() + 60),
+    })
+    assert images._transport_order("https://uploads.mangadex.org/covers/a.jpg")[0] == "httpx"
+    assert images._transport_order("https://node.mangadex.network/data/a.jpg")[0] == "curl_cffi"
+    images._preferred_mangadex_transports["uploads.mangadex.org"] = ("httpx", time.monotonic() - 1)
+    assert images._transport_order("https://uploads.mangadex.org/covers/b.jpg")[0] == "curl_cffi"
+
+
+def test_mangadex_transport_preference_has_a_size_bound(monkeypatch):
+    preferences = {str(n): ("httpx", time.monotonic() + 60) for n in range(32)}
+    monkeypatch.setattr(images, "_preferred_mangadex_transports", preferences)
+    monkeypatch.setattr(images, "_transport_order", lambda _: ["httpx"])
+    monkeypatch.setattr(images, "_fetch_once_httpx", AsyncMock(return_value=(b"image", "image/jpeg", "", False)))
+    asyncio.run(images._fetch_mangadex_candidate("https://uploads.mangadex.org/covers/a.jpg"))
+    assert set(preferences) == {"uploads.mangadex.org"}
 
 
 def test_preload_and_visible_image_share_one_download(monkeypatch, tmp_path):

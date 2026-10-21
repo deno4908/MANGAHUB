@@ -1,5 +1,7 @@
 import re
 import secrets
+import threading
+import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -36,6 +38,8 @@ class LiveService:
                                        sizeof=lambda value: len(value[0]))
         self.fetch_pool = ThreadPoolExecutor(max_workers=settings.fetch_concurrency, thread_name_prefix="truyen-fetch")
         self.image_pool = ThreadPoolExecutor(max_workers=24, thread_name_prefix="truyen-image-fetch")
+        self.image_preference_lock = threading.Lock()
+        self.image_preferred_host = None
         self.base = settings.base_url.rstrip("/") + "/"
         self.origin = urlsplit(self.base).netloc
 
@@ -364,7 +368,13 @@ class LiveService:
         return chapters[0 if edge == "first" else -1]
 
     def image(self, urls, referer):
-        targets = tuple(dict.fromkeys(urls))
+        cache_targets = tuple(dict.fromkeys(urls))
+        targets = cache_targets
+        with self.image_preference_lock:
+            preferred = self.image_preferred_host
+        if preferred and preferred[1] > time.monotonic():
+            # Reorder only URLs supplied by this page, never invent a mirror.
+            targets = tuple(sorted(targets, key=lambda url: urlsplit(url).netloc != preferred[0]))
         def fetch(url):
             try:
                 response = self.client.request(url, referer=referer, follow_redirects=True, image=True)
@@ -378,25 +388,34 @@ class LiveService:
             if not targets:
                 raise HTTPException(502, "Chương chưa có máy chủ ảnh")
             tasks = [self.image_pool.submit(fetch, targets[0])]
+            origins = {tasks[0]: targets[0]}
+            def successful(task):
+                value = task.result()
+                with self.image_preference_lock:
+                    self.image_preferred_host = (urlsplit(origins[task]).netloc, time.monotonic() + 60)
+                return value
             try:
                 done, _ = wait(tasks, timeout=0.35)
                 if done and tasks[0].result() is not None:
-                    return tasks[0].result()
+                    return successful(tasks[0])
                 # A stalled original must not consume its full timeout before
                 # another source-provided CDN can deliver the same page.
-                tasks.extend(self.image_pool.submit(fetch, url) for url in targets[1:])
+                for url in targets[1:]:
+                    task = self.image_pool.submit(fetch, url)
+                    tasks.append(task)
+                    origins[task] = url
                 remaining = set(tasks)
                 while remaining:
                     done, remaining = wait(remaining, return_when=FIRST_COMPLETED)
                     for task in done:
                         value = task.result()
                         if value is not None:
-                            return value
+                            return successful(task)
                 raise HTTPException(502, "Các máy chủ ảnh đều không trả ảnh hợp lệ")
             finally:
                 for task in tasks:
                     task.cancel()
-        return self.image_cache.get((targets, referer), self.settings.image_cache_ttl, load)
+        return self.image_cache.get((cache_targets, referer), self.settings.image_cache_ttl, load)
 
     def chapter_image(self, identifier, number, index, server="auto"):
         value = self.chapter(identifier, number)

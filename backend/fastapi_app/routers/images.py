@@ -75,6 +75,7 @@ ALLOWED_IMAGE_HOST_SUFFIXES = (
 )
 _host_validation_cache: dict[str, tuple[float, str | None]] = {}
 _host_validation_lock = threading.Lock()
+_preferred_mangadex_transports: dict[str, tuple[str, float]] = {}
 
 
 def _env_int(name: str, default: int, minimum: int = 1, maximum: int | None = None) -> int:
@@ -714,6 +715,9 @@ def _transport_order(url: str) -> list[str]:
     host = (parsed.hostname or "").lower()
     if _is_mangadex_host(host):
         if CurlSession is not None:
+            preferred = _preferred_mangadex_transports.get(host)
+            if preferred and preferred[0] == "httpx" and preferred[1] > time.monotonic():
+                return ["httpx", "curl_cffi"]
             return ["curl_cffi", "httpx"]
         return ["httpx"]
     if CurlSession is not None:
@@ -831,13 +835,20 @@ async def _fetch_mangadex_candidate(url):
     async def fetch(transport):
         result = await (_fetch_once_curl(url) if transport == "curl_cffi" else _fetch_once_httpx(url))
         return (*result, transport)
+    def successful(result):
+        if result[0] is not None:
+            host = (urlparse(url).hostname or "").lower()
+            if len(_preferred_mangadex_transports) >= 32:
+                _preferred_mangadex_transports.clear()
+            _preferred_mangadex_transports[host] = (result[4], time.monotonic() + 60)
+        return result
     tasks = [create_task(fetch(transports[0]))]
     try:
         done, _ = await asyncio.wait(tasks, timeout=0.35)
         if done:
             first = next(iter(done)).result()
             if first[0] is not None or _is_throttle_error(first[2]) or len(transports) == 1:
-                return first
+                return successful(first)
         if len(transports) > 1:
             tasks.append(create_task(fetch(transports[1])))
         remaining = set(tasks)
@@ -847,7 +858,7 @@ async def _fetch_mangadex_candidate(url):
             for task in done:
                 last = task.result()
                 if last[0] is not None:
-                    return last
+                    return successful(last)
         return last
     finally:
         for task in tasks:

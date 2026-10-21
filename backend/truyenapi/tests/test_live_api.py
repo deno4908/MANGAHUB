@@ -72,6 +72,61 @@ def setup_service(handler=None, **kwargs):
     return LiveService(config, client), calls
 
 
+def test_images_reuse_fast_source_host_without_waiting_for_slow_losers():
+    release, loser_done = threading.Event(), threading.Event()
+
+    def handler(request):
+        if request.url.host == "slow.example":
+            release.wait(3)
+            loser_done.set()
+        return httpx.Response(200, content=b"image", headers={"content-type": "image/jpeg"})
+
+    service, calls = setup_service(handler)
+    try:
+        urls = ["https://slow.example/one.jpg", "https://fast.example/one.jpg"]
+        assert service.image(urls, BASE) == (b"image", "image/jpeg")
+        assert service.image_preferred_host[0] == "fast.example"
+        release.set()
+        assert loser_done.wait(1)
+        service.image_pool.shutdown(wait=True)
+        assert service.image_preferred_host[0] == "fast.example"
+        # Reordering must not change the cache key for the same original input.
+        previous = len(calls)
+        assert service.image(urls, BASE) == (b"image", "image/jpeg")
+        assert len(calls) == previous
+        # A different cover should start with the successful source-provided host.
+        service.image_pool = ThreadPoolExecutor(max_workers=24)
+        assert service.image([url.replace("one", "two") for url in urls], BASE)[0] == b"image"
+        assert [request.url.host for request in calls[previous:]] == ["fast.example"]
+    finally:
+        release.set()
+        service.close()
+
+
+def test_image_preference_expires_and_falls_back_without_inventing_urls():
+    def handler(request):
+        if request.url.host == "fast.example":
+            return httpx.Response(200, text="not an image")
+        return httpx.Response(200, content=b"image", headers={"content-type": "image/jpeg"})
+
+    service, calls = setup_service(handler)
+    try:
+        service.image_preferred_host = ("fast.example", time.monotonic() + 60)
+        urls = ["https://original.example/one.jpg", "https://fast.example/one.jpg"]
+        assert service.image(urls, BASE)[0] == b"image"
+        assert [request.url.host for request in calls] == ["fast.example", "original.example"]
+        service.image_preferred_host = ("fast.example", time.monotonic() - 1)
+        previous = len(calls)
+        assert service.image([url.replace("one", "two") for url in urls], BASE)[0] == b"image"
+        assert [request.url.host for request in calls[previous:]] == ["original.example"]
+        service.image_preferred_host = ("unlisted.example", time.monotonic() + 60)
+        previous = len(calls)
+        assert service.image(["https://original.example/three.jpg"], BASE)[0] == b"image"
+        assert [request.url.host for request in calls[previous:]] == ["original.example"]
+    finally:
+        service.close()
+
+
 def test_docs_portal_and_swagger_have_separate_routes_and_local_assets():
     service, calls = setup_service()
     with TestClient(create_app(service=service)) as api:
