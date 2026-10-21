@@ -19,7 +19,7 @@ import MangaGrid from '@/components/manga/MangaGrid';
 import FilterPanel from '@/components/manga/FilterPanel';
 import MangaPagination from '@/components/manga/MangaPagination';
 import { MangaGridSkeleton } from '@/components/manga/Skeletons';
-import { SlidersHorizontal, X, BookOpen, Loader2 } from 'lucide-react';
+import { SlidersHorizontal, X, BookOpen, Loader2, Tags, ArrowRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { Manga, SortOption } from '@/types/manga';
 
@@ -1713,7 +1713,8 @@ const BrowseManga = () => {
   const baseMangaDexCatalogLimit = isMangaDexSourceTab
     ? (showMatureContent ? MANGADEX_CATALOG_LIMIT_TAB_WITH_MATURE : MANGADEX_CATALOG_LIMIT_TAB_DEFAULT)
     : (showMatureContent ? MANGADEX_CATALOG_LIMIT_WITH_MATURE : MANGADEX_CATALOG_LIMIT_DEFAULT);
-  const { data: categories = [] } = useCategories();
+  const categoriesQuery = useCategories();
+  const categories = categoriesQuery.data || [];
 
   const setBrowseSource = (nextSource: BrowseSourceTab) => {
     if (nextSource === activeSource) return;
@@ -1740,6 +1741,15 @@ const BrowseManga = () => {
     () => buildSelectedGenreAliasGroups(filters.genres),
     [filters.genres],
   );
+  const unsupportedQQGenres = useMemo(() => {
+    if (!isOTruyenSourceTab || !categoriesQuery.isSuccess) return [];
+    const supported = new Set(categories.filter(category => category.source !== 'mangadex').map(category => toSlug(category.slug)));
+    if (!supported.size) return [];
+    return filters.genres.filter(slug => !expandAliases(toSlug(slug)).some(alias => supported.has(toSlug(alias))));
+  }, [isOTruyenSourceTab, categoriesQuery.isSuccess, categories, filters.genres]);
+  const hasUnsupportedQQGenres = unsupportedQQGenres.length > 0;
+  const canQueryQQSelection = !hasUnsupportedQQGenres &&
+    (!filters.genres.length || categoriesQuery.isSuccess || categoriesQuery.isError);
 
   // Map status/sort to OTruyen list type (only used when no genre is selected)
   const listType = useMemo(() => {
@@ -1922,6 +1932,7 @@ const BrowseManga = () => {
   // Keep first 20 pages globally continuous for non-popular tabs.
   const wantsGlobalClientSortMode =
     isOTruyenSourceTab &&
+    canQueryQQSelection &&
     !hasSearch &&
     !hasLocalClientFilters &&
     !useOTruyenCategory &&
@@ -2244,7 +2255,7 @@ const BrowseManga = () => {
   const useQQListMode = isOTruyenSourceTab && !useOTruyenCategory && !useCombinedList && !useGlobalClientSortMode && !useOTruyenFilteredServerMode;
   const listQuery = useQuery({
     ...listPageOptions(serverPage),
-    enabled: browseUrlReady && useQQListMode,
+    enabled: browseUrlReady && useQQListMode && canQueryQQSelection,
   });
 
   const qqPageOptions = useCallback((requestedPage: number) => ({
@@ -2285,7 +2296,7 @@ const BrowseManga = () => {
   }), [directOTruyenFilterGenreSlugs, filters.status, filters.sort, showMatureContent, activeCategorySlug]);
   const otruyenFilteredServerQuery = useQuery({
     ...qqPageOptions(page),
-    enabled: browseUrlReady && useOTruyenFilteredServerMode,
+    enabled: browseUrlReady && useOTruyenFilteredServerMode && canQueryQQSelection,
     placeholderData: (previousData) => previousData,
   });
   const pagePrefetchBusy = useRef(false);
@@ -2500,7 +2511,7 @@ const BrowseManga = () => {
         hasEnoughForPage: visibleCount >= targetVisibleItems,
       };
     },
-    enabled: browseUrlReady && useOTruyenStatusFillMode && (!useOTruyenCategory || Boolean(activeCategorySlug)),
+    enabled: browseUrlReady && useOTruyenStatusFillMode && canQueryQQSelection && (!useOTruyenCategory || Boolean(activeCategorySlug)),
     staleTime: 10 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
     refetchOnMount: true,
@@ -2806,7 +2817,7 @@ const BrowseManga = () => {
   ]);
 
   const categoryQuery = useCategoryManga(
-    useOTruyenCategory && !useOTruyenStatusFillMode && !useOTruyenFilteredServerMode ? activeCategorySlug : '',
+    useOTruyenCategory && canQueryQQSelection && !useOTruyenStatusFillMode && !useOTruyenFilteredServerMode ? activeCategorySlug : '',
     serverPage,
   );
   const data = useCombinedList
@@ -5317,6 +5328,7 @@ const BrowseManga = () => {
   // Adjacent source pages are warmed only after a pagination hover/focus.
 
   const isTabLoadingState =
+    (isOTruyenSourceTab && filters.genres.length > 0 && !categoriesQuery.isSuccess && !categoriesQuery.isError) ||
     isInitialMergedLoading ||
     isMangaDexDemandPagePending ||
     (
@@ -5397,7 +5409,34 @@ const BrowseManga = () => {
         </AnimatePresence>
 
         <div className="flex-1 min-w-0">
-          {isTabLoadingState ? (
+          {hasUnsupportedQQGenres ? (
+            <div role="status" className="flex min-h-[360px] flex-col items-center justify-center px-5 py-12 text-center sm:min-h-[420px]">
+              <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-primary/15 bg-primary/5 text-primary">
+                <Tags className="h-7 w-7" strokeWidth={1.5} aria-hidden="true" />
+              </div>
+              <h2 className="text-lg font-semibold tracking-tight sm:text-xl">Thể loại này chưa có trên TruyenQQ</h2>
+              <p className="mt-2 max-w-sm text-sm leading-6 text-muted-foreground">
+                Thử tìm trên MangaDex hoặc bỏ thể loại không được hỗ trợ để tiếp tục khám phá.
+              </p>
+              <div className="mt-4 flex max-w-md flex-wrap justify-center gap-2">
+                {unsupportedQQGenres.map(slug => (
+                  <span key={slug} className="rounded-full border border-border/60 bg-secondary/50 px-3 py-1 text-xs text-muted-foreground">
+                    {categories.find(category => category.slug === slug)?.name || slug}
+                  </span>
+                ))}
+              </div>
+              <div className="mt-7 flex w-full max-w-xs flex-col items-stretch gap-3 sm:w-auto sm:max-w-none sm:flex-row sm:items-center">
+                <button type="button" onClick={() => setBrowseSource('mangadex')}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+                  Tìm trên MangaDex <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                </button>
+                <button type="button" onClick={() => setFilter('genres', filters.genres.filter(slug => !unsupportedQQGenres.includes(slug)))}
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  Bỏ thể loại không hỗ trợ
+                </button>
+              </div>
+            </div>
+          ) : isTabLoadingState ? (
             <div className="space-y-4 py-3">
               <div className="flex items-center justify-center gap-2 text-primary/90">
                 <Loader2 className="w-5 h-5 animate-spin" />
