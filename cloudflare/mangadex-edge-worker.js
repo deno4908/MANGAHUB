@@ -9,7 +9,7 @@ async function checkSiteAccess(request) {
     const authorization = request.headers.get('Authorization');
     const response = await fetch(SITE_ACCESS_URL, {
       headers: { Accept: 'application/json', 'User-Agent': 'MangaHub-Access-Relay/1.0', ...(authorization ? { Authorization: authorization } : {}) },
-      redirect: 'error', signal: AbortSignal.timeout(6000),
+      redirect: 'manual', signal: AbortSignal.timeout(6000),
     });
     if (response.status === 401 || response.status === 403) {
       return json({ code: 'WHITELIST_REQUIRED', detail: 'Bạn không nằm trong whitelist của website.' }, 403, { 'Cache-Control': 'no-store' });

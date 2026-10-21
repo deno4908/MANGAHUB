@@ -140,6 +140,7 @@ test('edge checks a website token only with the website API, never the QQ source
   globalThis.fetch = async (url, options) => {
     if (String(url) === accessUrl) {
       assert.equal(options.headers.Authorization, 'Bearer allowed-reader');
+      assert.equal(options.redirect, 'manual');
       checked = true;
       return Response.json({ enabled: true, allowed: true });
     }
@@ -153,7 +154,7 @@ test('edge checks a website token only with the website API, never the QQ source
 });
 
 test('edge fails closed if the access service is unavailable or returns malformed policy', async () => {
-  for (const response of [new Response('private failure', { status: 500 }), Response.json({})]) {
+  for (const response of [new Response('private failure', { status: 500 }), new Response(null, { status: 302, headers: { Location: 'https://other.example/' } }), Response.json({})]) {
     globalThis.fetch = async url => { assert.equal(String(url), accessUrl); return response; };
     const result = await worker.fetch(new Request(edge + '/doc-truyen'));
     assert.equal(result.status, 503);
