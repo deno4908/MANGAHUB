@@ -4,22 +4,26 @@ const QQ_SOURCE = "https://truyenqqko.com";
 const SITE_ACCESS_URL = "https://api.mangahub.art/api/site-access";
 
 async function checkSiteAccess(request) {
+  let failure = 'network';
   try {
     const authorization = request.headers.get('Authorization');
     const response = await fetch(SITE_ACCESS_URL, {
-      headers: authorization ? { Authorization: authorization } : {},
+      headers: { Accept: 'application/json', 'User-Agent': 'MangaHub-Access-Relay/1.0', ...(authorization ? { Authorization: authorization } : {}) },
       redirect: 'error', signal: AbortSignal.timeout(6000),
     });
     if (response.status === 401 || response.status === 403) {
       return json({ code: 'WHITELIST_REQUIRED', detail: 'Bạn không nằm trong whitelist của website.' }, 403, { 'Cache-Control': 'no-store' });
     }
+    failure = 'http-' + response.status;
     if (!response.ok) throw new Error('Access policy unavailable');
+    failure = 'invalid-json';
     const policy = await response.json();
+    failure = 'invalid-policy';
     if (typeof policy.enabled !== 'boolean' || typeof policy.allowed !== 'boolean') throw new Error('Invalid access policy');
     if (!policy.allowed) return json({ code: 'WHITELIST_REQUIRED', detail: policy.message }, 403, { 'Cache-Control': 'no-store' });
     return null;
   } catch {
-    return json({ error: 'Không thể kiểm tra quyền truy cập.' }, 503, { 'Cache-Control': 'no-store' });
+    return json({ error: 'Không thể kiểm tra quyền truy cập.' }, 503, { 'Cache-Control': 'no-store', 'X-Site-Access-Error': failure });
   }
 }
 const QQ_PAGES = /^\/(?:doc-truyen|tim-kiem-nang-cao|truyen-moi-cap-nhat|truyen-tranh-moi|truyen-hoan-thanh|truyen-yeu-thich|truyen-dich-qq|top-ngay|top-tuan|top-thang|the-loai|tac-gia|truyen-tranh)(?:\/[a-zA-Z0-9._-]+)*$/;
