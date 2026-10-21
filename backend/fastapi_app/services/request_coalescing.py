@@ -1,5 +1,6 @@
 """Share ongoing reads without letting a disconnected caller cancel other readers."""
 import asyncio
+from serverless_runtime import create_task
 import functools
 import inspect
 from copy import deepcopy
@@ -18,7 +19,7 @@ def coalesce_reads(function=None, *, revision=None):
         key = (asyncio.get_running_loop(), repr(bound.arguments), revision() if revision else None)
         task = pending.get(key)
         if task is None:
-            task = asyncio.create_task(function(*args, **kwargs))
+            task = create_task(function(*args, **kwargs))
             pending[key] = task
 
             def finished(done):

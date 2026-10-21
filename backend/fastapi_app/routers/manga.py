@@ -3,6 +3,7 @@ Manga router — proxies OTruyenAPI with caching.
 """
 
 import asyncio
+from serverless_runtime import create_task, writable_path
 import json
 import logging
 import math
@@ -1669,7 +1670,7 @@ async def _warmup_mangadex_catalog() -> None:
             return
 
         # Keep startup warmup small; browsing will cache the rest on demand.
-        CACHE_DIR = Path(__file__).parent.parent.parent / ".image_cache"
+        CACHE_DIR = writable_path(".image_cache")
         CACHE_DIR.mkdir(exist_ok=True)
         TARGET = min(24, len(cover_urls))
 
@@ -1749,7 +1750,7 @@ def schedule_startup_warmup() -> None:
         return
     if _startup_warmup_task and not _startup_warmup_task.done():
         return
-    _startup_warmup_task = asyncio.create_task(_warmup_mangadex_catalog())
+    _startup_warmup_task = create_task(_warmup_mangadex_catalog())
 
 
 def _schedule_combined_refresh(cache_key: str, list_type: str, page: int, max_chapters: int) -> None:
@@ -1761,7 +1762,7 @@ def _schedule_combined_refresh(cache_key: str, list_type: str, page: int, max_ch
         payload = await _build_combined_payload(list_type=list_type, page=page, max_chapters=max_chapters)
         _cache_combined_payload(cache_key, payload)
 
-    task = asyncio.create_task(_refresh())
+    task = create_task(_refresh())
     _combined_refresh_tasks[cache_key] = task
 
     def _cleanup(done_task: asyncio.Task) -> None:
@@ -1804,7 +1805,7 @@ async def homepage(
     # keeps that screen to one request without making other consumers of this
     # endpoint (such as search suggestions) more expensive.
     featured_task = (
-        asyncio.create_task(featured_manga(limit=12, user=user, db=db))
+        create_task(featured_manga(limit=12, user=user, db=db))
         if include_featured
         else None
     )
@@ -5534,7 +5535,7 @@ async def manga_detail(slug: str, db=Depends(get_supabase_public)):
         if missing_rows:
             # Do not block detail response on large backfills; write missing rows in background.
             service_db = get_supabase()
-            asyncio.create_task(
+            create_task(
                 asyncio.to_thread(_insert_missing_first_seen_rows, service_db, missing_rows)
             )
 
@@ -6629,7 +6630,7 @@ def _schedule_trending_refresh(
             _trending_refresh_tasks.pop(cache_key, None)
 
     import asyncio
-    task = asyncio.create_task(_do_refresh())
+    task = create_task(_do_refresh())
     _trending_refresh_tasks[cache_key] = task
 
 

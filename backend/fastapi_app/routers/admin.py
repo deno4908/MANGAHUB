@@ -3,6 +3,7 @@ Admin router — dashboard stats, user management, moderation, audit.
 """
 
 import asyncio
+from serverless_runtime import create_task
 import logging
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -1001,7 +1002,7 @@ async def admin_stats(admin=Depends(require_role("moderator", "admin")), db=Depe
     """Dashboard stats — instant DB-only response, external counts refresh in background."""
 
     # Always kick off background refresh of external counts (idempotent if still fresh)
-    asyncio.create_task(_refresh_external_counts())
+    create_task(_refresh_external_counts())
 
     # External counts: latest available value (background-refreshed separately)
     ext_cached: tuple[int, int] = _cache_get("admin_stats_ext:truyenqq") or (0, 0)
@@ -1101,7 +1102,7 @@ async def admin_stats(admin=Depends(require_role("moderator", "admin")), db=Depe
 
     chapter_uploads_pending = _count(ch_pending_res)
     manga_uploads_pending = _count(manga_pending_res)
-    asyncio.create_task(_refresh_external_counts())
+    create_task(_refresh_external_counts())
 
     result = {
         "stats": {
@@ -1147,7 +1148,7 @@ async def admin_analytics(admin=Depends(require_admin), db=Depends(get_supabase)
                 finally:
                     _CACHE.pop(refresh_key, None)
 
-            asyncio.create_task(_refresh_stale_cache())
+            create_task(_refresh_stale_cache())
         return stale_cached
 
     return await _compute_admin_analytics_and_cache(db)
@@ -2905,7 +2906,7 @@ async def set_user_vip(
         except Exception:
             pass
 
-    asyncio.create_task(_background())
+    create_task(_background())
     _cache_invalidate_prefix("admin_stats")  # refresh dashboard on next load
 
     return {

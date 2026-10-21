@@ -33,6 +33,17 @@ def get_private_key():
     with _key_lock:
         if _private_key is not None:
             return _private_key
+        shared_key = os.getenv("AUTH_CREDENTIAL_PRIVATE_JWK", "").strip()
+        if shared_key:
+            key = jwk.JWK.from_json(shared_key)
+            modulus = str(key.get("n") or "")
+            bits = int.from_bytes(base64.urlsafe_b64decode(modulus + "=" * (-len(modulus) % 4)), "big").bit_length()
+            if key.get("kty") != "RSA" or not key.has_private or bits < 3072:
+                raise RuntimeError("Invalid authentication encryption key")
+            _private_key = key
+            return key
+        if config.IS_VERCEL:
+            raise RuntimeError("AUTH_CREDENTIAL_PRIVATE_JWK is required on Vercel")
         path = Path(os.getenv("AUTH_CREDENTIAL_KEY_FILE") or
                     Path(__file__).resolve().parents[2] / ".auth-credential-key.json")
         if not path.exists():

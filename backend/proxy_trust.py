@@ -66,6 +66,13 @@ def resolve_client_ip(
     winning by prepending a forged address.
     """
 
+    # Vercel overwrites this platform header. Only enable this boundary inside
+    # its managed runtime; a local caller cannot opt in by sending a header.
+    if getattr(config, "IS_VERCEL", False):
+        platform_ip = _parse_ip(_header_value(headers, "x-vercel-forwarded-for"))
+        if platform_ip is not None:
+            return str(platform_ip)
+
     peer = _parse_ip(peer_ip)
     if peer is None:
         return "unknown"

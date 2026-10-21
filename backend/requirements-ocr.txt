@@ -1,0 +1,4 @@
+# Optional OCR installation. Also set OCR_ENABLED=true to enable the feature.
+# Do not use this file for the lightweight Vercel deployment.
+-r requirements.txt
+easyocr==1.7.2

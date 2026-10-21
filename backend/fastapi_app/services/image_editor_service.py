@@ -7,6 +7,8 @@ import re
 import shutil
 import threading
 import tempfile
+import importlib
+import importlib.util
 from pathlib import Path
 from typing import Any
 
@@ -14,16 +16,28 @@ import cv2
 import httpx
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from config import config
 
-try:
-    import easyocr  # type: ignore
-except Exception:  # pragma: no cover
-    easyocr = None
+easyocr = None
+torch = None
 
-try:
-    import torch  # type: ignore
-except Exception:  # pragma: no cover
-    torch = None
+
+def ocr_available() -> bool:
+    return bool(config.OCR_ENABLED and importlib.util.find_spec("easyocr")
+                and importlib.util.find_spec("torch"))
+
+
+def _load_ocr_dependencies() -> bool:
+    global easyocr, torch
+    if not config.OCR_ENABLED:
+        return False
+    if easyocr is None:
+        try:
+            easyocr = importlib.import_module("easyocr")
+            torch = importlib.import_module("torch")
+        except ImportError:
+            return False
+    return True
 
 try:
     from openai import AsyncOpenAI  # type: ignore
@@ -1207,7 +1221,7 @@ def _decode_mask_data_url(mask_data_url: str) -> np.ndarray:
 
 def _get_easyocr_reader() -> Any:
     global _easyocr_reader
-    if easyocr is None:
+    if not _load_ocr_dependencies():
         return None
     if _easyocr_reader is not None:
         return _easyocr_reader
@@ -1269,7 +1283,7 @@ _ocr_readers_lock = threading.Lock()
 def _get_ocr_reader_for_languages(languages: list[str]) -> Any:
     """Get or create an EasyOCR reader for the given language list (GPU-accelerated when available)."""
     global _ocr_readers
-    if easyocr is None:
+    if not _load_ocr_dependencies():
         return None
 
     key = ",".join(sorted(set(languages)))
@@ -1509,6 +1523,8 @@ def ocr_extract_text(
       5. If ja+en fails, try vi+en and ko+en readers
       6. Auto-detect source language from Unicode analysis
     """
+    if not ocr_available():
+        raise EditorProcessingError("OCR đang tạm khóa.")
     image_bgr = _decode_image(image_bytes)
     h, w = image_bgr.shape[:2]
 
@@ -3620,6 +3636,8 @@ def inpaint_with_regions(image_bytes: bytes, regions_json: str) -> dict[str, Any
 
 
 def inpaint_all_text(image_bytes: bytes) -> dict[str, Any]:
+    if not ocr_available():
+        raise EditorProcessingError("OCR và xóa chữ tự động đang tạm khóa.")
     image_bgr = _decode_image(image_bytes)
     h, w = image_bgr.shape[:2]
     image_area = float(max(1, h * w))

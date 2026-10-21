@@ -21,6 +21,7 @@ from urllib.parse import urljoin, urlparse
 from typing import Any
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse
+from serverless_runtime import writable_path, create_task, IS_VERCEL
 
 try:
     from PIL import Image, ImageStat
@@ -37,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-CACHE_DIR = Path(__file__).parent.parent.parent / ".image_cache"
+CACHE_DIR = writable_path(".image_cache")
 CACHE_DIR.mkdir(exist_ok=True)
 
 EXT_CONTENT_TYPE = {
@@ -504,8 +505,11 @@ def schedule_image_cache_prune(*, force: bool = False) -> None:
         _image_cache_prune_running = True
         _last_image_cache_prune_at = now
 
-    thread = threading.Thread(target=_prune_image_cache_sync, daemon=True)
-    thread.start()
+    if IS_VERCEL:
+        create_task(asyncio.to_thread(_prune_image_cache_sync))
+    else:
+        thread = threading.Thread(target=_prune_image_cache_sync, daemon=True)
+        thread.start()
 
 
 def _etag_for_file(path: Path) -> str:
@@ -826,7 +830,7 @@ async def _fetch_mangadex_candidate(url):
     async def fetch(transport):
         result = await (_fetch_once_curl(url) if transport == "curl_cffi" else _fetch_once_httpx(url))
         return (*result, transport)
-    tasks = [asyncio.create_task(fetch(transports[0]))]
+    tasks = [create_task(fetch(transports[0]))]
     try:
         done, _ = await asyncio.wait(tasks, timeout=0.35)
         if done:
@@ -834,7 +838,7 @@ async def _fetch_mangadex_candidate(url):
             if first[0] is not None or _is_throttle_error(first[2]) or len(transports) == 1:
                 return first
         if len(transports) > 1:
-            tasks.append(asyncio.create_task(fetch(transports[1])))
+            tasks.append(create_task(fetch(transports[1])))
         remaining = set(tasks)
         last = (None, None, "CDN unavailable", False, transports[0])
         while remaining:

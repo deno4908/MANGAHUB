@@ -8,11 +8,13 @@ import time
 import atexit
 from collections import OrderedDict
 from typing import Optional
+from serverless_runtime import writable_path
 
 try:
     import redis
     from config import config
-    _redis_client = redis.from_url(config.REDIS_URL, decode_responses=True)
+    _redis_client = redis.from_url(config.REDIS_URL, decode_responses=True,
+                                   socket_connect_timeout=3, socket_timeout=5)
     # Test connection
     _redis_client.ping()
     _use_redis = True
@@ -45,9 +47,7 @@ class _InMemoryCache:
         self._lock = threading.Lock()
         self._dirty = False
         self._stop_event = threading.Event()
-        self._cache_file = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", ".runtime_cache.json")
-        )
+        self._cache_file = str(writable_path(".runtime_cache.json"))
         self._load_from_disk()
         self._flush_thread = threading.Thread(target=self._flush_loop, daemon=True)
         self._flush_thread.start()

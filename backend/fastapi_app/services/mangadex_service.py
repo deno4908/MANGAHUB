@@ -1,4 +1,5 @@
 import asyncio
+from serverless_runtime import create_task
 import hashlib
 import json
 import logging
@@ -461,7 +462,7 @@ def _schedule_vi_catalog_cover_enrich(
         finally:
             _vi_catalog_cover_enrich_tasks.pop(cache_key, None)
 
-    _vi_catalog_cover_enrich_tasks[cache_key] = asyncio.create_task(_job())
+    _vi_catalog_cover_enrich_tasks[cache_key] = create_task(_job())
 
 
 def _schedule_vi_catalog_top_up(
@@ -531,7 +532,7 @@ def _schedule_vi_catalog_top_up(
         finally:
             _vi_catalog_top_up_tasks.pop(cache_key, None)
 
-    _vi_catalog_top_up_tasks[cache_key] = asyncio.create_task(_job())
+    _vi_catalog_top_up_tasks[cache_key] = create_task(_job())
 
 
 def schedule_vi_catalog_refresh(max_chapters: int | None, *, force: bool = False) -> None:
@@ -557,7 +558,7 @@ def schedule_vi_catalog_refresh(max_chapters: int | None, *, force: bool = False
             _vi_catalog_refresh_tasks.pop(task_key, None)
 
     try:
-        _vi_catalog_refresh_tasks[task_key] = asyncio.create_task(_job())
+        _vi_catalog_refresh_tasks[task_key] = create_task(_job())
     except RuntimeError:
         logger.debug("MangaDex vi-catalog refresh skipped; no running event loop")
 
@@ -754,7 +755,7 @@ async def _request_json(path: str, params: dict[str, Any] | None = None) -> dict
     if existing and not existing.done():
         return await asyncio.shield(existing)
 
-    task = asyncio.create_task(_request_json_direct(path, params))
+    task = create_task(_request_json_direct(path, params))
     _inflight_request_tasks[key] = task
     def finished(done):
         if _inflight_request_tasks.get(key) is task:

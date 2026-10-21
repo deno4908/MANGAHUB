@@ -253,6 +253,14 @@ async def _vip_expiry_sweep_loop():
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle — warm cache + start background tasks."""
     await asyncio.to_thread(ensure_security_redis_available)
+    if config.IS_VERCEL:
+        # Functions handle finite request work. Do not start permanent polling
+        # loops on every cold start; live requests refresh the shared catalog.
+        try:
+            yield
+        finally:
+            await truyenqq_service.close()
+        return
     images.schedule_image_cache_prune(force=True)
     core_warmup_task = asyncio.create_task(_warmup_cache_core())
     task = asyncio.create_task(chapter_check_loop())

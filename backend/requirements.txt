@@ -35,7 +35,6 @@ openai==2.6.1
 Pillow==11.0.0
 python-dateutil==2.9.0
 
-# Image Editor (OCR + inpainting)
+# Manual image editing (OCR is temporarily disabled; see requirements-ocr.txt)
 numpy==1.26.4
 opencv-python-headless==4.10.0.84
-easyocr==1.7.2

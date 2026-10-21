@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi",
+  "functions": {
+    "app.py": {
+      "maxDuration": 300,
+      "excludeFiles": "{venv/**,.venv/**,tests/**,truyenapi/tests/**,database/**,.env*,.auth-credential*,.runtime_cache.json,.image_cache/**,__pycache__/**}"
+    }
+  },
+  "crons": [
+    {
+      "path": "/internal/maintenance-tasks",
+      "schedule": "0 0 * * *"
+    }
+  ]
+}

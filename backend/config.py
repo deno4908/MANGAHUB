@@ -4,11 +4,13 @@ Configuration module - loads environment variables and provides config objects.
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from serverless_runtime import IS_VERCEL
 
 _BASE_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _BASE_DIR.parent
-load_dotenv(_PROJECT_DIR / ".env")
-load_dotenv(_BASE_DIR / ".env", override=True)
+if not IS_VERCEL:
+    load_dotenv(_PROJECT_DIR / ".env")
+    load_dotenv(_BASE_DIR / ".env", override=True)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -20,6 +22,9 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 class Config:
     """Base configuration."""
+
+    IS_VERCEL: bool = IS_VERCEL
+    OCR_ENABLED: bool = _env_bool("OCR_ENABLED", False)
 
     # Supabase
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")

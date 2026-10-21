@@ -4,6 +4,7 @@ Keep the website's catalog response shape while fetching exclusively from QQ.
 All blocking scraper work runs in a bounded pool, outside the ASGI event loop.
 """
 import asyncio
+from serverless_runtime import create_task
 import functools
 import hashlib
 import json
@@ -232,7 +233,7 @@ async def _catalog_page(method, *args, **kwargs):
                     if snapshot:
                         cache.set(key, json.dumps({**snapshot, "fresh_until": time.time() + 10}), ttl=1800)
                     raise
-            task = asyncio.create_task(refresh())
+            task = create_task(refresh())
             _catalog_jobs[task_key] = task
             def finished(done):
                 _catalog_jobs.pop(task_key, None)

@@ -1,5 +1,6 @@
 """Progressive latest-chapter hydration, isolated from catalog and reader requests."""
 import asyncio
+from serverless_runtime import create_task
 import json
 import re
 import time
@@ -111,7 +112,7 @@ async def get_many(identifiers):
         key = _key(source, canonical)
         job_key = (loop, key)
         if job_key not in _jobs and len(_jobs) < MAX_PENDING:
-            task = asyncio.create_task(_load(source, canonical, key))
+            task = create_task(_load(source, canonical, key))
             _jobs[job_key] = task
 
             def finished(done, job_key=job_key):

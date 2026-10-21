@@ -1,5 +1,6 @@
 """Canonical card labels, without fetching full chapter lists or changing user stats."""
 import asyncio
+from serverless_runtime import create_task
 import json
 import re
 
@@ -139,8 +140,8 @@ async def get_many(identifiers):
             result[identifier] = await _qq_metadata(identifier)
         except (HTTPException, RuntimeError):
             pass
-    jobs = ([_retain(asyncio.create_task(manga_dex()))] if missing_mdx else [])
-    jobs.extend(_retain(asyncio.create_task(truyen_qq(identifier))) for identifier in missing_qq)
+    jobs = ([_retain(create_task(manga_dex()))] if missing_mdx else [])
+    jobs.extend(_retain(create_task(truyen_qq(identifier))) for identifier in missing_qq)
     if jobs:
         # Return the ready labels without making every card wait for one slow
         # source. Shared reads finish warming the cache for the client's retry.

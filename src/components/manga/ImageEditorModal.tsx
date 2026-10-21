@@ -138,6 +138,7 @@ const ImageEditorModal = ({
   const [isBusy, setIsBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState("");
   const [fontOptions, setFontOptions] = useState<string[]>(DEFAULT_FONT_OPTIONS);
+  const [ocrEnabled, setOcrEnabled] = useState(false);
   const [detectedFontHint, setDetectedFontHint] = useState("");
   const [geminiCookies, setGeminiCookies] = useState("");
   const [aiProvider, setAiProvider] = useState<"gemini" | "openai-compatible">("gemini");
@@ -307,10 +308,12 @@ const ImageEditorModal = ({
   useEffect(() => {
     if (!open) return;
     let active = true;
+    setOcrEnabled(false);
     imageEditorApi
       .getFonts()
       .then((payload) => {
         if (!active) return;
+        setOcrEnabled(payload?.ocr_enabled === true);
         const nextFonts = Array.isArray(payload?.fonts)
           ? payload.fonts
               .map((row: any) => String(row?.name || "").trim())
@@ -700,6 +703,7 @@ const ImageEditorModal = ({
 
   const applyInpaintAll = () =>
     runAction("Xóa raw toàn ảnh", async () => {
+      if (!ocrEnabled) throw new Error("OCR và xóa chữ tự động đang tạm khóa.");
       const file = await getWorkingFile();
       const payload = await imageEditorApi.inpaint(file, { mode: "all" });
       const nextUrl = String(payload?.image_data_url || "").trim();
@@ -752,6 +756,7 @@ const ImageEditorModal = ({
   // ── Translate tool actions ──
   const applyOcrRegion = () =>
     runAction("OCR nhận diện chữ", async () => {
+      if (!ocrEnabled) throw new Error("OCR đang tạm khóa.");
       if (!translateRegion) {
         throw new Error("Hãy chọn tool Dịch rồi kéo 1 vùng chứa chữ trên ảnh");
       }
@@ -1001,7 +1006,9 @@ const ImageEditorModal = ({
                 <button
                   type="button"
                   onClick={() => { setTool("translate"); setTranslateRegion(null); setOcrResult(null); setTranslatedText(""); }}
-                  className={`px-2 py-1.5 rounded-md text-xs font-semibold ${
+                  disabled={!ocrEnabled}
+                  title={ocrEnabled ? "Nhận diện và dịch chữ" : "OCR đang tạm khóa"}
+                  className={`px-2 py-1.5 rounded-md text-xs font-semibold disabled:opacity-40 ${
                     tool === "translate" ? "bg-violet-600 text-white" : "bg-secondary text-muted-foreground"
                   }`}
                 >
@@ -1080,10 +1087,11 @@ const ImageEditorModal = ({
               <button
                 type="button"
                 onClick={applyInpaintAll}
-                disabled={isBusy}
+                disabled={isBusy || !ocrEnabled}
+                title={ocrEnabled ? "Xóa raw toàn ảnh" : "OCR đang tạm khóa"}
                 className="w-full px-2.5 py-1.5 rounded-md bg-secondary text-xs font-semibold disabled:opacity-50"
               >
-                Xóa raw toàn ảnh
+                {ocrEnabled ? "Xóa raw toàn ảnh" : "Xóa tự động · Tạm khóa"}
               </button>
             </div>
 
@@ -1222,7 +1230,7 @@ const ImageEditorModal = ({
                 <button
                   type="button"
                   onClick={applyOcrRegion}
-                  disabled={isBusy || !translateRegion}
+                  disabled={isBusy || !translateRegion || !ocrEnabled}
                   className="w-full px-3 py-2 rounded-lg bg-violet-600 text-white text-xs font-bold disabled:opacity-40 hover:bg-violet-500 transition-colors"
                 >
                   <ScanSearch className="w-3.5 h-3.5 inline mr-1.5" />
@@ -1440,7 +1448,8 @@ const ImageEditorModal = ({
             )}
 
             <p className="text-[11px] text-muted-foreground leading-relaxed">
-              Phím tắt: ← → chuyển trang, Ctrl+Z quay lại. Mask kéo khung xóa, Tô vẽ vùng xóa, Text kéo vùng chèn chữ, Dịch chọn vùng → OCR → dịch.
+              Phím tắt: ← → chuyển trang, Ctrl+Z quay lại. Mask kéo khung xóa, Tô vẽ vùng xóa, Text kéo vùng chèn chữ.
+              {ocrEnabled ? " Dịch chọn vùng → OCR → dịch." : " OCR đang tạm khóa."}
             </p>
           </div>
 

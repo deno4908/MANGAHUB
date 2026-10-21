@@ -1,0 +1,15 @@
+venv/
+.venv/
+.env*
+.auth-credential*
+.runtime_cache.json
+.image_cache/
+**/__pycache__/
+**/.pytest_cache/
+tests/
+truyenapi/tests/
+truyenapi/data/
+truyenapi/.inspection/
+truyenapi/.logs/
+truyenapi/.runtime.json
+*.log

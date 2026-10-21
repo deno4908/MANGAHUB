@@ -3,6 +3,7 @@
 Authentication, moderation decisions and writes never use this cache.
 """
 import asyncio
+from serverless_runtime import create_task
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -38,7 +39,7 @@ async def cached_public_read(key, loader, default, *, ttl=15, wait_seconds=1.0):
                 _values.popitem(last=False)
             return value
 
-        task = asyncio.create_task(fetch())
+        task = create_task(fetch())
         _pending[pending_key] = task
 
         def finished(done):

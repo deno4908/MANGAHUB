@@ -2,6 +2,7 @@
 Comments router — CRUD, replies, likes.
 """
 import asyncio
+from serverless_runtime import create_task
 import logging
 import re
 import uuid
@@ -333,7 +334,7 @@ async def _enrich_mangadex_comment_titles(title_by_slug: dict[str, str], slugs: 
             return manga_id, title
 
     tasks = [
-        asyncio.create_task(resolve_title(manga_id))
+        create_task(resolve_title(manga_id))
         for manga_id in list(missing_by_id.keys())[:12]
     ]
     try:

@@ -29,6 +29,7 @@ async def _read_editor_image(image: UploadFile) -> bytes:
 async def editor_fonts(_user=Depends(require_uploader)):
     return {
         "fonts": image_editor_service.list_available_fonts(),
+        "ocr_enabled": image_editor_service.ocr_available(),
     }
 
 
@@ -43,8 +44,10 @@ async def editor_inpaint(
     mask_height: float = Form(0),
     _user=Depends(require_uploader),
 ):
-    image_bytes = await _read_editor_image(image)
     normalized_mode = str(mode or "region").strip().lower()
+    if normalized_mode == "all" and not image_editor_service.ocr_available():
+        raise HTTPException(503, "OCR và xóa chữ tự động đang tạm khóa. Bạn vẫn có thể chỉnh ảnh thủ công.")
+    image_bytes = await _read_editor_image(image)
 
     try:
         if normalized_mode == "all":
@@ -167,6 +170,8 @@ async def editor_ocr_region(
     _user=Depends(require_uploader),
 ):
     """OCR text from a selected region of the image using EasyOCR (GPU-accelerated)."""
+    if not image_editor_service.ocr_available():
+        raise HTTPException(503, "OCR đang tạm khóa. Bạn vẫn có thể chỉnh ảnh thủ công.")
     image_bytes = await _read_editor_image(image)
     try:
         return await asyncio.to_thread(

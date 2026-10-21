@@ -191,6 +191,28 @@ class CatalogUpdates:
             delay = min(60, POLL_SECONDS * (2 ** failures))
             await asyncio.sleep(max(1, delay - (time.monotonic() - started)))
 
+    async def refresh_once(self):
+        """A finite, distributed-lock-protected probe for serverless requests."""
+        async def refresh(source):
+            claim = None
+            try:
+                claim = await asyncio.to_thread(self._claim, source)
+                if claim:
+                    await self.publish(source, await self.probe(source))
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning("Catalog probe %s unavailable (%s)", source, type(error).__name__)
+            finally:
+                if claim:
+                    try:
+                        await asyncio.to_thread(self._release, source, claim)
+                    except Exception:
+                        logger.debug("Catalog probe lease will expire for %s", source)
+
+        await asyncio.gather(*(refresh(source) for source in SOURCES))
+        await self.sync()
+
     async def _sync_loop(self):
         while True:
             try:

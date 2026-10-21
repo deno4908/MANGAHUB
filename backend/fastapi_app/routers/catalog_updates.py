@@ -5,12 +5,16 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from fastapi_app.services.catalog_updates import catalog_updates, POLL_SECONDS
+from serverless_runtime import IS_VERCEL, create_task
 
 router = APIRouter()
 
 
 @router.get("/updates")
 async def update_versions():
+    if IS_VERCEL:
+        await catalog_updates.sync()
+        create_task(catalog_updates.refresh_once())
     return {"sources": catalog_updates.current, "poll_interval_seconds": POLL_SECONDS}
 
 
@@ -18,8 +22,19 @@ async def event_stream(request):
     seen = {}
     initial = True
     heartbeat_at = 0
+    started = time.monotonic()
+    probe_at = 0
+    probe_task = None
     yield "retry: 5000\nevent: ready\ndata: {}\n\n"
     while not await request.is_disconnected():
+        if IS_VERCEL:
+            if time.monotonic() - started >= 45:
+                return  # EventSource reconnects; do not exhaust a Function.
+            if time.monotonic() - probe_at >= POLL_SECONDS:
+                await catalog_updates.sync()
+                if probe_task is None or probe_task.done():
+                    probe_task = create_task(catalog_updates.refresh_once())
+                probe_at = time.monotonic()
         for source, event in tuple(catalog_updates.current.items()):
             if seen.get(source) != event["revision"]:
                 seen[source] = event["revision"]
