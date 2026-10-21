@@ -1,3 +1,4 @@
+import SiteAccessSection from '@/components/admin/SiteAccessSection';
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
@@ -67,7 +68,8 @@ type AdminTab =
   | "announcements"
   | "analytics"
   | "settings"
-  | "security";
+  | "security"
+  | "site_access";
 
 const normalizePermissionText = (value: unknown): string =>
   String(value || "")
@@ -107,6 +109,7 @@ const TABS: { key: AdminTab; label: string; icon: any }[] = [
   { key: "announcements", label: "Thông báo", icon: Bell },
   { key: "analytics", label: "Thống kê", icon: TrendingUp },
   { key: "settings", label: "Cài đặt", icon: Settings },
+  { key: "site_access", label: "Whitelist truy cập", icon: Lock },
   { key: "security", label: "Bảo mật", icon: Lock },
 ];
 
@@ -1176,6 +1179,8 @@ const AdminPanel = () => {
         return <AnalyticsSection stats={apiStats} analytics={apiAnalytics} />;
       case "settings":
         return <SettingsSection onNavigate={setActiveTab} />;
+      case "site_access":
+        return <SiteAccessSection />;
       case "security":
         return <SecuritySection />;
       default:

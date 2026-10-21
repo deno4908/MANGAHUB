@@ -1,5 +1,7 @@
 import { fetchWithTimeout } from "./http";
 import { fetchWithTruyenQQRelay } from "./truyenqqRelay";
+import { isSiteAccessRestricted, setSiteAccessRestricted } from './siteAccessState';
+export { isSiteAccessRestricted, setSiteAccessRestricted } from './siteAccessState';
 /**
  * API client — centralized HTTP calls to backend.
  * FastAPI: http://localhost:8000  |  Flask Auth: http://localhost:5000
@@ -11,6 +13,13 @@ const AUTH_CSRF_HEADER = "X-MangaHub-CSRF";
 export const FORCE_LOGOUT_EVENT = "mb:force-logout";
 export const FORCE_FORBIDDEN_EVENT = "mb:force-forbidden";
 export const FORCE_MAINTENANCE_EVENT = "mb:force-maintenance";
+export const FORCE_SITE_ACCESS_EVENT = 'mb:site-access-denied';
+function siteAccessDenied(body: any) {
+  if (body?.code !== 'WHITELIST_REQUIRED') return;
+  setSiteAccessRestricted(true);
+  window.dispatchEvent(new CustomEvent(FORCE_SITE_ACCESS_EVENT, { detail: body.site_access }));
+  throw new Error(String(body.detail || 'Bạn không nằm trong whitelist của website.'));
+}
 export const HOMEPAGE_REFRESH_EVENT = "mb:homepage-refresh";
 const BAN_LOCK_KEY = "banned_lock";
 const SESSION_HINT_KEY = "mb:session-present";
@@ -632,10 +641,11 @@ function shouldRestoreSessionBeforeRequest(url: string, method = "GET"): boolean
 async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Promise<Response> {
   const {
     timeoutMs,
-    skipAuth = false,
+    skipAuth: requestedSkipAuth = false,
     suppressForbiddenRedirect = false,
     ...requestOptions
   } = options;
+  const skipAuth = requestedSkipAuth && !isSiteAccessRestricted();
   const requestTimeoutMs =
     typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
       ? timeoutMs
@@ -720,6 +730,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
       }
       if (retry.status === 403) {
         const body = await retry.json().catch(() => ({}));
+        siteAccessDenied(body);
         if (isBannedResponse(body)) {
           forceBanLogout(body);
           throw new Error("BANNED");
@@ -753,6 +764,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
 
   if (res.status === 403) {
     const body = await res.json().catch(() => ({}));
+    siteAccessDenied(body);
     if (isBannedResponse(body)) {
       forceBanLogout(body);
       throw new Error("BANNED");
@@ -2061,4 +2073,22 @@ export const groupApi = {
     }),
   removeMember: (groupId: string, userId: string) =>
     api<any>(`/api/groups/${groupId}/members/${userId}`, { method: "DELETE" }),
+};
+
+export type SiteAccessState = {
+  enabled: boolean;
+  allowed: boolean;
+  authenticated: boolean;
+  is_admin?: boolean;
+  message: string;
+};
+export const siteAccessApi = {
+  getStatus: async () => {
+    const state = await api<SiteAccessState>('/api/site-access', { timeoutMs: 10_000 });
+    setSiteAccessRestricted(state.enabled);
+    return state;
+  },
+  getAdmin: () => admin<Pick<SiteAccessState, 'enabled' | 'message'> & { members: Array<{ id: string; username?: string; display_name?: string; email?: string; role?: string; is_banned?: boolean }> }>('/api/admin/site-access'),
+  setMode: (enabled: boolean) => admin('/api/admin/site-access', { method: 'PUT', body: JSON.stringify({ enabled }) }),
+  setMember: (id: string, allowed: boolean) => admin(`/api/admin/site-access/members/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ allowed }) }),
 };

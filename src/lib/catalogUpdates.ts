@@ -71,7 +71,7 @@ export function watchCatalogUpdates(client: QueryClient) {
     controller = active;
     const timeout = setTimeout(() => active.abort(), 6000);
     try {
-      const response = await fetch(`${base}/api/manga/updates`, { signal: active.signal, cache: 'no-store' });
+      const response = await fetch(`${base}/api/manga/updates`, { signal: active.signal, cache: 'no-store', credentials: 'include' });
       if (response.ok) {
         const body = await response.json();
         if (!stopped && !active.signal.aborted) for (const event of Object.values(body.sources || {})) {
@@ -93,7 +93,7 @@ export function watchCatalogUpdates(client: QueryClient) {
     void checkVersions();
     if (typeof EventSource !== 'undefined') {
       const seenOnConnection = new Set<string>();
-      stream = new EventSource(`${base}/api/manga/updates/stream`);
+      stream = new EventSource(`${base}/api/manga/updates/stream`, { withCredentials: true });
       stream.addEventListener('catalog-update', message => {
         try {
           const event = JSON.parse((message as MessageEvent).data) as CatalogUpdate;

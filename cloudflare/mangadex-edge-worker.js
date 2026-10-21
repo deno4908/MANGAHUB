@@ -1,6 +1,27 @@
 const MANGADEX_API = "https://api.mangadex.org";
 const QQ_PREFIX = "/api/truyenqq-edge";
 const QQ_SOURCE = "https://truyenqqko.com";
+const SITE_ACCESS_URL = "https://api.mangahub.art/api/site-access";
+
+async function checkSiteAccess(request) {
+  try {
+    const authorization = request.headers.get('Authorization');
+    const response = await fetch(SITE_ACCESS_URL, {
+      headers: authorization ? { Authorization: authorization } : {},
+      redirect: 'error', signal: AbortSignal.timeout(6000),
+    });
+    if (response.status === 401 || response.status === 403) {
+      return json({ code: 'WHITELIST_REQUIRED', detail: 'Bạn không nằm trong whitelist của website.' }, 403, { 'Cache-Control': 'no-store' });
+    }
+    if (!response.ok) throw new Error('Access policy unavailable');
+    const policy = await response.json();
+    if (typeof policy.enabled !== 'boolean' || typeof policy.allowed !== 'boolean') throw new Error('Invalid access policy');
+    if (!policy.allowed) return json({ code: 'WHITELIST_REQUIRED', detail: policy.message }, 403, { 'Cache-Control': 'no-store' });
+    return null;
+  } catch {
+    return json({ error: 'Không thể kiểm tra quyền truy cập.' }, 503, { 'Cache-Control': 'no-store' });
+  }
+}
 const QQ_PAGES = /^\/(?:doc-truyen|tim-kiem-nang-cao|truyen-moi-cap-nhat|truyen-tranh-moi|truyen-hoan-thanh|truyen-yeu-thich|truyen-dich-qq|top-ngay|top-tuan|top-thang|the-loai|tac-gia|truyen-tranh)(?:\/[a-zA-Z0-9._-]+)*$/;
 
 export async function fetchQQOrigin(path, query, body) {
@@ -35,7 +56,7 @@ async function qqSource(request, url) {
   if ((!search && !listing) || url.search.length > 2048) return json({ error: "Not found" }, 404);
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: {
     "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type", "Access-Control-Max-Age": "86400",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization", "Access-Control-Max-Age": "86400",
   } });
   if (request.method !== (search ? "POST" : "GET")) return json({ error: "Method not allowed" }, 405);
 
@@ -117,6 +138,10 @@ function json(payload, status = 200, extraHeaders = {}) {
 export default {
   async fetch(request) {
     const url = new URL(request.url);
+    if (request.method !== 'OPTIONS' && (url.pathname.startsWith(QQ_PREFIX + '/') || url.pathname.startsWith('/api/mangadex-edge/chapter/'))) {
+      const denied = await checkSiteAccess(request);
+      if (denied) return denied;
+    }
     if (url.pathname.startsWith(QQ_PREFIX + "/")) return qqSource(request, url);
     if (request.method === "OPTIONS") {
       return new Response(null, {
@@ -124,7 +149,7 @@ export default {
         headers: {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "GET, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization",
           "Access-Control-Max-Age": "86400",
         },
       });
@@ -141,7 +166,11 @@ export default {
     const cache = caches.default;
     const cacheKey = new Request(`${url.origin}${prefix}${chapterId}`, { method: "GET" });
     const cached = await cache.match(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      const response = new Response(cached.body, cached);
+      response.headers.set('Cache-Control', 'private, no-store');
+      return response;
+    }
 
     const upstream = await fetch(`${MANGADEX_API}/at-home/server/${chapterId}`, {
       headers: {
@@ -161,6 +190,7 @@ export default {
     const payload = await upstream.json();
     const response = json(payload);
     await cache.put(cacheKey, response.clone());
+    response.headers.set('Cache-Control', 'private, no-store');
     return response;
   },
 };

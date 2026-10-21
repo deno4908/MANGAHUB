@@ -1,4 +1,4 @@
-import { mangaApi } from "@/lib/api";
+import { mangaApi, getAccessToken, isSiteAccessRestricted } from "@/lib/api";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const MANGADEX_EDGE_BASE = String(
@@ -98,6 +98,7 @@ export async function getLocalMangaDexChapterPages(
     const response = await fetch(
       `${MANGADEX_EDGE_BASE}/chapter/${encodeURIComponent(chapterId)}`,
       {
+        ...(isSiteAccessRestricted() && getAccessToken() ? { headers: { Authorization: `Bearer ${getAccessToken()}` } } : {}),
         signal: controller.signal,
         credentials: "same-origin",
         cache: "no-store",

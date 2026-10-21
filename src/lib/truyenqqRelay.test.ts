@@ -1,7 +1,8 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { fetchWithTruyenQQRelay } from './truyenqqRelay';
+import { setSiteAccessRestricted } from './siteAccessState';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { setSiteAccessRestricted(false); vi.unstubAllGlobals(); });
 const api = 'https://api.mangahub.art/api/manga/truyenqq-filtered?page=53';
 const json = (body: unknown, status = 200, headers = {}) => new Response(JSON.stringify(body), {
   status, headers: { 'Content-Type': 'application/json', ...headers },
@@ -56,4 +57,16 @@ it('does not retry unrelated failures or authentication requests through QQ', as
   expect((await fetchWithTruyenQQRelay(api, {}, 10_000)).status).toBe(503);
   expect((await fetchWithTruyenQQRelay('https://auth.mangahub.art/login', { method: 'POST', body: 'secret' }, 10_000)).status).toBe(503);
   expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+it('authenticates only the owned relay during whitelist recovery', async () => {
+  setSiteAccessRestricted(true);
+  const fetcher = vi.fn().mockResolvedValueOnce(json({}, 502, {
+    'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/doc-truyen',
+  })).mockResolvedValueOnce(new Response('<div class="list_grid"></div>'))
+    .mockResolvedValueOnce(json({ data: { items: [] } }));
+  vi.stubGlobal('fetch', fetcher);
+  await fetchWithTruyenQQRelay(api, { headers: { Authorization: 'Bearer allowed-reader' } }, 10_000);
+  expect(fetcher.mock.calls[1][0]).toBe('https://mangahub-mangadex-edge.vinhytb3010.workers.dev/api/truyenqq-edge/doc-truyen');
+  expect(fetcher.mock.calls[1][1]).toMatchObject({ headers: { Authorization: 'Bearer allowed-reader' }, credentials: 'omit' });
 });

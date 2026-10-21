@@ -1,7 +1,7 @@
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { CatalogUpdates } from '@/hooks/useCatalogUpdates';
+import SiteAccessGate from '@/components/SiteAccessGate';
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Link, Navigate, Routes, Route, useLocation, useNavigate } from "react-router-dom";
 import { Component, useEffect, lazy, Suspense, useState, type ErrorInfo, type ReactNode } from "react";
@@ -736,6 +736,7 @@ const AppContent = () => {
   const maintenanceChrome = Boolean(maintenance?.enabled && !isAdmin);
 
   return (
+    <SiteAccessGate>
     <div className="flex flex-col min-h-screen">
       <ScrollToTop />
       <AuthLoader maintenanceLocked={Boolean(maintenance?.enabled && !isAdmin)} />
@@ -785,6 +786,7 @@ const AppContent = () => {
       </main>
       {!hideChrome && !maintenanceChrome && <Footer />}
     </div>
+    </SiteAccessGate>
   );
 };
 
@@ -794,7 +796,6 @@ const App = () => (
       <Toaster />
       <Sonner />
       <BrowserRouter>
-        <CatalogUpdates />
         <AppContent />
       </BrowserRouter>
     </TooltipProvider>

@@ -1,4 +1,5 @@
 import { fetchWithTimeout } from './http';
+import { isSiteAccessRestricted } from './siteAccessState';
 
 const EDGE = import.meta.env.VITE_TRUYENQQ_EDGE_URL ||
   'https://mangahub-mangadex-edge.vinhytb3010.workers.dev/api/truyenqq-edge';
@@ -17,16 +18,17 @@ function source(path: string | null, encodedKeyword?: string | null): Source | n
   return { path };
 }
 
-async function warm(value: Source, signal: AbortSignal | null | undefined, timeout: number): Promise<boolean> {
+async function warm(value: Source, signal: AbortSignal | null | undefined, timeout: number, authorization?: string | null): Promise<boolean> {
   if (signal?.aborted) return false;
-  const key = JSON.stringify(value);
+  const key = JSON.stringify([value, authorization || '']);
   const running = pending.get(key);
   if (running) return running;
   const job = (async () => {
     try {
       const response = await fetchWithTimeout(EDGE.replace(/\/$/, '') + value.path, {
         method: value.keyword ? 'POST' : 'GET', credentials: 'omit', signal,
-        ...(value.keyword ? { headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        headers: authorization ? { Authorization: authorization } : undefined,
+        ...(value.keyword ? { headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...(authorization ? { Authorization: authorization } : {}) },
           body: new URLSearchParams({ search: value.keyword, type: '0' }).toString() } : {}),
       }, timeout);
       if (!response.ok) return false;
@@ -39,13 +41,13 @@ async function warm(value: Source, signal: AbortSignal | null | undefined, timeo
   try { return await job; } finally { pending.delete(key); }
 }
 
-function refreshSource(value: unknown, keyword: string | null, signal: AbortSignal | null | undefined) {
+function refreshSource(value: unknown, keyword: string | null, signal: AbortSignal | null | undefined, authorization?: string | null) {
   if (typeof value !== 'string') return;
   try {
     const url = new URL(value);
     if (url.protocol !== 'https:' || url.hostname !== 'truyenqqko.com') return;
     const hint = source(url.pathname + url.search, keyword ? encodeURIComponent(keyword) : null);
-    if (hint && (warmedUntil.get(JSON.stringify(hint)) || 0) < Date.now()) void warm(hint, signal, 10_000);
+    if (hint && (warmedUntil.get(JSON.stringify([hint, authorization || ''])) || 0) < Date.now()) void warm(hint, signal, 10_000, authorization);
   } catch { /* Source hints are optional. */ }
 }
 
@@ -56,11 +58,12 @@ export async function fetchWithTruyenQQRelay(url: string, options: RequestInit, 
     return fetchWithTimeout(url, options, timeout);
   }
   const deadline = Date.now() + timeout;
+  const authorization = isSiteAccessRestricted() ? new Headers(options.headers).get('Authorization') : null;
   let response = await fetchWithTimeout(url, options, timeout);
   for (let attempt = 0; attempt < 2 && response.headers.get('X-TruyenQQ-Error') === 'http-403'; attempt++) {
     const hint = source(response.headers.get('X-TruyenQQ-Source-Path'), response.headers.get('X-TruyenQQ-Search'));
     const remaining = deadline - Date.now();
-    if (!hint || remaining <= 0 || !await warm(hint, options.signal, remaining)) return response;
+    if (!hint || remaining <= 0 || !await warm(hint, options.signal, remaining, authorization)) return response;
     const retryRemaining = deadline - Date.now();
     if (retryRemaining <= 0) return response;
     response = await fetchWithTimeout(url, options, retryRemaining);
@@ -68,7 +71,7 @@ export async function fetchWithTruyenQQRelay(url: string, options: RequestInit, 
   if (response.ok && response.headers.get('content-type')?.includes('application/json')) {
     const payload = await response.clone().json().catch(() => null);
     for (const value of [payload, payload?.latest, payload?.ongoing]) {
-      refreshSource(value?.data?.source_url, apiUrl.searchParams.get('keyword'), options.signal);
+      refreshSource(value?.data?.source_url, apiUrl.searchParams.get('keyword'), options.signal, authorization);
     }
   }
   return response;
