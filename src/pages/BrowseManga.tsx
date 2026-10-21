@@ -6,6 +6,7 @@ import { useSettingsStore } from '@/store/settingsStore';
 import { useUserStore } from '@/store/userStore';
 import { useCategoryManga, useCategories } from '@/hooks/useApi';
 import { mangaApi, ratingApi } from '@/lib/api';
+import { canCacheCover, warmCovers } from '@/lib/coverCache';
 import { adaptListData, adaptMangaDetail, thumbFallbackUrl, thumbUrl } from '@/lib/adapters';
 import { isMatureManga } from '@/lib/contentFilter';
 import {
@@ -2111,10 +2112,9 @@ const BrowseManga = () => {
     retryDelay: 3000,
   });
 
-  const mangaDexServerSearchQuery = useQuery({
-    queryKey: getMangaDexServerSearchQueryKey(page),
-    queryFn: ({ signal }) => fetchMangaDexServerSearchPage(page, signal),
-    enabled: browseUrlReady && useMangaDexServerSearchMode,
+  const mangaDexPageOptions = useCallback((requestedPage: number) => ({
+    queryKey: getMangaDexServerSearchQueryKey(requestedPage),
+    queryFn: ({ signal }: { signal: AbortSignal }) => fetchMangaDexServerSearchPage(requestedPage, signal),
     staleTime: 2 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
     refetchOnMount: true,
@@ -2122,6 +2122,10 @@ const BrowseManga = () => {
     refetchOnReconnect: false,
     retry: false,
     retryDelay: 1200,
+  }), [getMangaDexServerSearchQueryKey, fetchMangaDexServerSearchPage]);
+  const mangaDexServerSearchQuery = useQuery({
+    ...mangaDexPageOptions(page),
+    enabled: browseUrlReady && useMangaDexServerSearchMode,
   });
 
   const getMangaDexLatestFeedQueryKey = useCallback(
@@ -2136,13 +2140,14 @@ const BrowseManga = () => {
   );
 
   const fetchMangaDexLatestFeedPage = useCallback(
-    async (targetPage: number) => {
+    async (targetPage: number, signal?: AbortSignal) => {
       const payload = await mangaApi.getMangaDexLatestFeed({
         page: targetPage,
         limit: MANGADEX_LATEST_FEED_LIMIT,
         showMature: showMatureContent,
         filterHidden: true,
         timeoutMs: 12_000,
+        signal,
       });
       return adaptListData(payload);
     },
@@ -2151,7 +2156,7 @@ const BrowseManga = () => {
 
   const mangaDexLatestFeedQuery = useQuery({
     queryKey: getMangaDexLatestFeedQueryKey(page),
-    queryFn: () => fetchMangaDexLatestFeedPage(page),
+    queryFn: ({ signal }) => fetchMangaDexLatestFeedPage(page, signal),
     enabled: browseUrlReady && useMangaDexLatestFeedMode,
     staleTime: 90 * 1000,
     gcTime: 8 * 60 * 1000,
@@ -2205,23 +2210,23 @@ const BrowseManga = () => {
     mangadexCatalogQuery.refetch,
   ]);
 
-  const listQuery = useQuery({
-    queryKey: ['manga', 'list', listType, serverPage],
-    queryFn: async () => {
+  const listPageOptions = useCallback((requestedPage: number) => ({
+    queryKey: ['manga', 'list', listType, requestedPage],
+    queryFn: async ({ signal }: { signal: AbortSignal }) => {
       try {
-        const payload = await mangaApi.getList(listType, serverPage);
+        const payload = await mangaApi.getList(listType, requestedPage, signal);
         assertOTruyenPayload(payload);
         return adaptListData(payload);
       } catch (listError) {
         const cachedList = queryClient.getQueryData(
-          ['manga', 'list', listType, serverPage],
+          ['manga', 'list', listType, requestedPage],
         ) as OTruyenListData | undefined;
         if (cachedList?.items?.length) {
           return cachedList;
         }
 
         const cachedCombined = queryClient.getQueryData(
-          ['manga', 'list-combined', listType, serverPage, mangadexCatalogLimit],
+          ['manga', 'list-combined', listType, requestedPage, mangadexCatalogLimit],
         ) as { listData?: OTruyenListData } | undefined;
         if (cachedCombined?.listData?.items?.length) {
           return cachedCombined.listData;
@@ -2230,12 +2235,16 @@ const BrowseManga = () => {
         throw listError;
       }
     },
-    enabled: browseUrlReady && isOTruyenSourceTab && !useOTruyenCategory && !useCombinedList && !useGlobalClientSortMode && !useOTruyenFilteredServerMode,
     staleTime: 10 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
     refetchOnMount: true,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
+  }), [listType, queryClient, mangadexCatalogLimit]);
+  const useQQListMode = isOTruyenSourceTab && !useOTruyenCategory && !useCombinedList && !useGlobalClientSortMode && !useOTruyenFilteredServerMode;
+  const listQuery = useQuery({
+    ...listPageOptions(serverPage),
+    enabled: browseUrlReady && useQQListMode,
   });
 
   const qqPageOptions = useCallback((requestedPage: number) => ({
@@ -2279,14 +2288,46 @@ const BrowseManga = () => {
     enabled: browseUrlReady && useOTruyenFilteredServerMode,
     placeholderData: (previousData) => previousData,
   });
-  const qqPrefetchBusy = useRef(false);
-  const prefetchQQPage = useCallback((target: number) => {
+  const pagePrefetchBusy = useRef(false);
+  const prefetchedCovers = useRef<() => void>(() => {});
+  const intentGeneration = useRef(0);
+  useEffect(() => {
+    intentGeneration.current++;
+    // Let newly mounted cards acquire the prefetched bytes before releasing
+    // the intent's lease; cancelling a different page still frees its queue.
+    const release = prefetchedCovers.current;
+    queueMicrotask(release);
+    return () => { intentGeneration.current++; queueMicrotask(prefetchedCovers.current); };
+  }, [activeSource, page, normalizedSearch, mangaDexTranslatedLanguage, filters.status,
+    filters.sort, filters.genres, showMatureContent]);
+  const prefetchBrowsePage = useCallback((target: number) => {
     const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
-    if (!browseUrlReady || !useOTruyenFilteredServerMode || otruyenFilteredServerQuery.isFetching || qqPrefetchBusy.current || connection?.saveData || /(^|-)2g$/.test(connection?.effectiveType || '')) return;
-    qqPrefetchBusy.current = true;
-    // Only warm an intended page, with the exact same filters/key as navigation.
-    void queryClient.prefetchQuery(qqPageOptions(target)).finally(() => { qqPrefetchBusy.current = false; });
-  }, [browseUrlReady, useOTruyenFilteredServerMode, otruyenFilteredServerQuery.isFetching, queryClient, qqPageOptions]);
+    if (!browseUrlReady || target === page || pagePrefetchBusy.current || connection?.saveData || /(^|-)2g$/.test(connection?.effectiveType || '')) return;
+    const options = useMangaDexServerSearchMode && !mangaDexServerSearchQuery.isFetching
+      ? mangaDexPageOptions(target)
+      : useMangaDexLatestFeedMode && !mangaDexLatestFeedQuery.isFetching
+        ? { queryKey: getMangaDexLatestFeedQueryKey(target),
+          queryFn: ({ signal }: { signal: AbortSignal }) => fetchMangaDexLatestFeedPage(target, signal), staleTime: 90_000, gcTime: 8 * 60_000 }
+        : useOTruyenFilteredServerMode && !otruyenFilteredServerQuery.isFetching
+          ? qqPageOptions(target)
+          : useQQListMode && !isClientPaginationMode && !listQuery.isFetching
+            ? listPageOptions(target) : null;
+    if (!options) return;
+    pagePrefetchBusy.current = true;
+    const generation = ++intentGeneration.current;
+    prefetchedCovers.current();
+    // One intended page, sharing exactly the foreground filters, key and signal.
+    void queryClient.prefetchQuery<OTruyenListData>(options).then(() => {
+      if (intentGeneration.current !== generation) return;
+      const data = queryClient.getQueryData<OTruyenListData>(options.queryKey);
+      prefetchedCovers.current = warmCovers((data?.items || []).slice(0, 4)
+        .map(item => [item.cover, item.coverProxy].find(url => !!url && canCacheCover(url)) || '').filter(Boolean));
+    }).finally(() => { pagePrefetchBusy.current = false; });
+  }, [browseUrlReady, page, useMangaDexServerSearchMode, mangaDexServerSearchQuery.isFetching,
+    useMangaDexLatestFeedMode, mangaDexLatestFeedQuery.isFetching, mangaDexPageOptions,
+    getMangaDexLatestFeedQueryKey, fetchMangaDexLatestFeedPage, useOTruyenFilteredServerMode,
+    otruyenFilteredServerQuery.isFetching, qqPageOptions, useQQListMode, isClientPaginationMode,
+    listQuery.isFetching, listPageOptions, queryClient]);
 
   const otruyenStatusFillQuery = useQuery({
     queryKey: [
@@ -5266,19 +5307,6 @@ const BrowseManga = () => {
     myRatedScoreMap,
   ]);
 
-  // ── Browser-level preload (limited) ───────────────────────────────────────
-  // Avoid preloading the whole page; only warm the first visible covers.
-  useEffect(() => {
-    const urls = displayItems
-      .slice(0, 6)
-      .map(m => m.cover)
-      .filter((u): u is string => !!u && u.includes('/api/images/'));
-    urls.forEach(url => {
-      const img = new window.Image();
-      img.src = url;
-    });
-  }, [displayItems]);
-
   useEffect(() => {
     if (!hasResolvedTotalPages) return;
     if (isLoading || isFetching) return;
@@ -5286,38 +5314,7 @@ const BrowseManga = () => {
     if (page > totalPages) setPage(totalPages);
   }, [page, totalPages, hasResolvedTotalPages, isLoading, isFetching, isNearMangaDexLoadedLimit]);
 
-  // Keep MangaDex browse to one explicit server-page request per user action.
-  // Adjacent-page prefetch makes pagination feel a bit faster, but it can
-  // multiply upstream calls when users click through pages quickly.
-
-  // Prefetch adjacent MangaDex latest pages. This mirrors MangaDex's native
-  // chapter offset paging, so every page stays stable and quick to revisit.
-  useEffect(() => {
-    if (!useMangaDexLatestFeedMode) return;
-    const total = Math.max(1, mangaDexLatestFeedTotalPages);
-    const targetPages = Array.from(new Set([page + 1, page - 1]))
-      .filter((targetPage) => targetPage >= 1 && targetPage <= total);
-
-    targetPages.forEach((targetPage) => {
-      queryClient.prefetchQuery({
-        queryKey: getMangaDexLatestFeedQueryKey(targetPage),
-        queryFn: () => fetchMangaDexLatestFeedPage(targetPage),
-        staleTime: 90 * 1000,
-        gcTime: 8 * 60 * 1000,
-      }).catch(() => {
-        // Best-effort warmup only; normal navigation still handles errors.
-      });
-    });
-  }, [
-    useMangaDexLatestFeedMode,
-    page,
-    mangaDexLatestFeedTotalPages,
-    queryClient,
-    getMangaDexLatestFeedQueryKey,
-    fetchMangaDexLatestFeedPage,
-  ]);
-
-  // QQ pages load on navigation; speculative reads compete with visible covers.
+  // Adjacent source pages are warmed only after a pagination hover/focus.
 
   const isTabLoadingState =
     isInitialMergedLoading ||
@@ -5409,7 +5406,7 @@ const BrowseManga = () => {
               <MangaGridSkeleton count={18} />
               <div className="h-10 rounded-xl bg-muted/40 animate-pulse" />
               {isMangaDexDemandPagePending && totalPages > 1 && (
-                <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} onPageIntent={prefetchQQPage} />
+                <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} onPageIntent={prefetchBrowsePage} />
               )}
             </div>
           ) : (
@@ -5452,14 +5449,14 @@ const BrowseManga = () => {
                     batchStep={6}
                     batchDelayMs={120}
                   />
-                  <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} onPageIntent={prefetchQQPage} />
+                  <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} onPageIntent={prefetchBrowsePage} />
                 </>
               ) : !activeBrowseQuery.isError ? (
                 <div className="text-center py-20">
                   <BookOpen className="w-10 h-10 text-muted-foreground/30 mx-auto mb-3" />
                   {totalPages > 1 && (
                     <div className="mb-6">
-                      <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} onPageIntent={prefetchQQPage} />
+                      <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} onPageIntent={prefetchBrowsePage} />
                     </div>
                   )}
                   <p className="text-muted-foreground font-medium">Không tìm thấy truyện nào phù hợp.</p>

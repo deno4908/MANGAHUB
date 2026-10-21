@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SiteAccessGate from "./SiteAccessGate";
 import { siteAccessApi, FORCE_SITE_ACCESS_EVENT } from "@/lib/api";
+import * as coverCache from '@/lib/coverCache';
 
 const session = vi.hoisted(() => ({
   user: null as null | { id: string; role: string },
@@ -24,6 +25,7 @@ vi.mock("@/hooks/useCatalogUpdates", () => ({
 }));
 let client: QueryClient;
 beforeEach(() => {
+  vi.spyOn(coverCache, 'clearCoverCache');
   session.user = null;
   session.isLoggedIn = false;
   session.hasCheckedSession = true;
@@ -144,6 +146,7 @@ it("removes loaded reader content and cached pages immediately after revocation"
     expect(screen.queryByText("Private reader content")).toBeNull(),
   );
   expect(client.getQueryData(["manga", "chapter", "secret"])).toBeUndefined();
+  expect(coverCache.clearCoverCache).toHaveBeenCalled();
   expect(screen.queryByTestId("catalog-stream")).toBeNull();
 });
 

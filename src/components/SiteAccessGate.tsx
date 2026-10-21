@@ -10,6 +10,7 @@ import {
   type SiteAccessState,
 } from "@/lib/api";
 import { CatalogUpdates } from "@/hooks/useCatalogUpdates";
+import { clearCoverCache } from '@/lib/coverCache';
 
 const AUTH_PATHS = new Set([
   "/login",
@@ -45,6 +46,7 @@ export default function SiteAccessGate({ children }: { children: ReactNode }) {
     refetchOnReconnect: true,
   });
   const wasAllowed = useRef(false);
+  const previousViewer = useRef(key[1]);
 
   useEffect(() => {
     if (!hasCheckedSession) void loadUser();
@@ -66,7 +68,8 @@ export default function SiteAccessGate({ children }: { children: ReactNode }) {
     !access.isError;
   useEffect(() => {
     setSiteAccessRestricted(access.data?.enabled === true);
-    if (wasAllowed.current && !allowed) {
+    if ((wasAllowed.current && !allowed) || previousViewer.current !== key[1]) {
+      clearCoverCache();
       // Drop loaded catalog/detail data when an account loses access or logs out.
       const predicate = (query: { queryKey: readonly unknown[] }) =>
         query.queryKey[0] !== "site-access";
@@ -74,7 +77,8 @@ export default function SiteAccessGate({ children }: { children: ReactNode }) {
       client.removeQueries({ predicate });
     }
     wasAllowed.current = allowed;
-  }, [allowed, access.data?.enabled, client]);
+    previousViewer.current = key[1];
+  }, [allowed, access.data?.enabled, client, key[1]]);
 
   if (AUTH_PATHS.has(path)) return <>{children}</>;
   // Server endpoints still verify the admin's token and current role.

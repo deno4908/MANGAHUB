@@ -1081,6 +1081,7 @@ export const mangaApi = {
       showMature?: boolean;
       filterHidden?: boolean;
       timeoutMs?: number;
+      signal?: AbortSignal;
     } = {},
   ) => {
     const query = new URLSearchParams({
@@ -1091,6 +1092,7 @@ export const mangaApi = {
     });
     return publicApi<any>(`/api/manga/mangadex/latest-feed?${query.toString()}`, {
       timeoutMs: options.timeoutMs ?? 18_000,
+      signal: options.signal,
     });
   },
   searchMangaDex: (
@@ -1184,8 +1186,8 @@ export const mangaApi = {
       `/api/manga/mangadex/chapter-pages/${encodeURIComponent(chapterId)}?mode=${mode}&refresh=${refresh ? "1" : "0"}`,
       { timeoutMs, skipAuth: true },
     ),
-  getList: (type = "truyen-moi", page = 1) =>
-    publicApi<any>(`/api/manga/list/${type}?page=${page}`),
+  getList: (type = "truyen-moi", page = 1, signal?: AbortSignal) =>
+    publicApi<any>(`/api/manga/list/${type}?page=${page}`, { signal }),
   getListBatch: (type = "truyen-moi", pages: number[], attachRatings = false) => {
     const pageParam = pages
       .map((page) => Math.max(1, Math.floor(Number(page) || 1)))

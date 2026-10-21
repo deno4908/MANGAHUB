@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useContext, memo } from 'react';
 import { ImageFailureContext } from './ImageFailureContext';
+import { acquireCover, cachedCover, canCacheCover, invalidateCover } from '@/lib/coverCache';
 import { motion } from 'framer-motion';
 import { ImageOff, RefreshCw } from 'lucide-react';
 import { useThemeStore } from '@/store/themeStore';
@@ -16,6 +17,7 @@ interface OptimizedImageProps {
   aspectRatio?: string;
   rootMargin?: string;
   maxRetries?: number;
+  cacheCover?: boolean;
   onClick?: () => void;
   draggable?: boolean;
   style?: React.CSSProperties;
@@ -47,6 +49,7 @@ const OptimizedImage = memo(({
   aspectRatio,
   rootMargin = '400px',
   maxRetries = 2,
+  cacheCover = true,
   onClick,
   draggable,
   style,
@@ -74,6 +77,7 @@ const OptimizedImage = memo(({
   const [retryCount, setRetryCount] = useState(0);
   const [needsRecover, setNeedsRecover] = useState(false);
   const [recoverAttempts, setRecoverAttempts] = useState(0);
+  const [coverResource, setCoverResource] = useState<{ source: string; url: string }>();
 
   const hasRemoteCandidate =
     isRemoteUrl(normalizedSrc) || isRemoteUrl(normalizedFallbackSrc);
@@ -109,6 +113,9 @@ const OptimizedImage = memo(({
   // skeleton; recovery below keeps trying the remote sources in background.
   useEffect(() => {
     if (!inView || loaded || error || !isRemoteUrl(activeSrc)) return;
+    // Managed downloads have a deadline that starts when a queue slot opens.
+    // Do not abandon healthy covers just because visible images were ahead.
+    if (cacheCover && canCacheCover(activeSrc)) return;
 
     const isPrimarySource = activeSrc === normalizedSrc;
     const timeoutMs = isPrimarySource ? fallbackSwitchDelayMs : 12_000;
@@ -145,6 +152,7 @@ const OptimizedImage = memo(({
     themedFallbackSrc,
     hasRemoteCandidate,
     reportUnavailable,
+    cacheCover,
   ]);
 
   // ── Reset when src prop changes ────────────────────────────────────────────
@@ -186,6 +194,7 @@ const OptimizedImage = memo(({
   }, [activeSrc, hasRemoteCandidate, recoverAttempts, maxRecoverAttempts]);
 
   const handleError = useCallback(() => {
+    if (cacheCover) invalidateCover(activeSrc);
     loadedRef.current = false;
     // Primary failed; switch to the fallback source if available.
     if (activeSrc === normalizedSrc && normalizedFallbackSrc && activeSrc !== normalizedFallbackSrc) {
@@ -205,7 +214,18 @@ const OptimizedImage = memo(({
     // Both sources failed
     if (hasRemoteCandidate) setNeedsRecover(true);
     setError(true);
-  }, [normalizedSrc, normalizedFallbackSrc, activeSrc, themedFallbackSrc, hasRemoteCandidate, reportUnavailable]);
+  }, [normalizedSrc, normalizedFallbackSrc, activeSrc, themedFallbackSrc, hasRemoteCandidate, reportUnavailable, cacheCover]);
+
+  const useCoverCache = cacheCover && canCacheCover(activeSrc);
+  useEffect(() => {
+    if (!inView || error || !useCoverCache) return;
+    let mounted = true;
+    const resource = acquireCover(activeSrc);
+    void resource.promise.then(url => {
+      if (mounted) setCoverResource({ source: activeSrc, url });
+    }, () => { if (mounted) handleError(); });
+    return () => { mounted = false; resource.release(); };
+  }, [activeSrc, inView, error, useCoverCache, handleError]);
 
   const handleManualRetry = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -279,9 +299,12 @@ const OptimizedImage = memo(({
   ]);
 
   // Build src with cache-buster on retries
-  const imgSrc = retryCount === 0
+  const remoteSrc = retryCount === 0
     ? activeSrc
     : `${activeSrc}${activeSrc.includes('?') ? '&' : '?'}retry=${retryCount}`;
+  const imgSrc = useCoverCache
+    ? (coverResource?.source === activeSrc ? coverResource.url : cachedCover(activeSrc))
+    : remoteSrc;
 
   return (
     <div
@@ -306,7 +329,7 @@ const OptimizedImage = memo(({
         </div>
       )}
 
-      {inView && !error && (
+      {inView && !error && imgSrc && (
         <motion.img
           initial={alreadyCached ? false : { opacity: 0 }}
           animate={{ opacity: loaded ? 1 : 0 }}

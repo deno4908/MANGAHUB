@@ -379,48 +379,6 @@ const toMangaDexCoverDirect = (coverUrl?: string): string => {
   return '';
 };
 
-const extractImageProxyTarget = (value?: string): string => {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  try {
-    const parsed = new URL(raw, API_BASE);
-    if (parsed.pathname !== '/api/images/img') return '';
-    const target = parsed.searchParams.get('url') || '';
-    return /^https?:\/\//i.test(target) ? target : '';
-  } catch {
-    return '';
-  }
-};
-
-const collectWarmupCoverUrls = (items: Manga[], limit = 30): string[] => {
-  const urls = new Set<string>();
-  for (const item of items) {
-    const cover = String(item.cover || '').trim();
-    const fallback = String(item.coverProxy || '').trim();
-    const candidates = [
-      extractImageProxyTarget(cover),
-      extractImageProxyTarget(fallback),
-      /^https?:\/\/uploads\.mangadex\.org/i.test(cover) ? cover : '',
-      /^https?:\/\/uploads\.mangadex\.org/i.test(fallback) ? fallback : '',
-    ];
-    for (const candidate of candidates) {
-      if (!candidate || urls.has(candidate)) continue;
-      urls.add(candidate);
-      if (urls.size >= limit) return Array.from(urls);
-    }
-  }
-  return Array.from(urls);
-};
-
-const preloadCoverCache = (urls: string[]) => {
-  if (!urls.length) return;
-  const query = new URLSearchParams({ urls: urls.join(',') });
-  fetch(`${API_BASE}/api/images/preload?${query.toString()}`, {
-    credentials: 'include',
-    cache: 'no-store',
-  }).catch(() => {});
-};
-
 const parseTime = (value?: string) => {
   const ts = Date.parse(String(value || ''));
   if (!Number.isFinite(ts)) return 0;
@@ -1828,34 +1786,6 @@ const Index = () => {
   const isHomeSynchronizedLoading = !heroBannerItems.length &&
     (isInitialMergedLoading || (!isMangaDexUnavailable && isHomeBannerLoading) || (needsQQFallback && isQQFallbackLoading));
   const isTopRatedSectionLoading = isHomeSynchronizedLoading;
-
-  const homeCoverWarmupUrls = useMemo(() => {
-    return collectWarmupCoverUrls(
-      dedupeById([
-        ...heroBannerItems.slice(0, 5),
-        ...latestMergedRated.slice(0, 10),
-        ...popularDisplay.slice(0, 12),
-        ...topRatedDisplay.slice(0, 6),
-      ]),
-      18,
-    );
-  }, [heroBannerItems, latestMergedRated, popularDisplay, topRatedDisplay]);
-
-  useEffect(() => {
-    if (!canRunHomeDeferredQueries || !homeCoverWarmupUrls.length) return;
-    const timers = homeCoverWarmupUrls
-      .reduce<string[][]>((chunks, url, index) => {
-        const chunkIndex = Math.floor(index / 6);
-        if (!chunks[chunkIndex]) chunks[chunkIndex] = [];
-        chunks[chunkIndex].push(url);
-        return chunks;
-      }, [])
-      .map((chunk, index) => window.setTimeout(() => preloadCoverCache(chunk), 1200 + index * 900));
-
-    return () => {
-      timers.forEach((timer) => window.clearTimeout(timer));
-    };
-  }, [canRunHomeDeferredQueries, homeCoverWarmupUrls]);
 
   const isHeroBannerLoading = isHomeSynchronizedLoading;
 

@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { clearCoverCache } from '@/lib/coverCache';
 import { User, Notification } from '@/types/manga';
 import {
   authApi,
@@ -163,6 +164,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
   },
 
   logout: (scope = 'local', options = {}) => {
+    clearCoverCache();
     clearRestoreRetry();
     if (options.server !== false) {
       authApi.logout(scope).catch(() => {});
