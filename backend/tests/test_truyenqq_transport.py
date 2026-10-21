@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from fastapi_app.services import truyenqq_transport as transport
+from fastapi_app.services.truyenqq_service import _source_error_headers
 from truyenapi.truyenapi.client import SourceClient
 from truyenapi.truyenapi.config import Settings
 from truyenapi.truyenapi.service import LiveService
@@ -95,3 +96,16 @@ def test_browser_network_errors_keep_httpx_retry_semantics(browser, browser_erro
             client.request('https://truyenqqko.com/doc-truyen')
     finally:
         client.close()
+
+
+@pytest.mark.parametrize('error, code', [
+    (ValueError('Source redirected to https://source.example/?token=private'), 'redirect'),
+    (ValueError('Missing comic listing; source may be blocked or layout changed'), 'invalid-listing'),
+    (ValueError('Unexpected search response; source may be blocked or layout changed'), 'invalid-search'),
+    (httpx.ConnectError('private transport details'), 'network'),
+    (httpx.ReadTimeout('private transport details'), 'timeout'),
+    (httpx.HTTPStatusError('private response details', request=httpx.Request('GET', 'https://source.example'),
+                          response=httpx.Response(403)), 'http-403'),
+])
+def test_source_error_diagnostics_are_bounded_and_not_cacheable(error, code):
+    assert _source_error_headers(error) == {'X-TruyenQQ-Error': code, 'Cache-Control': 'no-store'}

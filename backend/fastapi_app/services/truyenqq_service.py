@@ -68,15 +68,34 @@ async def run_live(method: str, *args, **kwargs):
         raise
     except httpx.TimeoutException as error:
         _log_source_error(method, error)
-        raise HTTPException(504, "TruyenQQ phản hồi quá chậm, vui lòng thử lại.") from error
+        raise HTTPException(504, "TruyenQQ phản hồi quá chậm, vui lòng thử lại.",
+                            headers=_source_error_headers(error)) from error
     except httpx.HTTPStatusError as error:
         _log_source_error(method, error)
         status = error.response.status_code
         raise HTTPException(404 if status == 404 else 503 if status == 429 else 502,
-                            "Không tải được dữ liệu từ TruyenQQ.") from error
+                            "Không tải được dữ liệu từ TruyenQQ.", headers=_source_error_headers(error)) from error
     except (httpx.RequestError, ValueError) as error:
         _log_source_error(method, error)
-        raise HTTPException(502, "Không tải được dữ liệu từ TruyenQQ.") from error
+        raise HTTPException(502, "Không tải được dữ liệu từ TruyenQQ.", headers=_source_error_headers(error)) from error
+
+
+def _source_error_headers(error):
+    """Expose a bounded diagnostic code, never source content or credentials."""
+    if isinstance(error, httpx.HTTPStatusError):
+        code = f"http-{error.response.status_code}"
+    elif isinstance(error, httpx.TimeoutException):
+        code = "timeout"
+    elif isinstance(error, httpx.RequestError):
+        errno = getattr(error.__cause__, "code", None)
+        code = f"network-{errno}" if isinstance(errno, int) else "network"
+    else:
+        reason = str(error)
+        code = next((code for prefix, code in (
+            ("Source redirected", "redirect"), ("Unexpected source host", "source-host"),
+            ("Missing comic listing", "invalid-listing"), ("Unexpected search response", "invalid-search"),
+        ) if reason.startswith(prefix)), "invalid-response")
+    return {"X-TruyenQQ-Error": code, "Cache-Control": "no-store"}
 
 
 def _log_source_error(method, error):
