@@ -12,7 +12,10 @@ from fastapi_app.services import card_metadata, local_popular
 
 @pytest.fixture(autouse=True)
 def isolated_popularity_snapshots(monkeypatch):
+    original = local_popular.truyenqq_service.get_filtered
     monkeypatch.setattr(local_popular, "_frozen", lambda key, value=None: value)
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", AsyncMock(return_value={"data": {"items": []}}))
+    return original
 
 
 class EmptyDB:
@@ -37,14 +40,14 @@ def test_qq_popular_paginates_local_counts_before_source_order_and_keeps_alias_v
     monkeypatch.setattr(card_metadata, "get_many", AsyncMock(side_effect=lambda ids: {key: labels[key] for key in ids}))
     monkeypatch.setattr(local_popular, "remember_matches", lambda values: None)
     source = AsyncMock(return_value={"data": {"items": [
-        {"slug": "third-book-3"}, {"slug": "unread-book-4"}, {"slug": "top-book-2"}],
+        {"slug": "third-book-3"}, {"slug": "unread-book-4"}, {"slug": "top-book-2"}, {"slug": "slow-source-1"}],
         "params": {"pagination": {"totalItems": 4, "totalPages": 1}}}})
     monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", source)
 
     async def run():
         args = dict(limit=2, genres=[], status="", show_mature=True, hidden={}, db=EmptyDB())
         first = await local_popular.qq_popular(page=1, **args)
-        source.assert_not_awaited()
+        source.assert_awaited_once()  # also read the authoritative catalog size
         second = await local_popular.qq_popular(page=2, **args)
         return first["data"]["items"] + second["data"]["items"]
     rows = asyncio.run(run())
@@ -72,7 +75,7 @@ def test_qq_shows_verified_ranking_while_slow_legacy_titles_finish(monkeypatch):
                                      {"waiting-1": qq("waiting-1"), "ready-2": qq("ready-2")}])
     monkeypatch.setattr(card_metadata, "get_many", metadata)
     monkeypatch.setattr(local_popular, "remember_matches", lambda values: None)
-    source = AsyncMock(return_value={"data": {"items": [{"slug": "unread-3"}],
+    source = AsyncMock(return_value={"data": {"items": [{"slug": "ready-2"}, {"slug": "unread-3"}],
                                               "params": {"pagination": {"totalPages": 1}}}})
     monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", source)
     async def run():
@@ -268,15 +271,15 @@ def test_unverified_old_aliases_do_not_block_a_full_page_or_trigger_bulk_search(
     monkeypatch.setattr(card_metadata, "get_many", external)
     monkeypatch.setattr(local_popular, "published_uploads", AsyncMock(return_value={}))
     monkeypatch.setattr(local_popular, "remember_matches", lambda values: None)
-    source = AsyncMock(return_value={"data": {"items": [{"slug": f"zero-{i}", "views": 99999}
-        for i in range(2, 25)], "params": {"pagination": {"totalItems": None,
+    source = AsyncMock(return_value={"data": {"items": [{"slug": "ready-1"}] + [{"slug": f"zero-{i}", "views": 99999}
+        for i in range(2, 43)], "params": {"pagination": {"totalItems": None,
         "totalItemsPerPage": 42, "totalPages": 100}}}})
     monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", source)
-    result = asyncio.run(local_popular.qq_popular(page=1, limit=24, genres=[], status="", show_mature=True,
+    result = asyncio.run(local_popular.qq_popular(page=1, limit=42, genres=[], status="", show_mature=True,
                                                 hidden={}, db=EmptyDB()))["data"]
-    assert len(result["items"]) == 24 and not result["ranking_pending"]
-    assert [row["views"] for row in result["items"]] == [40] + [0] * 23
-    assert result["params"]["pagination"]["totalPages"] > 100
+    assert len(result["items"]) == 42 and not result["ranking_pending"]
+    assert [row["views"] for row in result["items"]] == [40] + [0] * 41
+    assert result["params"]["pagination"]["totalPages"] == 100
     assert "unmapped-old-title" not in {row["slug"] for row in result["items"]}
     external.assert_not_awaited()
     source.assert_awaited_once()
@@ -302,9 +305,10 @@ def test_normal_listing_can_confirm_an_old_slug_before_sorting_the_first_page(mo
     external.assert_not_awaited()
 
 
-def test_cold_source_refresh_finishes_after_the_bounded_popularity_response(monkeypatch):
+def test_cold_source_refresh_finishes_after_the_bounded_popularity_response(monkeypatch, isolated_popularity_snapshots):
     store = {}
     source = local_popular.truyenqq_service
+    monkeypatch.setattr(source, "get_filtered", isolated_popularity_snapshots)
     monkeypatch.setattr(source.cache, "get", store.get)
     monkeypatch.setattr(source.cache, "set", lambda key, value, **kw: store.__setitem__(key, value))
     monkeypatch.setattr(source.cache, "set_many", lambda items, **kw: store.update(items))
@@ -319,7 +323,8 @@ def test_cold_source_refresh_finishes_after_the_bounded_popularity_response(monk
     async def cold(*args, **kwargs):
         started.set()
         await gate.wait()
-        return {"items": [{"id": "3", "url": "https://truyenqqko.com/truyen-tranh/filler-3", "title": "Filler"}],
+        return {"items": [{"id": "1", "url": "https://truyenqqko.com/truyen-tranh/ready-1", "title": "Ready"},
+                          {"id": "3", "url": "https://truyenqqko.com/truyen-tranh/filler-3", "title": "Filler"}],
                 "page": 1, "total_pages": 1}
     fetch = AsyncMock(side_effect=cold)
     monkeypatch.setattr(source, "run_live", fetch)
@@ -352,7 +357,7 @@ def test_source_updates_do_not_repeat_titles_across_popularity_pages(monkeypatch
     calls = []
     async def listing(**kwargs):
         calls.append(kwargs["page"])
-        items = (["new-insertion-99", "zero-2", "zero-3"] if changed else ["zero-2", "zero-3", "zero-4"]) if kwargs["page"] == 1 else ["zero-5", "zero-6", "zero-7"]
+        items = (["new-insertion-99", "zero-2", "zero-3"] if changed else ["zero-2", "zero-3", "zero-4"]) if kwargs["page"] == 1 else ["zero-5", "zero-6", "ready-1"]
         return {"data": {"items": [{"slug": slug} for slug in items],
                          "params": {"pagination": {"totalItemsPerPage": 3, "totalPages": 2}}}}
     monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", listing)
@@ -365,6 +370,53 @@ def test_source_updates_do_not_repeat_titles_across_popularity_pages(monkeypatch
         third = await local_popular.qq_popular(page=3, **args)
         return [row for payload in [first, second, third] for row in payload["data"]["items"]]
     rows = asyncio.run(run())
-    assert [row["slug"] for row in rows] == ["ready-1", "zero-2", "zero-3", "zero-4", "zero-5", "zero-6"]
+    assert [row["slug"] for row in rows] == ["ready-1", "zero-3", "zero-4", "zero-5", "zero-6", "zero-2"]
     assert [row["views"] for row in rows] == [20, 0, 0, 0, 0, 0]
     assert calls == [1, 2]
+
+
+@pytest.mark.parametrize("ranked_positions", [[0, 8, 16], [2, 3, 4, 5, 14, 16], []])
+def test_slot_swaps_preserve_the_entire_catalog_without_repeats(monkeypatch, ranked_positions):
+    catalog = [{"slug": f"book-{i}"} for i in range(17)]
+    lookup = {catalog[position]["slug"]: 100 - rank for rank, position in enumerate(ranked_positions)}
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: lookup)
+    monkeypatch.setattr(local_popular, "_cached_labels", lambda ids: {key: qq(key) for key in ids})
+    monkeypatch.setattr(local_popular, "remember_matches", lambda values: None)
+    async def listing(**kwargs):
+        start = (kwargs["page"] - 1) * 4
+        return {"data": {"items": catalog[start:start + 4], "params": {"pagination": {
+            "totalItemsPerPage": 4, "totalItems": 17, "totalPages": 5}}}}
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", listing)
+    async def run():
+        output = []
+        for page in range(1, 6):
+            payload = await local_popular.qq_popular(page=page, limit=4, genres=[], status="",
+                                                    show_mature=True, hidden={}, db=EmptyDB())
+            assert payload["data"]["params"]["pagination"]["totalPages"] == 5
+            output.extend(payload["data"]["items"])
+        return output
+    rows = asyncio.run(run())
+    assert len(rows) == len({row["slug"] for row in rows}) == 17
+    assert {row["slug"] for row in rows} == {row["slug"] for row in catalog}
+    assert [row["views"] for row in rows] == sorted([row["views"] for row in rows], reverse=True)
+
+
+def test_random_qq_page_reads_only_prefix_and_target_page(monkeypatch):
+    lookup = {"book-18000": 90, "book-12000": 50}
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: lookup)
+    monkeypatch.setattr(local_popular, "_cached_labels", lambda ids: {key: qq(key) for key in ids})
+    monkeypatch.setattr(local_popular, "remember_matches", lambda values: None)
+    calls = []
+    async def listing(**kwargs):
+        number = kwargs["page"]
+        calls.append(number)
+        return {"data": {"items": [{"slug": f"book-{i}"} for i in range((number-1)*42, number*42)],
+                         "params": {"pagination": {"totalItemsPerPage": 42, "totalPages": 445}}}}
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", listing)
+    result = asyncio.run(local_popular.qq_popular(page=300, limit=42, genres=[], status="",
+                        show_mature=True, hidden={}, db=EmptyDB()))["data"]
+    assert calls == [1, 300]
+    assert len(result["items"]) == 42
+    assert result["items"][0]["slug"] == f"book-{299*42}"
+    assert result["params"]["pagination"]["totalPages"] == 445
+    assert not result["ranking_pending"]

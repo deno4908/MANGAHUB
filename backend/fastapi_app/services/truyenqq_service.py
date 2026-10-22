@@ -387,8 +387,10 @@ async def get_category_manga(slug, page=1):
     return await asyncio.to_thread(_remember, f"truyenqq:category:{slug}:{page}", value)
 
 
-async def get_filtered(*, genres=(), page=1, sort="updated_desc", status=None):
+async def get_filtered(*, genres=(), page=1, sort="updated_desc", status=None, overlay_latest=True):
     value = await _catalog_page("discover", page=page, genres=genres, sort=sort, status=status)
+    if not overlay_latest:
+        return value
     return await asyncio.to_thread(_overlay_latest, value, page=page, genres=genres, status=status, latest_order=sort == "updated_desc")
 
 

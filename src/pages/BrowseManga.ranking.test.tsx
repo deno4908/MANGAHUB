@@ -42,6 +42,7 @@ it('sorts QQ popularity by the displayed local views rather than the source page
   ]));
   show('/manga?source=truyenqq&sort=popular');
   await waitFor(() => expect(screen.getByTestId('ranked-cards')).toHaveTextContent('High views:90|Low views:2|'));
+  expect(mangaApi.getOTruyenFiltered).toHaveBeenCalledWith(expect.objectContaining({ limit: 42 }));
 });
 
 it('resolves rated MangaDex covers in a metadata batch without fetching individual details', async () => {

@@ -2263,6 +2263,7 @@ const BrowseManga = () => {
       filters.sort,
       requestedPage,
       showMatureContent,
+      42,
     ],
     queryFn: async ({ signal }: { signal: AbortSignal }) => {
       const requestPage = async (sort: SortOption | string) => {
@@ -2271,7 +2272,9 @@ const BrowseManga = () => {
           status: filters.status,
           sort,
           page: requestedPage,
-          limit: BROWSE_PAGE_SIZE,
+          // QQ's native catalog contains 42 titles per page. Keep every sort
+          // on that same page size instead of inflating popularity pagination.
+          limit: 42,
           showMature: showMatureContent,
           baseSlug: directOTruyenFilterGenreSlugs[0] || activeCategorySlug,
           attachRatings: filters.sort === 'rating' && sort === filters.sort,

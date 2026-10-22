@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -65,6 +65,41 @@ def test_home_snapshot_reads_one_chapter_page_even_for_a_mass_upload(monkeypatch
     result = asyncio.run(mdx.get_latest_vi_chapter_feed(limit=24, snapshot=True))
     assert len(result["data"]["items"]) == 1
     assert calls == ["/chapter"]
+
+
+def test_latest_pagination_counts_titles_instead_of_chapters(monkeypatch):
+    monkeypatch.setattr(mdx, "cache", Mock(get=Mock(return_value=None)))
+    async def request(path, params=None):
+        if path == "/manga":
+            assert params["limit"] == 1
+            assert params["availableTranslatedLanguage[]"] == "vi"
+            assert set(params["contentRating[]"]) == {"safe", "suggestive"}
+            return {"total": 6900, "data": []}
+        return {"total": 113448, "data": [{"id": "chapter", "attributes": {"translatedLanguage": "vi", "chapter": "1"},
+            "relationships": [{"type": "manga", "id": MANGA, "attributes": {"title": {"en": "Title"}}}]}]}
+    monkeypatch.setattr(mdx, "_request_json", request)
+    monkeypatch.setattr(mdx, "_fetch_cover_urls_for_manga_ids", AsyncMock(return_value={}))
+    result = asyncio.run(mdx.get_latest_vi_chapter_feed(limit=24))
+    pagination = result["data"]["params"]["pagination"]
+    assert pagination["totalItems"] == 6900  # 288 title pages, not 4727 chapter pages
+    assert pagination["totalItemsPerPage"] == 24
+
+
+def test_mangadex_title_count_cache_is_separate_for_mature_filters(monkeypatch):
+    store = {}
+    fake_cache = Mock()
+    fake_cache.get.side_effect = store.get
+    fake_cache.set.side_effect = lambda key, value, **kwargs: store.__setitem__(key, value)
+    monkeypatch.setattr(mdx, "cache", fake_cache)
+    request = AsyncMock(side_effect=[{"total": 5000}, {"total": 6900}])
+    monkeypatch.setattr(mdx, "_request_json", request)
+    async def run():
+        safe = await mdx.get_total_vi_manga_count(content_ratings=["safe", "suggestive"])
+        mature = await mdx.get_total_vi_manga_count()
+        cached = await mdx.get_total_vi_manga_count(content_ratings=["suggestive", "safe"])
+        return safe, mature, cached
+    assert asyncio.run(run()) == (5000, 6900, 5000)
+    assert request.await_count == 2
 
 
 def test_cancelled_reader_does_not_drop_shared_work():

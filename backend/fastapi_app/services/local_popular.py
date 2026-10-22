@@ -36,7 +36,8 @@ async def _source_page(genres, status, number, snapshot_key):
     if previous is not None:
         return previous
     value = await truyenqq_service.get_filtered(genres=list(genres), page=number,
-                                                sort="updated_desc", status=status or None)
+                                                sort="updated_desc", status=status or None,
+                                                overlay_latest=False)
     return await asyncio.to_thread(_frozen, key, value)
 
 
@@ -51,7 +52,7 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
     from fastapi_app.routers import manga
 
     lookup = await asyncio.to_thread(manga._fetch_local_views_lookup, db)
-    snapshot_key = "qq:local-popular:v2:" + hashlib.sha256(json.dumps(
+    snapshot_key = "qq:local-popular:v3:" + hashlib.sha256(json.dumps(
         [sorted(lookup.items()), sorted(genres), status, show_mature, hidden], sort_keys=True).encode()).hexdigest()
     snapshot = await asyncio.to_thread(_frozen, snapshot_key + ":ranking")
     aliases = [slug for slug, views in lookup.items() if views > 0
@@ -128,10 +129,6 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
             "currentPage": page, "totalItemsPerPage": limit, "totalItems": total,
             "totalPages": pages or max(page + int(len(items) == limit), math.ceil(len(rows) / limit), 1)}}}}
 
-    if len(rows) >= offset + limit:
-        await freeze_ranking()
-        return response(rows[offset:offset + limit], refreshing=pending)
-
     async def source(number):
         # The complete shared read, including its initial Redis lookup, survives
         # the response timeout and continues warming the source page.
@@ -154,46 +151,72 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
         pending = native_pending()
     await freeze_ranking()
     selected = rows[offset:offset + limit]
+    # Promote the local ranking by swapping catalog slots, rather than
+    # removing rows then scanning from page 1 to count the remaining titles.
+    # Each displaced zero-view title replaces exactly one promoted title in
+    # that title's original slot. Random access needs only the small prefix
+    # and the requested source page(s), independent of the target page number.
+    pagination = ((first_source_page.get("data") or {}).get("params") or {}).get("pagination") or {}
+    source_size = max(1, manga._safe_int(pagination.get("totalItemsPerPage"))
+                      or len((first_source_page.get("data") or {}).get("items") or []) or limit)
+    source_pages = max(1, manga._otruyen_payload_total_pages(first_source_page))
+    total = pagination.get("totalItems")
+    source_total = manga._safe_int(total) if total is not None else source_pages * source_size
+    uploads = sum(row.get("source") == "uploaded" for row in rows)
+    total_items = source_total + uploads
     if len(selected) == limit:
-        return response(selected, refreshing=pending)
-
-    # Zero-view titles fill the tail; exclusions precede pagination.
-    needed = max(0, offset - len(rows)) + limit - len(selected)
-    unread, seen = [], set(excluded)
-    source_page, total, source_pages, source_size = 1, None, 1, limit
-    while len(unread) < needed:
-        try:
-            payload = first_source_page if source_page == 1 else await source(source_page)
-        except (asyncio.TimeoutError, HTTPException):
+        return response(selected, refreshing=pending, total=total_items if total is not None else None,
+                        pages=max(1, math.ceil(total_items / limit)))
+    native_rows = [row for row in rows if row.get("source") != "uploaded"]
+    prefix_size = len(native_rows)
+    start = max(prefix_size, offset - uploads)
+    end = max(start, offset + limit - uploads)
+    prefix_pages = set(range(1, math.ceil(prefix_size / source_size) + 1))
+    requested_pages = set(range(start // source_size + 1, math.ceil(end / source_size) + 1))
+    numbers = sorted((prefix_pages | requested_pages) - {1})
+    numbers = [number for number in numbers if number <= source_pages]
+    payloads = {1: first_source_page}
+    results = await asyncio.gather(*(source(number) for number in numbers), return_exceptions=True)
+    for number, value in zip(numbers, results):
+        if isinstance(value, (asyncio.TimeoutError, HTTPException)):
             pending = True
-            break
-        data = payload.get("data") or {}
-        source_items = data.get("items") or []
-        pagination = (data.get("params") or {}).get("pagination") or {}
-        total = pagination.get("totalItems")
-        source_pages = max(1, manga._otruyen_payload_total_pages(payload))
-        source_size = max(source_size, manga._safe_int(pagination.get("totalItemsPerPage")) or len(source_items) or limit)
-        for source_item in manga._filter_hidden(source_items, hidden):
-            item = copy.deepcopy(source_item)
-            slug = item.get("slug")
-            if not slug or slug in seen:
+        elif isinstance(value, BaseException):
+            raise value
+        else:
+            payloads[number] = value
+
+    def visible(item):
+        return bool(item and item.get("slug") and manga._otruyen_item_matches_filters(
+            item, required_genres=set(genres), status_value=status,
+            show_mature=show_mature, hidden=hidden))
+
+    prefix = []
+    for number in sorted(prefix_pages):
+        if number not in payloads:
+            # An incomplete swap plan could repeat or lose displaced titles.
+            return response(selected, refreshing=True)
+        prefix.extend((payloads[number].get("data") or {}).get("items") or [])
+    prefix = prefix[:prefix_size]
+    prefix_ids = {item.get("slug") for item in prefix}
+    ranked_ids = {row["slug"] for row in native_rows}
+    displaced = [item if visible(item) else None for item in prefix if item.get("slug") not in ranked_ids]
+    promoted = [row["slug"] for row in native_rows if row["slug"] not in prefix_ids]
+    replacements = dict(zip(promoted, displaced))
+    for number in sorted(requested_pages):
+        payload = payloads.get(number)
+        if payload is None:
+            continue
+        for index, original in enumerate((payload.get("data") or {}).get("items") or []):
+            position = (number - 1) * source_size + index
+            if not start <= position < end:
                 continue
-            seen.add(slug)
-            # Newly discovered positive-view aliases belong in the next ranked
-            # prefix, never among zero-view fillers.
-            stem = slug.rsplit("-", 1)[0]
-            if lookup.get(slug, 0) > 0 or lookup.get(stem, 0) > 0:
+            slug = original.get("slug")
+            item = replacements.get(slug) if slug in ranked_ids else original
+            if not visible(item):
                 continue
-            if not show_mature and manga._is_mature_metadata(item.get("content_rating"), item.get("category"), []):
-                continue
+            item = copy.deepcopy(item)
             item.update(views=0, view_count=0, local_view_count=0)
-            unread.append(item)
-        if not source_items or source_page >= source_pages:
-            break
-        source_page += 1
-    start = max(0, offset - len(rows))
-    selected += unread[start:start + limit - len(selected)]
-    total_items = max(manga._safe_int(total), len(rows)) if total is not None else None
-    estimated_total = max(len(rows) + len(unread), total_items if total_items is not None else source_pages * source_size)
-    return response(selected, refreshing=pending, total=total_items,
-                    pages=max(page, math.ceil(estimated_total / limit), 1))
+            selected.append(item)
+    total_items = source_total + uploads
+    return response(selected, refreshing=pending, total=total_items if total is not None else None,
+                    pages=max(1, math.ceil(total_items / limit)))

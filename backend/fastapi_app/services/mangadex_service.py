@@ -2297,7 +2297,7 @@ async def get_latest_vi_chapter_feed(
 
     revision = await asyncio.to_thread(_live_revision)
     cache_key = (
-        f"mangadex:latest-vi-feed:v3:{page}:{limit}:snapshot={int(snapshot)}:"
+        f"mangadex:latest-vi-feed:v4:{page}:{limit}:snapshot={int(snapshot)}:"
         f"rating={','.join(normalized_content_ratings)}:"
         f"excluded={excluded_cache_token}:rev={revision}"
     )
@@ -2439,12 +2439,16 @@ async def get_latest_vi_chapter_feed(
 
     await asyncio.to_thread(cache.set_many, chapter_values, ttl=VI_CATALOG_TTL)
 
+    # /chapter.total counts chapters, not titles. The browse catalog must use
+    # the same filtered /manga total as popularity and alphabetical ordering.
+    manga_total = len(ordered_manga_ids) if snapshot else await get_total_vi_manga_count(
+        content_ratings=normalized_content_ratings)
     result = {
         "data": {
             "items": items,
             "params": {
                 "pagination": {
-                    "totalItems": total,
+                    "totalItems": manga_total,
                     "totalItemsPerPage": limit,
                     "currentPage": page,
                     "uniqueItemsInWindow": len(ordered_manga_ids),
@@ -2456,9 +2460,11 @@ async def get_latest_vi_chapter_feed(
     return result
 
 
-async def get_total_vi_manga_count() -> int:
-    cache_key = "mangadex:total-vi-manga"
-    cached = cache.get(cache_key)
+@coalesce_reads
+async def get_total_vi_manga_count(*, content_ratings: list[str] | None = None) -> int:
+    ratings = sorted(set(content_ratings or ["safe", "suggestive", "erotica", "pornographic"]))
+    cache_key = "mangadex:total-vi-manga:v2:" + ",".join(ratings)
+    cached = await asyncio.to_thread(cache.get, cache_key)
     if cached:
         try:
             return int(cached)
@@ -2470,11 +2476,11 @@ async def get_total_vi_manga_count() -> int:
             "availableTranslatedLanguage[]": "vi",
             "limit": 1,
             "offset": 0,
-            "contentRating[]": ["safe", "suggestive", "erotica", "pornographic"],
+            "contentRating[]": ratings,
         },
     )
     total = int(payload.get("total", 0))
-    cache.set(cache_key, str(total), ttl=TOTAL_COUNT_TTL)
+    await asyncio.to_thread(cache.set, cache_key, str(total), ttl=TOTAL_COUNT_TTL)
     return total
 
 
