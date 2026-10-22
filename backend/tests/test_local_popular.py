@@ -53,7 +53,7 @@ def test_qq_popular_paginates_local_counts_before_source_order_and_keeps_alias_v
     rows = asyncio.run(run())
     assert [row["slug"] for row in rows] == ["top-book-2", "slow-source-1", "third-book-3", "unread-book-4"]
     assert [row["views"] for row in rows] == [101, 4, 3, 0]
-    assert source.call_args.kwargs["sort"] == "updated_desc"
+    assert source.call_args.kwargs["sort"] == "views_desc"
 
 
 def test_qq_ranking_preserves_genre_status_hidden_and_mature_filters(monkeypatch):
@@ -239,7 +239,7 @@ def test_source_filler_outage_does_not_discard_the_local_popularity_ranking(monk
                                                 hidden={}, db=EmptyDB()))["data"]
     assert [(row["slug"], row["views"]) for row in result["items"]] == [("ranked-1", 90)]
     assert result["ranking_pending"] is True
-    assert source.call_args.kwargs["sort"] == "updated_desc"
+    assert source.call_args.kwargs["sort"] == "views_desc"
 
 
 def test_filtered_route_preserves_the_sum_of_verified_legacy_alias_views(monkeypatch):
@@ -491,3 +491,38 @@ def test_cold_header_and_page_two_are_loaded_concurrently(monkeypatch):
     result = asyncio.run(local_popular.qq_popular(page=2, limit=42, genres=[], status="",
                          show_mature=True, hidden={}, db=EmptyDB()))["data"]
     assert len(result["items"]) == 42 and not result["ranking_pending"]
+
+
+@pytest.mark.parametrize("page", [3, 4, 37, 445])
+def test_later_pages_use_the_native_qq_popularity_order(monkeypatch, page):
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: {"promoted-17000": 99})
+    monkeypatch.setattr(local_popular, "_cached_labels", lambda ids: {"promoted-17000": qq("promoted-17000")})
+    monkeypatch.setattr(local_popular, "remember_matches", lambda values: None)
+    async def listing(**kwargs):
+        assert kwargs["sort"] == "views_desc"
+        assert kwargs["overlay_latest"] is False
+        number = kwargs["page"]
+        return {"data": {"items": [{"slug": f"qq-popular-{number}-{index}"} for index in range(42)],
+                         "params": {"pagination": {"totalPages": 445, "totalItemsPerPage": 42}}}}
+    source = AsyncMock(side_effect=listing)
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", source)
+    result = asyncio.run(local_popular.qq_popular(page=page, limit=42, genres=[], status="",
+                         show_mature=True, hidden={}, db=EmptyDB()))["data"]
+    assert [row["slug"] for row in result["items"]] == [f"qq-popular-{page}-{i}" for i in range(42)]
+    assert result["ranking_pending"] is False
+    assert [call.kwargs["page"] for call in source.await_args_list] == [1, page]
+
+
+def test_later_source_failure_is_an_http_error_not_a_false_pending_ranking(monkeypatch):
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: {})
+    async def listing(**kwargs):
+        if kwargs["page"] == 3:
+            raise HTTPException(503, "Source unavailable", headers={"X-TruyenQQ-Error": "http-503"})
+        return {"data": {"items": [{"slug": f"book-{i}"} for i in range(42)],
+                         "params": {"pagination": {"totalPages": 445, "totalItemsPerPage": 42}}}}
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", listing)
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(local_popular.qq_popular(page=3, limit=42, genres=[], status="",
+                    show_mature=True, hidden={}, db=EmptyDB()))
+    assert error.value.status_code == 503
+    assert error.value.headers["X-TruyenQQ-Error"] == "http-503"

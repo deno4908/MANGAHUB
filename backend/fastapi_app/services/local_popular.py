@@ -14,8 +14,8 @@ from fastapi_app.services.catalog_visibility import legacy_qq_identifier, publis
 from fastapi_app.services.request_coalescing import coalesce_reads
 
 logger = logging.getLogger(__name__)
-SOURCE_WAIT_SECONDS = 12.0
-SOURCE_REFRESH_SECONDS = 8.0
+SOURCE_WAIT_SECONDS = 30.0
+SOURCE_REFRESH_SECONDS = 26.0
 SNAPSHOT_TTL = 90
 
 
@@ -38,7 +38,7 @@ async def _source_page(genres, status, number, snapshot_key):
     if previous is not None:
         return previous
     value = await truyenqq_service.get_filtered(genres=list(genres), page=number,
-                                                sort="updated_desc", status=status or None,
+                                                sort="views_desc", status=status or None,
                                                 overlay_latest=False, background_refresh=False,
                                                 refresh_timeout=SOURCE_REFRESH_SECONDS)
     return await asyncio.to_thread(_frozen, key, value)
@@ -57,7 +57,7 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
     lookup = await asyncio.to_thread(manga._fetch_local_views_lookup, db)
     # Reading another chapter must not invalidate every source-page read while
     # a client is waiting for this ranking snapshot to finish.
-    snapshot_key = "qq:local-popular:v4:" + hashlib.sha256(json.dumps(
+    snapshot_key = "qq:local-popular:v5-source-popular:" + hashlib.sha256(json.dumps(
         [sorted(genres), status, show_mature, hidden], sort_keys=True).encode()).hexdigest()
     snapshot = await asyncio.to_thread(_frozen, snapshot_key + ":ranking")
     aliases = [slug for slug, views in lookup.items() if views > 0
@@ -152,10 +152,13 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
 
     try:
         first_source_page = await source_tasks[1]
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as error:
+        if not rows[offset:offset + limit]:
+            raise HTTPException(504, "TruyenQQ phản hồi quá chậm, vui lòng thử lại.",
+                                headers={"X-TruyenQQ-Error": "timeout", "Cache-Control": "no-store"}) from error
         return response(rows[offset:offset + limit], refreshing=True)
     except HTTPException:
-        if not rows:
+        if not rows[offset:offset + limit]:
             raise
         logger.warning("QQ popularity filler deferred; keeping verified local ranking")
         return response(rows[offset:offset + limit], refreshing=True)
@@ -192,11 +195,17 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
     numbers = sorted((prefix_pages | requested_pages) - {1})
     numbers = [number for number in numbers if number <= source_pages]
     payloads = {1: first_source_page}
+    source_failure = None
     results = await asyncio.gather(*(source_tasks[number] if number in source_tasks else source(number)
                                      for number in numbers), return_exceptions=True)
     for number, value in zip(numbers, results):
         if isinstance(value, (asyncio.TimeoutError, HTTPException)):
             pending = True
+            source_failure = value
+            logger.warning("QQ popular source failed page=%d status=%s reason=%s", number,
+                           value.status_code if isinstance(value, HTTPException) else 504,
+                           (value.headers or {}).get("X-TruyenQQ-Error", "source-error")
+                           if isinstance(value, HTTPException) else "timeout")
         elif isinstance(value, BaseException):
             raise value
         else:
@@ -207,10 +216,18 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
             item, required_genres=set(genres), status_value=status,
             show_mature=show_mature, hidden=hidden))
 
+    def require_page_data():
+        if not selected and source_failure is not None:
+            if isinstance(source_failure, HTTPException):
+                raise source_failure
+            raise HTTPException(504, "TruyenQQ phản hồi quá chậm, vui lòng thử lại.",
+                                headers={"X-TruyenQQ-Error": "timeout", "Cache-Control": "no-store"}) from source_failure
+
     prefix = []
     for number in sorted(prefix_pages):
         if number not in payloads:
             # An incomplete swap plan could repeat or lose displaced titles.
+            require_page_data()
             return response(selected, refreshing=True)
         prefix.extend((payloads[number].get("data") or {}).get("items") or [])
     prefix = prefix[:prefix_size]
@@ -234,6 +251,7 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
             item = copy.deepcopy(item)
             item.update(views=0, view_count=0, local_view_count=0)
             selected.append(item)
+    require_page_data()
     total_items = source_total + uploads
     return response(selected, refreshing=pending, total=total_items if total is not None else None,
                     pages=max(1, math.ceil(total_items / limit)))

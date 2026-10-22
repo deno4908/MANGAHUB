@@ -1242,7 +1242,7 @@ export const mangaApi = {
       query.set("base_slug", String(options.baseSlug));
     }
     return publicApi<any>(`/api/manga/truyenqq-filtered?${query.toString()}`, {
-      timeoutMs: 20_000,
+      timeoutMs: options.sort === "popular" ? 35_000 : 20_000,
       skipAuth: true,
       signal: options.signal,
     });

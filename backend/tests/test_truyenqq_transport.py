@@ -179,3 +179,37 @@ def test_verified_website_token_is_scoped_to_the_owned_relay_not_qq(browser):
         client.close()
         source_authorization.reset(marker)
     assert source_authorization.get() is None
+
+
+def test_cold_vercel_browse_uses_the_owned_relay_before_a_direct_source_attempt(browser, monkeypatch):
+    from site_access import source_authorization
+    monkeypatch.setenv('VERCEL', '1')
+    monkeypatch.delenv('TRUYENQQ_PREFER_EDGE', raising=False)
+    marker = source_authorization.set('Bearer verified-reader')
+    edge = 'https://worker.example/api/truyenqq-edge'
+    client = SourceClient(Settings(request_delay=0, retries=1), transport=transport.TruyenQQTransport(edge_url=edge))
+    try:
+        client.request('https://truyenqqko.com/tim-kiem-nang-cao/trang-3?sort=4')
+        browser.request.assert_called_once()
+        call = browser.request.call_args
+        assert call.args == ('GET', edge + '/tim-kiem-nang-cao/trang-3?sort=4')
+        assert call.kwargs['headers']['Authorization'] == 'Bearer verified-reader'
+    finally:
+        client.close()
+        source_authorization.reset(marker)
+
+
+@pytest.mark.parametrize('status', [403, 503])
+def test_relay_access_failure_is_not_retried_directly_on_vercel(browser, monkeypatch, status):
+    monkeypatch.setenv('VERCEL', '1')
+    monkeypatch.delenv('TRUYENQQ_PREFER_EDGE', raising=False)
+    browser.request.return_value.status_code = status
+    edge = 'https://worker.example/api/truyenqq-edge'
+    client = SourceClient(Settings(request_delay=0, retries=1), transport=transport.TruyenQQTransport(edge_url=edge))
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            client.request('https://truyenqqko.com/tim-kiem-nang-cao/trang-3?sort=4')
+        browser.request.assert_called_once()
+        assert browser.request.call_args.args[1].startswith(edge)
+    finally:
+        client.close()

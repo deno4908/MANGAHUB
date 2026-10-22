@@ -45,6 +45,18 @@ it('sorts QQ popularity by the displayed local views rather than the source page
   expect(mangaApi.getOTruyenFiltered).toHaveBeenCalledWith(expect.objectContaining({ limit: 42 }));
 });
 
+it('keeps native QQ popularity order for zero-view titles after promoting local views', async () => {
+  vi.mocked(mangaApi.getOTruyenFiltered).mockResolvedValue(page([
+    { slug: 'qq-first-1', name: 'QQ first', source: 'truyenqq', local_view_count: 0,
+      chaptersLatest: [{ chapter_name: '1', publish_at: '2026-01-01T00:00:00Z' }] },
+    { slug: 'local-top-2', name: 'Local top', source: 'truyenqq', local_view_count: 90 },
+    { slug: 'qq-next-3', name: 'QQ next', source: 'truyenqq', local_view_count: 0,
+      chaptersLatest: [{ chapter_name: '2', publish_at: '2026-10-23T00:00:00Z' }] },
+  ]));
+  show('/manga?source=truyenqq&sort=popular');
+  await waitFor(() => expect(screen.getByTestId('ranked-cards')).toHaveTextContent('Local top:90|QQ first:0|QQ next:0|'));
+});
+
 it('resolves rated MangaDex covers in a metadata batch without fetching individual details', async () => {
   const cover = `https://uploads.mangadex.org/covers/${mdx}/fast.jpg.256.jpg`;
   vi.mocked(ratingApi.getTopRatedManga).mockResolvedValue({ items: [{ manga_slug: mdx, average: 5, count: 2 }] });

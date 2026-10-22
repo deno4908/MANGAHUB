@@ -19,6 +19,9 @@ class TruyenQQTransport(httpx.BaseTransport):
             "https://mangahub-mangadex-edge.vinhytb3010.workers.dev/api/truyenqq-edge",
         )).rstrip("/")
         self._edge_until = 0.0
+        # Cold Vercel instances otherwise repeat a slow direct request before
+        # discovering that their datacenter must use the existing owned relay.
+        self._prefer_edge = os.getenv("TRUYENQQ_PREFER_EDGE", os.getenv("VERCEL", "0")).lower() in {"1", "true", "yes"}
 
     def _session(self):
         if not hasattr(self._local, "session"):
@@ -57,7 +60,7 @@ class TruyenQQTransport(httpx.BaseTransport):
             )
 
         try:
-            relay = relay_allowed and time.monotonic() < self._edge_until
+            relay = relay_allowed and (self._prefer_edge or time.monotonic() < self._edge_until)
             result = fetch(relay=relay)
             if result.status_code == 403 and relay_allowed and not relay:
                 self._edge_until = time.monotonic() + 300

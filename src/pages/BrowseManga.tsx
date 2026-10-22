@@ -1213,6 +1213,10 @@ const compareByPopular = (a: Manga, b: Manga): number => {
   return String(a.title || '').localeCompare(String(b.title || ''), 'vi');
 };
 
+// Equal local counts keep the order supplied by QQ's popularity catalog.
+const compareByLocalViews = (a: Manga, b: Manga): number =>
+  getRealViewSortScore(b) - getRealViewSortScore(a);
+
 const ALPHABETICAL_COLLATOR = new Intl.Collator('vi', {
   sensitivity: 'base',
   numeric: true,
@@ -3300,7 +3304,7 @@ const BrowseManga = () => {
       items = items.filter(m => m.title.toLowerCase().includes(q) || m.author.toLowerCase().includes(q));
     }
     switch (filters.sort) {
-      case 'popular': items.sort(compareByPopular); break;
+      case 'popular': items.sort(useOTruyenFilteredServerMode ? compareByLocalViews : compareByPopular); break;
       case 'latest': items.sort((a, b) => getLatestSortTimestamp(b) - getLatestSortTimestamp(a)); break;
       case 'rating': items.sort((a, b) => b.rating - a.rating); break;
       case 'alphabetical':
@@ -3313,6 +3317,7 @@ const BrowseManga = () => {
   }, [
     useGlobalClientSortMode,
     globalSortedItems,
+    useOTruyenFilteredServerMode,
     useOTruyenStatusFillMode,
     otruyenStatusFillItems,
     stableListData?.items,
@@ -4666,7 +4671,8 @@ const BrowseManga = () => {
     // Re-sort OTruyen server-page dataset by active sort.
     switch (filters.sort) {
       case 'popular':
-        sortable.sort((a, b) => compareByPopularWithPriority(a, b, popularTrendingOrderMap));
+        sortable.sort(useOTruyenFilteredServerMode ? compareByLocalViews
+          : (a, b) => compareByPopularWithPriority(a, b, popularTrendingOrderMap));
         break;
       case 'latest':
         sortable.sort((a, b) => getLatestSortTimestamp(b) - getLatestSortTimestamp(a));
@@ -4691,6 +4697,7 @@ const BrowseManga = () => {
     pageSize,
     filters.sort,
     filtered,
+    useOTruyenFilteredServerMode,
     useOTruyenStatusFillMode,
     otruyenStatusFillItems.length,
     myRatedOverlayItemsForSource,
