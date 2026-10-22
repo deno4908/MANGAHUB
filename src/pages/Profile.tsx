@@ -27,6 +27,8 @@ import {
   normalizeNameFontForAccess,
 } from '@/lib/nameStyles';
 import { getMangaDetailPath } from '@/lib/mangaLinks';
+import { getSavedMangaDetailPath, resolveSavedMangaCover } from '@/lib/savedManga';
+import { useCanonicalMangaRecords } from '@/hooks/useCardMetadata';
 
 type ProfileTab = 'overview' | 'following' | 'bookmarks' | 'history' | 'comments' | 'lists';
 
@@ -36,6 +38,7 @@ type ProfileListItem = {
   manga_title: string;
   manga_thumb?: string;
   manga_thumb_fallback?: string;
+  manga_source_slug?: string;
   created_at?: string;
   updated_at?: string;
   read_at?: string;
@@ -61,41 +64,6 @@ type ProfileCustomList = {
   items: ProfileListItem[];
   createdAt: string;
   updatedAt: string;
-};
-
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-const LOCAL_COVER_FALLBACK = '/no-cover.svg';
-
-const isMangaDexImageUrl = (value?: string) => {
-  const raw = String(value || '').trim();
-  if (!/^https?:\/\//i.test(raw)) return false;
-  try {
-    const host = new URL(raw).hostname.toLowerCase();
-    return host.endsWith('uploads.mangadex.org') || host.endsWith('mangadex.network');
-  } catch {
-    return false;
-  }
-};
-
-const normalizeProfileCoverSources = (primary?: string, fallback?: string) => {
-  const rawPrimary = String(primary || '').trim();
-  const rawFallback = String(fallback || '').trim();
-  if (isMangaDexImageUrl(rawPrimary)) {
-    return {
-      primary: `${API_BASE}/api/images/img?url=${encodeURIComponent(rawPrimary)}`,
-      fallback: LOCAL_COVER_FALLBACK,
-    };
-  }
-  if (!rawPrimary && isMangaDexImageUrl(rawFallback)) {
-    return {
-      primary: `${API_BASE}/api/images/img?url=${encodeURIComponent(rawFallback)}`,
-      fallback: LOCAL_COVER_FALLBACK,
-    };
-  }
-  return {
-    primary: rawPrimary,
-    fallback: isMangaDexImageUrl(rawFallback) ? LOCAL_COVER_FALLBACK : rawFallback,
-  };
 };
 
 const normalizeProfileComment = (c: any) => ({
@@ -143,7 +111,8 @@ const toProfileListItem = (item: any, fallbackTitle = ''): ProfileListItem | nul
     fallbackTitle ||
     formatMangaSlugLabel(slug)
   ).trim();
-  const coverSources = normalizeProfileCoverSources(
+  const coverSources = resolveSavedMangaCover(
+    item?.manga_source_slug || slug,
     item?.manga_thumb || item?.thumb || item?.cover || item?.cover_url,
     item?.manga_thumb_fallback || item?.coverProxy,
   );
@@ -343,7 +312,7 @@ const Profile = () => {
 
   const { data: followedManga = [] } = useFollows();
   const { data: bookmarkedManga = [] } = useBookmarks();
-  const { data: historyItems = [] } = useHistory({ enrichThumbs: false });
+  const { data: historyItems = [] } = useHistory();
   const { data: profileStatsPayload } = useQuery({
     queryKey: ['users', 'stats', 'profile', user?.id || 'anonymous'],
     queryFn: userApi.getStats,
@@ -391,7 +360,7 @@ const Profile = () => {
     placeholderData: (previousData) => previousData,
   });
   const commentsCount = profileComments.length;
-  const ratedManga = useMemo(
+  const rawRatedManga = useMemo(
     () => uniqueProfileListItems(((profileRatedPayload as any)?.items || []).map((item: any) => ({
       ...item,
       manga_title: item.title || item.manga_title,
@@ -401,6 +370,9 @@ const Profile = () => {
     }))),
     [profileRatedPayload],
   );
+  const ratedManga = useCanonicalMangaRecords(rawRatedManga, {
+    enabled: !!user, refreshMetadata: true, fillMissingCovers: true, retainUnavailable: true,
+  }) || [];
   const profileMangaTitleBySlug = useMemo(() => {
     const titleBySlug: Record<string, string> = {};
     const addTitle = (item: any) => {
@@ -590,6 +562,8 @@ const Profile = () => {
                 {tabs.map(t => (
                   <button
                     key={t.key}
+                    aria-label={t.label}
+                    aria-pressed={tab === t.key}
                     onClick={() => setTab(t.key)}
                     className={`relative flex items-center gap-1.5 px-2.5 py-2.5 text-xs sm:text-sm font-bold transition-all whitespace-nowrap shrink-0 ${
                       tab === t.key ? 'text-primary' : 'text-muted-foreground hover:text-foreground'
@@ -768,7 +742,7 @@ const OverviewTab = ({ user, stats, followedManga, historyItems }: { user: any; 
           <h3 className="text-sm font-bold mb-3 flex items-center gap-2"><Clock className="w-4 h-4 text-primary" /> Đọc gần đây</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
             {historyItems.slice(0, 4).map((item: any) => (
-              <Link key={item.manga_slug} to={getMangaDetailPath(item.manga_id || item.manga_slug)} className="flex items-center gap-3 p-3 rounded-xl bg-card border border-border/50 hover:border-primary/30 transition-all group">
+              <Link key={item.manga_slug} to={getSavedMangaDetailPath(item)} className="flex items-center gap-3 p-3 rounded-xl bg-card border border-border/50 hover:border-primary/30 transition-all group">
                 <OptimizedImage src={item.manga_thumb || ''} fallbackSrc={item.manga_thumb_fallback || undefined} alt="" className="w-12 h-16 rounded-lg object-cover border border-border/50" />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-bold line-clamp-1 group-hover:text-primary transition-colors">{item.manga_title}</p>
@@ -794,7 +768,7 @@ const OverviewTab = ({ user, stats, followedManga, historyItems }: { user: any; 
           <div className="relative group/scroll">
             <div id="followed-scroll" className="flex gap-3 overflow-x-auto scrollbar-hide pb-2 scroll-smooth">
               {followedManga.slice(0, 6).map((m: any) => (
-                <Link key={m.manga_slug || m.id} to={getMangaDetailPath(m.id || m.manga_id || m.manga_slug)} className="shrink-0 w-28 group">
+                <Link key={m.manga_slug || m.id} to={getSavedMangaDetailPath(m)} className="shrink-0 w-28 group">
                   <OptimizedImage src={m.manga_thumb || m.cover || ''} fallbackSrc={m.manga_thumb_fallback || undefined} alt="" className="w-28 h-40 rounded-xl object-cover border border-border/50 group-hover:border-primary/50 transition-all" />
                   <p className="text-xs font-bold mt-1.5 line-clamp-2 group-hover:text-primary transition-colors">{m.manga_title || m.title}</p>
                 </Link>
@@ -835,7 +809,7 @@ const FollowingTab = ({ manga, onUnfollow }: { manga: any[]; onUnfollow: (id: st
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
         {displayed.map((m: any) => (
           <div key={m.manga_slug || m.id} className="group relative">
-            <Link to={getMangaDetailPath(m.id || m.manga_id || m.manga_slug)}>
+            <Link to={getSavedMangaDetailPath(m)}>
               <OptimizedImage src={m.manga_thumb || m.cover || ''} fallbackSrc={m.manga_thumb_fallback || undefined} alt={m.manga_title || m.title} className="w-full aspect-[2/3] object-cover rounded-xl border border-border/50 group-hover:border-primary/50 transition-all" />
               <p className="text-xs font-bold mt-1.5 line-clamp-2 group-hover:text-primary transition-colors">{m.manga_title || m.title}</p>
             </Link>
@@ -884,7 +858,7 @@ const BookmarksTab = ({ manga, onRemove, sort, setSort }: { manga: any[]; onRemo
       <div className="space-y-2">
         {displayed.map((m: any) => (
           <div key={m.manga_slug || m.id} className="flex items-center gap-4 p-3 rounded-xl bg-card border border-border/50 hover:border-primary/30 transition-all group">
-            <Link to={getMangaDetailPath(m.id || m.manga_id || m.manga_slug)} className="flex items-center gap-4 flex-1 min-w-0">
+            <Link to={getSavedMangaDetailPath(m)} className="flex items-center gap-4 flex-1 min-w-0">
               <OptimizedImage src={m.manga_thumb || m.cover || ''} fallbackSrc={m.manga_thumb_fallback || undefined} alt="" className="w-12 h-16 rounded-lg object-cover border border-border/50 shrink-0" />
               <div className="min-w-0">
                 <p className="text-sm font-bold line-clamp-1 group-hover:text-primary transition-colors">{m.manga_title || m.title}</p>
@@ -945,7 +919,7 @@ const HistoryTab = ({ items, onRemove, onClear, sort, setSort }: { items: any[];
             <div className="flex items-center gap-4 p-4 rounded-xl bg-card border border-border/50 hover:border-primary/30 transition-all group">
               <OptimizedImage src={item.manga_thumb || ''} fallbackSrc={item.manga_thumb_fallback || undefined} alt="" className="w-14 h-20 object-cover rounded-lg border border-border/50 shrink-0" />
               <div className="flex-1 min-w-0">
-                <Link to={getMangaDetailPath(item.manga_id || item.manga_slug)} className="block">
+                <Link to={getSavedMangaDetailPath(item)} className="block">
                   <h3 className="text-sm font-bold line-clamp-1 group-hover:text-primary transition-colors">{item.manga_title}</h3>
                 </Link>
                 <p className="text-xs text-muted-foreground mt-1">{item.chapter_name || 'Chương ?'}</p>
@@ -958,7 +932,7 @@ const HistoryTab = ({ items, onRemove, onClear, sort, setSort }: { items: any[];
                 <p className="text-[10px] text-muted-foreground mt-1">{timeAgoVi(item.last_read_at || item.created_at || '')}</p>
               </div>
               <div className="flex gap-1 shrink-0">
-                <Link to={getMangaDetailPath(item.manga_id || item.manga_slug)} className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-bold opacity-0 group-hover:opacity-100 transition-opacity">
+                <Link to={getSavedMangaDetailPath(item)} className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-bold opacity-0 group-hover:opacity-100 transition-opacity">
                   Tiếp tục
                 </Link>
                 <button onClick={() => { onRemove(item.manga_slug); toast.success('Đã xoá'); }}
@@ -1288,7 +1262,9 @@ const ListsTab = ({
   const allLists = useMemo(() => [...smartLists, ...customListCards], [customListCards, smartLists]);
   const activeList = allLists.find((list) => list.id === activeListId) || allLists.find((list) => list.items.length > 0) || allLists[0];
   const activeCustomId = activeList?.customId || '';
-  const activeItems = activeList?.items || [];
+  const activeItems = useCanonicalMangaRecords(activeList?.items, {
+    refreshMetadata: true, fillMissingCovers: true, retainUnavailable: true,
+  }) || [];
 
   useEffect(() => {
     if (allLists.some((list) => list.id === activeListId)) return;
@@ -1533,7 +1509,7 @@ const ListsTab = ({
           <div className="space-y-2">
             {activeItems.slice(0, 80).map((item) => (
               <div key={item.manga_slug} className="flex items-center gap-3 p-3 rounded-xl bg-background/40 border border-border/40 hover:border-primary/30 transition-all group">
-                <Link to={getMangaDetailPath(item.manga_id || item.manga_slug)} className="flex items-center gap-3 flex-1 min-w-0">
+                <Link to={getSavedMangaDetailPath(item)} className="flex items-center gap-3 flex-1 min-w-0">
                   <OptimizedImage
                     src={item.manga_thumb || ''}
                     fallbackSrc={item.manga_thumb_fallback || undefined}

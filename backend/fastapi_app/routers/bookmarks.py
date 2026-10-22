@@ -22,8 +22,9 @@ def _thumb_from_slug(slug: str, thumb: str = "") -> str:
     slug = str(slug or "").strip()
     if not slug:
         return ""
-    manga_id = re.sub(r"^mangadex[-:]", "", slug, flags=re.I)
-    if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", manga_id, re.I):
+    from fastapi_app.routers.manga import _extract_mangadex_id
+    manga_id = _extract_mangadex_id(re.sub(r"^mangadex[-:]", "", slug, flags=re.I))
+    if manga_id:
         return f"/api/manga/mangadex-cover/{manga_id}"
     return f"/api/manga/truyenqq/cover/{quote(slug, safe='')}"
 

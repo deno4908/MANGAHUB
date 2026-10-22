@@ -61,19 +61,25 @@ def cached_metadata(identifier, values=None):
 
 
 @coalesce_reads
-async def _qq_metadata(identifier):
+async def _qq_metadata(identifier, title=None):
     existing = await asyncio.to_thread(cached_metadata, identifier)
     if existing:
         return existing
     from fastapi_app.services.catalog_visibility import unmatched
-    if identifier in await asyncio.to_thread(unmatched, [identifier]):
+    from truyenapi.truyenapi.service import normalized
+    valid_title = bool(title and normalized(title) == normalized(identifier))
+    if not valid_title and identifier in await asyncio.to_thread(unmatched, [identifier]):
         return None
     if re.fullmatch(r"[0-9a-f]{24}", identifier):
         return None  # An old OTruyen ObjectId does not identify a QQ book.
     async with _qq_slots:
         try:
-            value = await qq.run_live("basic", identifier)
-            return _from_qq(await asyncio.to_thread(qq._item, value))
+            value = (await qq.run_live("saved_metadata", identifier, title)
+                     if valid_title
+                     else await qq.run_live("basic", identifier))
+            item = _from_qq(await asyncio.to_thread(qq._item, value))
+            await asyncio.to_thread(cache.set, f"catalog:card-metadata:v1:{identifier}", json.dumps(item), ttl=3600)
+            return item
         except HTTPException as error:
             if error.status_code == 404:
                 return None
@@ -131,7 +137,7 @@ async def _mdx_metadata(identifiers):
     return found
 
 
-async def get_many(identifiers):
+async def get_many(identifiers, titles=None):
     from fastapi_app.routers.manga import _extract_mangadex_id
     result = {}
     missing_mdx = {}
@@ -158,7 +164,7 @@ async def get_many(identifiers):
             pass
     async def truyen_qq(identifier):
         try:
-            result[identifier] = await _qq_metadata(identifier)
+            result[identifier] = await _qq_metadata(identifier, (titles or {}).get(identifier))
         except (HTTPException, RuntimeError):
             pass
     jobs = ([_retain(create_task(manga_dex()))] if missing_mdx else [])

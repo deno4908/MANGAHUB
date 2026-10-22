@@ -15,6 +15,7 @@ import {
 } from "@/lib/api";
 import { useUserStore } from "@/store/userStore";
 import { useCanonicalMangaRecords } from "@/hooks/useCardMetadata";
+import { resolveSavedMangaCover } from "@/lib/savedManga";
 import {
   adaptMangaDetail,
   adaptListData,
@@ -22,7 +23,6 @@ import {
   adaptCategories,
   adaptChapterPages,
   thumbUrl,
-  thumbFallbackUrl,
   MANGADEX_EXTRA_GENRES,
 } from "@/lib/adapters";
 import { MANGADEX_ID_RE, normalizeMangaDexId } from "@/lib/mangaLinks";
@@ -51,134 +51,8 @@ function assertOTruyenPayload(data: any) {
   throw new Error(String(data?.message || "TruyenQQ unavailable"));
 }
 
-function isMangaDexThumbUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    const host = parsed.hostname.toLowerCase();
-    return (
-      host.endsWith("uploads.mangadex.org") ||
-      host.endsWith("mangadex.network")
-    );
-  } catch {
-    return false;
-  }
-}
-
-function toAbsoluteApiUrl(value: string): string {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  if (/^https?:\/\//i.test(raw)) return raw;
-  if (raw.startsWith("/")) return `${API_BASE}${raw}`;
-  return `${API_BASE}/${raw}`;
-}
-
-function extractProxyTargetUrl(value: string): string {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  const candidate = toAbsoluteApiUrl(raw);
-  try {
-    const parsed = new URL(candidate);
-    if (parsed.pathname !== "/api/images/img") return "";
-    const target = parsed.searchParams.get("url");
-    if (!target) return "";
-    const decoded = decodeURIComponent(target);
-    return /^https?:\/\//i.test(decoded) ? decoded : "";
-  } catch {
-    return "";
-  }
-}
-
-function resolveThumbSources(
-  slug?: string,
-  thumb?: string,
-): { primary: string; fallback?: string } {
-  const mangaSlug = String(slug || "").trim();
-  const raw = String(thumb || "").trim();
-  if (raw) {
-    const proxyTarget = extractProxyTargetUrl(raw);
-    if (proxyTarget) {
-      return {
-        primary: toAbsoluteApiUrl(raw),
-        fallback: isMangaDexThumbUrl(proxyTarget) ? LOCAL_COVER_FALLBACK : proxyTarget,
-      };
-    }
-
-    if (/^https?:\/\//i.test(raw)) {
-      if (isMangaDexThumbUrl(raw)) {
-        return {
-          primary: `${API_BASE}/api/images/img?url=${encodeURIComponent(raw)}`,
-          fallback: LOCAL_COVER_FALLBACK,
-        };
-      }
-      return {
-        primary: raw,
-        fallback: thumbFallbackUrl(raw, mangaSlug) || LOCAL_COVER_FALLBACK,
-      };
-    }
-
-    if (raw.startsWith("//")) {
-      const full = `https:${raw}`;
-      if (isMangaDexThumbUrl(full)) {
-        return {
-          primary: `${API_BASE}/api/images/img?url=${encodeURIComponent(full)}`,
-          fallback: LOCAL_COVER_FALLBACK,
-        };
-      }
-      return {
-        primary: full,
-        fallback: thumbFallbackUrl(full, mangaSlug) || LOCAL_COVER_FALLBACK,
-      };
-    }
-
-    if (raw.startsWith("/uploads/comics/")) {
-      const direct = `https://img.otruyenapi.com${raw}`;
-      const fallback = thumbFallbackUrl(raw, mangaSlug) || direct;
-      return {
-        primary: direct,
-        fallback,
-      };
-    }
-
-    if (raw.startsWith("uploads/comics/")) {
-      const direct = `https://img.otruyenapi.com/${raw}`;
-      const fallback = thumbFallbackUrl(raw, mangaSlug) || direct;
-      return {
-        primary: direct,
-        fallback,
-      };
-    }
-
-    const resolved = thumbUrl(raw, mangaSlug);
-    if (/^https?:\/\/img\.otruyenapi\.com/i.test(resolved)) {
-      return {
-        primary: resolved,
-        fallback: thumbFallbackUrl(raw, mangaSlug) || resolved,
-      };
-    }
-
-    return {
-      primary: resolved,
-      fallback: thumbFallbackUrl(raw, mangaSlug) || LOCAL_COVER_FALLBACK,
-    };
-  }
-
-  if (normalizeMangaDexId(mangaSlug)) {
-    const mdxId = normalizeMangaDexId(mangaSlug)!;
-    return {
-      primary: `${API_BASE}/api/manga/mangadex-cover/${mdxId}`,
-      fallback: LOCAL_COVER_FALLBACK,
-    };
-  }
-
-  if (!mangaSlug) {
-    return { primary: LOCAL_COVER_FALLBACK };
-  }
-
-  const direct = thumbUrl("", mangaSlug);
-  return {
-    primary: direct,
-    fallback: thumbFallbackUrl("", mangaSlug) || LOCAL_COVER_FALLBACK,
-  };
+function resolveThumbSources(slug?: string, thumb?: string): { primary: string; fallback?: string } {
+  return resolveSavedMangaCover(String(slug || ''), thumb);
 }
 
 function fallbackThumb(slug?: string, thumb?: string) {
@@ -634,7 +508,7 @@ export function useBookmarks() {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
-  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true });
+  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, retainUnavailable: true });
   return { ...query, data };
 }
 
@@ -745,7 +619,7 @@ export function useFollows() {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
-  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true });
+  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, retainUnavailable: true });
   return { ...query, data };
 }
 
@@ -868,7 +742,7 @@ export function useHistory(options: UseHistoryOptions = {}) {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
-  const data = useCanonicalMangaRecords(query.data, { enabled, fillMissingCovers: enrichThumbs });
+  const data = useCanonicalMangaRecords(query.data, { enabled, fillMissingCovers: enrichThumbs, refreshMetadata: enrichThumbs, retainUnavailable: true });
   return { ...query, data };
 }
 

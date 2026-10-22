@@ -161,6 +161,45 @@ def test_legacy_title_alias_resolves_only_a_unique_exact_source_title():
         service.close()
 
 
+def test_saved_legacy_title_resolves_a_unique_source_provided_alternative_title():
+    def handler(request):
+        assert request.url.path == "/frontend/search/search"
+        return httpx.Response(200, text='<li><a href="/truyen-tranh/one-piece-1-128"><div class="search_info"><p class="name">Vua Hải Tặc; Đảo Hải Tặc; OnePiece</p></div></a></li>')
+    service, calls = setup_service(handler)
+    try:
+        assert service.resolve("dao-hai-tac") == BASE + "/truyen-tranh/one-piece-1-128"
+        assert len(calls) == 1
+    finally:
+        service.close()
+
+
+def test_saved_metadata_checks_the_full_source_alternative_names(monkeypatch):
+    service, calls = setup_service(lambda request: httpx.Response(500))
+    monkeypatch.setattr(service, "search", lambda title, limit: {"items": [{"url": BASE + "/truyen-tranh/one-piece-1-128"}]})
+    monkeypatch.setattr(service, "basic", lambda identifier: {"url": BASE + "/truyen-tranh/one-piece-1-128", "title": "One Piece", "alternative_names": "Vua Hải Tặc; Đảo Hải Tặc; OnePiece"})
+    try:
+        assert service.saved_metadata("dao-hai-tac", "Đảo Hải Tặc")["title"] == "One Piece"
+        with pytest.raises(Exception) as error:
+            service.saved_metadata("unrelated-book", "Đảo Hải Tặc")
+        assert error.value.status_code == 422
+    finally:
+        service.close()
+
+
+def test_saved_metadata_rejects_multiple_exact_matches(monkeypatch):
+    service, calls = setup_service(lambda request: httpx.Response(500))
+    monkeypatch.setattr(service, "search", lambda title, limit: {"items": [
+        {"url": BASE + "/truyen-tranh/edition-1"}, {"url": BASE + "/truyen-tranh/edition-2"}]})
+    monkeypatch.setattr(service, "basic", lambda identifier: {"url": BASE + "/truyen-tranh/" + identifier,
+        "title": "A main title", "alternative_names": "Same Saved Title"})
+    try:
+        with pytest.raises(Exception) as error:
+            service.saved_metadata("same-saved-title", "Same Saved Title")
+        assert error.value.status_code == 404
+    finally:
+        service.close()
+
+
 def test_legacy_lookup_does_not_guess_between_books_with_the_same_title():
     def handler(request):
         assert request.url.path == "/frontend/search/search"

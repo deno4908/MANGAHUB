@@ -158,7 +158,8 @@ class LiveService:
                 matches = {}
                 for candidate in candidates:
                     stem, cid, chapter = identity(candidate["url"])
-                    if chapter is None and (stem == identifier or normalized(candidate.get("title", "")) == normalized(identifier)):
+                    source_titles = re.split(r"\s*;\s*", candidate.get("title", ""))
+                    if chapter is None and (stem == identifier or any(normalized(title) == normalized(identifier) for title in source_titles)):
                         matches[cid] = candidate
                 if len(matches) == 1:
                     comic = next(iter(matches.values()))
@@ -171,6 +172,28 @@ class LiveService:
         if comic:
             return comic["url"]
         raise HTTPException(404, "Không tìm thấy truyện trong sitemap của nguồn")
+
+    def saved_metadata(self, identifier, title):
+        """Resolve a saved label only when the source confirms its exact identity."""
+        if not title or normalized(title) != normalized(identifier):
+            raise HTTPException(422, "Tên đã lưu không khớp mã tra cứu")
+        candidates = self.search(title, limit=9)["items"]
+        if len(candidates) > 8:
+            raise HTTPException(404, "Tên đã lưu khớp quá nhiều truyện QQ")
+        matches = {}
+        for candidate in candidates:
+            stem, cid, chapter = identity(candidate["url"])
+            if chapter is not None:
+                continue
+            value = self.basic(stem + "-" + cid)
+            names = [value.get("title", ""), *re.split(r"\s*;\s*", value.get("alternative_names") or "")]
+            if any(normalized(name) == normalized(title) for name in names):
+                matches[cid] = value
+        if len(matches) != 1:
+            raise HTTPException(404, "Không tìm thấy duy nhất một truyện QQ khớp tên đã lưu")
+        value = next(iter(matches.values()))
+        self.reference_cache.put(identifier, self.settings.catalog_ttl, value)
+        return value
 
     def comic(self, identifier):
         url = self.resolve(identifier)

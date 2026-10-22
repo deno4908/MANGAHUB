@@ -142,3 +142,38 @@ def test_metadata_endpoint_validates_input_and_filters_hidden_aliases(memory, mo
                 response = await client.post("/api/manga/metadata/batch", json={"identifiers": ids})
                 assert response.status_code == 422
     asyncio.run(check())
+
+
+def test_saved_titles_keep_accents_and_cannot_override_an_unrelated_identifier(memory, monkeypatch):
+    label = "Vợ Trong Game Của Tôi Là Idol Nổi Tiếng Ngoài Đời"
+    source = AsyncMock(return_value=native_qq())
+    monkeypatch.setattr(qq, "run_live", source)
+    memory["catalog:qq-sync:v1:" + LEGACY] = "missing"
+    result = asyncio.run(cards.get_many([LEGACY], {LEGACY: label}))
+    assert result[LEGACY]["slug"] == LEGACY + "-18078"
+    source.assert_awaited_once_with("saved_metadata", LEGACY, label)
+    assert asyncio.run(cards.get_many([LEGACY]))[LEGACY]["slug"] == LEGACY + "-18078"
+    source.reset_mock()
+    memory["catalog:qq-sync:v1:unrelated-book"] = "missing"
+    assert asyncio.run(cards.get_many(["unrelated-book"], {"unrelated-book": label})) == {"unrelated-book": None}
+    source.assert_not_awaited()
+
+
+def test_metadata_endpoint_accepts_bounded_title_hints_for_requested_books(memory, monkeypatch):
+    from fastapi_app.services import catalog_visibility
+    app = FastAPI()
+    app.include_router(manga.router, prefix="/api/manga")
+    app.dependency_overrides[manga.get_supabase_public] = lambda: object()
+    monkeypatch.setattr(catalog_visibility, "published_uploads", AsyncMock(return_value={}))
+    monkeypatch.setattr(manga, "_get_hidden_slugs", AsyncMock(return_value={}))
+    load = AsyncMock(return_value={LEGACY: {"id": LEGACY + "-18078", "slug": LEGACY + "-18078", "title": TITLE}})
+    monkeypatch.setattr(cards, "get_many", load)
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/api/manga/metadata/batch", json={"identifiers": [LEGACY], "titles": {LEGACY: TITLE}})
+            assert response.status_code == 200 and response.json()["items"][LEGACY]["title"] == TITLE
+            load.assert_awaited_once_with([LEGACY], {LEGACY: TITLE})
+            for titles in ({LEGACY: "x" * 201}, {"https://invalid.example": TITLE}):
+                response = await client.post("/api/manga/metadata/batch", json={"identifiers": [LEGACY], "titles": titles})
+                assert response.status_code == 422
+    asyncio.run(check())

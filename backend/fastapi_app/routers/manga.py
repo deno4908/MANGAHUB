@@ -42,6 +42,7 @@ router = APIRouter()
 
 class CardMetadataRequest(BaseModel):
     identifiers: list[Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9-]+$")]] = Field(max_length=48)
+    titles: dict[Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9-]+$")], Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=dict, max_length=48)
 
 
 @router.post("/chapters/latest/batch")
@@ -67,7 +68,7 @@ async def card_metadata_batch(payload: CardMetadataRequest, db=Depends(get_supab
     requested = [value.lower() for value in payload.identifiers]
     uploaded = await catalog_visibility.published_uploads(db, requested)
     external = [identifier for identifier in requested if identifier not in uploaded]
-    found, hidden = await asyncio.gather(card_metadata.get_many(external), _get_hidden_slugs(db))
+    found, hidden = await asyncio.gather(card_metadata.get_many(external, payload.titles) if payload.titles else card_metadata.get_many(external), _get_hidden_slugs(db))
     found.update(uploaded)
     await asyncio.to_thread(catalog_visibility.remember_matches, found)
     result = {}

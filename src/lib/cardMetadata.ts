@@ -4,6 +4,7 @@ import { mangaApi } from '@/lib/api';
 import { normalizeMangaDexId } from '@/lib/mangaLinks';
 import { repairMojibakeText, thumbUrl } from '@/lib/adapters';
 import { patchMangaInQueryCache } from '@/lib/querySync';
+import { resolveSavedMangaCover } from '@/lib/savedManga';
 
 export type CardMetadata = {
   id: string; slug: string; source: 'mangadex' | 'truyenqq' | 'uploaded'; title: string;
@@ -12,10 +13,11 @@ export type CardMetadata = {
 };
 
 const normalize = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-  .replace(/đ/g, 'd').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  .replace(/đ/gi, 'd').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 export function needsCanonicalTitle(identifier: string, value: unknown): boolean {
   const title = repairMojibakeText(value).trim();
+  if (['dang tai ten truyen', 'chua lay duoc ten truyen', 'chua co tieu de', 'dang cap nhat', 'truyen'].includes(normalize(title))) return true;
   if (!title || /^(?:mangadex(?:\s+[0-9a-f-]+)?|untitled|unknown|chưa có tiêu đề|đang tải tên truyện…)$/i.test(title)) return true;
   if (/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(title)) return true;
   if (/[^\x00-\x7f]/.test(title)) return false;
@@ -38,7 +40,7 @@ export function applyCardMetadata(manga: Manga, metadata: CardMetadata): Manga {
     contentRating: metadata.content_rating || manga.contentRating, chapters };
 }
 
-type Waiter = { client: QueryClient; resolve: (value: CardMetadata | null) => void; reject: (error: unknown) => void };
+type Waiter = { client: QueryClient; title?: string; resolve: (value: CardMetadata | null) => void; reject: (error: unknown) => void };
 let queued = new Map<string, Waiter[]>();
 let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -49,7 +51,8 @@ async function flush() {
     for (let offset = 0; offset < ids.length; offset += 48) {
       const group = ids.slice(offset, offset + 48);
       try {
-        const response = await mangaApi.getCardMetadata(group);
+        const titles = Object.fromEntries(group.map(id => [id, batch.get(id)?.find(waiter => waiter.title)?.title]).filter((entry): entry is [string, string] => Boolean(entry[1])));
+        const response = await (Object.keys(titles).length ? mangaApi.getCardMetadata(group, titles) : mangaApi.getCardMetadata(group));
         for (const id of group) {
           const waiters = batch.get(id) || [];
           if (!(id in response.items)) {
@@ -65,13 +68,22 @@ async function flush() {
             patchMangaInQueryCache(client, [id, metadata.id], record => {
               if (record.source === 'uploaded' || record.is_user_upload) return record;
               const title = String(record.title || record.name || record.manga_title || '');
-              if (!needsCanonicalTitle(id, title)) return record.chapterAvailability === 'unavailable'
-                ? { ...record, chapterAvailability: undefined } : record;
-              const next: Record<string, any> = { ...record, title: metadata.title, contentRating: metadata.content_rating || record.contentRating };
+              const next: Record<string, any> = { ...record, contentRating: metadata.content_rating || record.contentRating };
               if (next.chapterAvailability === 'unavailable') delete next.chapterAvailability;
-              if ('name' in record) next.name = metadata.title;
-              if ('manga_title' in record || 'manga_slug' in record) next.manga_title = metadata.title;
-              if (metadata.cover_url) for (const field of ['thumb', 'thumb_url', 'cover_url', 'manga_thumb']) {
+              if (needsCanonicalTitle(id, title)) {
+                next.title = metadata.title;
+                if ('name' in record) next.name = metadata.title;
+                if ('manga_title' in record || 'manga_slug' in record) next.manga_title = metadata.title;
+              }
+              if ('manga_slug' in record) {
+                next.manga_source_slug = metadata.slug;
+                if (metadata.cover_url) {
+                  const cover = resolveSavedMangaCover(metadata.id, metadata.cover_url);
+                  next.manga_thumb = cover.primary;
+                  next.manga_thumb_fallback = cover.fallback;
+                }
+              }
+              if (metadata.cover_url) for (const field of ['thumb', 'thumb_url', 'cover_url']) {
                 if (field in record) next[field] = metadata.cover_url;
               }
               if (!record.genres?.length) next.genres = metadata.genres || [];
@@ -88,11 +100,11 @@ async function flush() {
   }));
 }
 
-export function requestCardMetadata(id: string, client: QueryClient): Promise<CardMetadata | null> {
+export function requestCardMetadata(id: string, client: QueryClient, title?: string): Promise<CardMetadata | null> {
   id = id.trim().toLowerCase();
   if (id.length > 200 || !/^[a-z0-9]+(?:-+[a-z0-9]+)*$/.test(id)) return Promise.resolve(null);
   return new Promise((resolve, reject) => {
-    queued.set(id, [...(queued.get(id) || []), { client, resolve, reject }]);
+    queued.set(id, [...(queued.get(id) || []), { client, title, resolve, reject }]);
     if (!timer) timer = setTimeout(() => void flush(), 30);
   });
 }

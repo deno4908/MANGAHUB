@@ -3,37 +3,7 @@ import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Heart, X, Loader2 } from 'lucide-react';
 import OptimizedImage from '@/components/ui/OptimizedImage';
-import { thumbUrl, thumbFallbackUrl } from '@/lib/adapters';
-import { getMangaDetailPath } from '@/lib/mangaLinks';
-
-/** Resolve cover sources from slug + raw thumb, with CDN fallback. */
-function resolveCoverSources(slug: string, thumb?: string, storedFallback?: string): { src: string; fallback?: string } {
-  const raw = String(thumb || '').trim();
-  const safeSlug = String(slug || '').trim();
-  const preferredFallback = String(storedFallback || '').trim();
-  if (raw && /^https?:\/\//i.test(raw)) {
-    return { src: raw, fallback: thumbFallbackUrl(raw, safeSlug) || preferredFallback || undefined };
-  }
-  if (raw) {
-    const resolved = thumbUrl(raw, safeSlug);
-    if (/^https?:\/\/img\.otruyenapi\.com/i.test(resolved)) {
-      return {
-        src: resolved,
-        fallback: thumbFallbackUrl(raw, safeSlug) || preferredFallback || undefined,
-      };
-    }
-    return { src: resolved, fallback: thumbFallbackUrl(raw, safeSlug) || preferredFallback || undefined };
-  }
-  // No thumb stored — generate CDN URL from slug
-  if (safeSlug) {
-    const cdnUrl = thumbUrl('', safeSlug);
-    return {
-      src: cdnUrl,
-      fallback: thumbFallbackUrl('', safeSlug) || preferredFallback || undefined,
-    };
-  }
-  return { src: '' };
-}
+import { getSavedMangaDetailPath, resolveSavedMangaCover } from '@/lib/savedManga';
 
 const FollowingPage = () => {
   const { data: follows = [], isLoading } = useFollows();
@@ -65,7 +35,7 @@ const FollowingPage = () => {
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 md:gap-4">
           {follows.map((f: any, i: number) => {
-            const cover = resolveCoverSources(f.manga_slug, f.manga_thumb, f.manga_thumb_fallback);
+            const cover = resolveSavedMangaCover(f.manga_source_slug || f.manga_slug, f.manga_thumb, f.manga_thumb_fallback);
             return (
               <motion.div
                 key={f.manga_slug}
@@ -74,10 +44,10 @@ const FollowingPage = () => {
                 transition={{ delay: i * 0.05 }}
                 className="group relative"
               >
-                <Link to={getMangaDetailPath(f.manga_slug)} className="block">
+                <Link to={getSavedMangaDetailPath(f)} className="block">
                   <div className="aspect-[3/4] rounded-lg overflow-hidden bg-muted">
                     <OptimizedImage
-                      src={cover.src}
+                      src={cover.primary}
                       fallbackSrc={cover.fallback}
                       alt={f.manga_title}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"

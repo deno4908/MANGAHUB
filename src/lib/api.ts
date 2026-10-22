@@ -996,8 +996,8 @@ function publicApi<T>(path: string, options: ApiRequestInit = {}) {
 }
 
 export const mangaApi = {
-  getCardMetadata: (identifiers: string[]) => publicApi<{ items: Record<string, any> }>(
-    '/api/manga/metadata/batch', { method: 'POST', body: JSON.stringify({ identifiers }), timeoutMs: 20_000 }),
+  getCardMetadata: (identifiers: string[], titles?: Record<string, string>) => publicApi<{ items: Record<string, any> }>(
+    '/api/manga/metadata/batch', { method: 'POST', body: JSON.stringify({ identifiers, ...(titles && Object.keys(titles).length ? { titles } : {}) }), timeoutMs: 20_000 }),
   getLatestCardChapters: (identifiers: string[]) => publicApi<{ items: Record<string, any> }>(
     '/api/manga/chapters/latest/batch', { method: 'POST', body: JSON.stringify({ identifiers }), timeoutMs: 6_000 }),
   getHome: () => publicApi<any>("/api/manga/home"),
