@@ -2297,10 +2297,15 @@ const BrowseManga = () => {
     ...qqPageOptions(page),
     enabled: browseUrlReady && useOTruyenFilteredServerMode && canQueryQQSelection,
     placeholderData: (previousData) => previousData,
-    refetchInterval: query => filters.sort === 'popular' && (query.state.data?.rankingPending ||
-      (query.state.error as Error & { status?: number })?.status === 503)
+    refetchInterval: query => filters.sort === 'popular' &&
+      Math.max(query.state.dataUpdateCount, query.state.errorUpdateCount) < 3 && (
+        query.state.data?.rankingPending || (query.state.error as Error & { status?: number })?.status === 503)
       ? 5000 : false,
   });
+  const qqRankingQueryState = queryClient.getQueryState(qqPageOptions(page).queryKey);
+  const qqRankingRefreshExhausted = otruyenFilteredServerQuery.data?.rankingPending &&
+    Math.max(qqRankingQueryState?.dataUpdateCount || 0, qqRankingQueryState?.errorUpdateCount || 0) >= 3 &&
+    !otruyenFilteredServerQuery.isFetching;
   const pagePrefetchBusy = useRef(false);
   const prefetchedCovers = useRef<() => void>(() => {});
   const intentGeneration = useRef(0);
@@ -5369,7 +5374,10 @@ const BrowseManga = () => {
               )}
               {isOTruyenSourceTab && filters.sort === 'popular' && otruyenFilteredServerQuery.data?.rankingPending && (
                 <p role="status" className="flex items-center justify-center gap-2 mb-4 text-sm text-muted-foreground">
-                  {displayItems.length === 0 && <Loader2 className="w-4 h-4 animate-spin" />} Đang cập nhật xếp hạng lượt xem…
+                  {!qqRankingRefreshExhausted && displayItems.length === 0 && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {qqRankingRefreshExhausted ? 'Chưa cập nhật được xếp hạng lượt xem.' : 'Đang cập nhật xếp hạng lượt xem…'}
+                  {qqRankingRefreshExhausted && <button type="button" className="font-semibold text-primary hover:underline"
+                    onClick={() => { void otruyenFilteredServerQuery.refetch(); }}>Thử lại</button>}
                 </p>
               )}
               {activeBrowseQuery.isError && (
@@ -5415,8 +5423,10 @@ const BrowseManga = () => {
                       <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} onPageIntent={prefetchBrowsePage} />
                     </div>
                   )}
-                  <p className="text-muted-foreground font-medium">{isOTruyenSourceTab && otruyenFilteredServerQuery.data?.rankingPending
-                    ? 'Đang tải các truyện đã xác minh…' : 'Không tìm thấy truyện nào phù hợp.'}</p>
+                  <p className="text-muted-foreground font-medium">{qqRankingRefreshExhausted
+                    ? 'Chưa tải được danh sách truyện. Hãy thử lại.'
+                    : isOTruyenSourceTab && otruyenFilteredServerQuery.data?.rankingPending
+                      ? 'Đang tải các truyện đã xác minh…' : 'Không tìm thấy truyện nào phù hợp.'}</p>
                 </div>
               ) : null}
 

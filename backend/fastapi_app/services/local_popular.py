@@ -5,6 +5,7 @@ import logging
 import math
 import hashlib
 import json
+from serverless_runtime import create_task
 
 from fastapi import HTTPException
 
@@ -13,7 +14,8 @@ from fastapi_app.services.catalog_visibility import legacy_qq_identifier, publis
 from fastapi_app.services.request_coalescing import coalesce_reads
 
 logger = logging.getLogger(__name__)
-SOURCE_WAIT_SECONDS = 1.5
+SOURCE_WAIT_SECONDS = 12.0
+SOURCE_REFRESH_SECONDS = 8.0
 SNAPSHOT_TTL = 90
 
 
@@ -37,7 +39,8 @@ async def _source_page(genres, status, number, snapshot_key):
         return previous
     value = await truyenqq_service.get_filtered(genres=list(genres), page=number,
                                                 sort="updated_desc", status=status or None,
-                                                overlay_latest=False)
+                                                overlay_latest=False, background_refresh=False,
+                                                refresh_timeout=SOURCE_REFRESH_SECONDS)
     return await asyncio.to_thread(_frozen, key, value)
 
 
@@ -52,8 +55,10 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
     from fastapi_app.routers import manga
 
     lookup = await asyncio.to_thread(manga._fetch_local_views_lookup, db)
-    snapshot_key = "qq:local-popular:v3:" + hashlib.sha256(json.dumps(
-        [sorted(lookup.items()), sorted(genres), status, show_mature, hidden], sort_keys=True).encode()).hexdigest()
+    # Reading another chapter must not invalidate every source-page read while
+    # a client is waiting for this ranking snapshot to finish.
+    snapshot_key = "qq:local-popular:v4:" + hashlib.sha256(json.dumps(
+        [sorted(genres), status, show_mature, hidden], sort_keys=True).encode()).hexdigest()
     snapshot = await asyncio.to_thread(_frozen, snapshot_key + ":ranking")
     aliases = [slug for slug, views in lookup.items() if views > 0
                and not manga._extract_mangadex_id(slug) and not manga._is_invalid_manga_slug(slug)
@@ -77,7 +82,7 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
             # warm shared labels without holding every browse request.
             external = [identifier for identifier in unknown
                         if identifier not in uploaded and not legacy_qq_identifier(identifier)]
-            return {**verified, **uploaded, **(await card_metadata.get_many(external) if external else {})}
+            return {**verified, **uploaded, **(await card_metadata.get_many(external, source_timeout=2.0) if external else {})}
         batches = await asyncio.gather(*(resolve(aliases[i:i + 48])
                                         for i in range(0, len(aliases), 48)))
         for batch in batches:
@@ -111,7 +116,10 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
         return sorted(ranked.values(), key=lambda row: (-row["views"], row["slug"])), excluded
 
     def native_pending():
-        return any(slug not in labels for slug in aliases if not legacy_qq_identifier(slug))
+        unresolved = [slug for slug in aliases if slug not in labels and not legacy_qq_identifier(slug)]
+        # A failed read has finished; it is not an ongoing job. Keep verified
+        # titles without telling the browser to poll a permanent failure forever.
+        return card_metadata.has_pending_reads(unresolved)
 
     offset = (page - 1) * limit
     rows, excluded = (snapshot["rows"], set(snapshot["excluded"])) if snapshot else build_ranking()
@@ -134,8 +142,16 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
         # the response timeout and continues warming the source page.
         return await asyncio.wait_for(_source_page(tuple(genres), status, number, snapshot_key), SOURCE_WAIT_SECONDS)
 
+    source_tasks = {1: create_task(source(1))}
+    if limit == 42 and page > 1 and len(rows) < offset + limit:
+        # The UI uses QQ's native 42-item pages. Load the catalog header and
+        # requested page together, so two cold reads do not add their latency.
+        source_tasks[page] = create_task(source(page))
+    for task in source_tasks.values():
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+
     try:
-        first_source_page = await source(1)
+        first_source_page = await source_tasks[1]
     except asyncio.TimeoutError:
         return response(rows[offset:offset + limit], refreshing=True)
     except HTTPException:
@@ -176,7 +192,8 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
     numbers = sorted((prefix_pages | requested_pages) - {1})
     numbers = [number for number in numbers if number <= source_pages]
     payloads = {1: first_source_page}
-    results = await asyncio.gather(*(source(number) for number in numbers), return_exceptions=True)
+    results = await asyncio.gather(*(source_tasks[number] if number in source_tasks else source(number)
+                                     for number in numbers), return_exceptions=True)
     for number, value in zip(numbers, results):
         if isinstance(value, (asyncio.TimeoutError, HTTPException)):
             pending = True

@@ -2,10 +2,88 @@ import asyncio
 import json
 import threading
 import time
-from unittest.mock import MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
+
+import pytest
 
 from fastapi_app.services import cache_service, card_chapters, mangadex_service as mdx, truyenqq_service as qq
 from fastapi_app.services.request_coalescing import coalesce_reads
+
+
+def test_popularity_reuses_stale_catalog_without_attaching_slow_vercel_jobs(monkeypatch):
+    import serverless_runtime as runtime
+    from fastapi_app.routers import manga
+    from fastapi_app.services import local_popular
+    monkeypatch.setattr(runtime, "IS_VERCEL", True)
+    monkeypatch.setattr(local_popular, "_frozen", lambda key, value=None: value)
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: {})
+    payload = {"data": {"items": [{"slug": f"book-{i}"} for i in range(42)],
+               "params": {"pagination": {"totalPages": 445, "totalItemsPerPage": 42}}}}
+    monkeypatch.setattr(qq, "_json_cached", lambda key: {"payload": payload, "fresh_until": 0})
+    network = AsyncMock(side_effect=AssertionError("A cached popularity page must not launch refresh work"))
+    monkeypatch.setattr(qq, "run_live", network)
+    async def app(scope, receive, send):
+        result = await local_popular.qq_popular(page=2, limit=42, genres=[], status="",
+                                              show_mature=True, hidden={}, db=None)
+        assert len(result["data"]["items"]) == 42
+        assert result["data"]["ranking_pending"] is False
+    async def run():
+        # Include request-finalization work, not just time until JSON is produced.
+        await asyncio.wait_for(runtime.RequestTasksMiddleware(app)({"type": "http"}, None, None), 1)
+    asyncio.run(run())
+    network.assert_not_awaited()
+
+
+def test_cold_catalog_deadline_also_finishes_the_vercel_background_job(monkeypatch):
+    import serverless_runtime as runtime
+    monkeypatch.setattr(runtime, "IS_VERCEL", True)
+    monkeypatch.setattr(qq, "_json_cached", lambda key: None)
+    monkeypatch.setattr(qq, "_catalog_jobs", {})
+    stopped = asyncio.Event()
+    async def slow(*args, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+    monkeypatch.setattr(qq, "run_live", slow)
+    async def app(scope, receive, send):
+        with pytest.raises(asyncio.TimeoutError):
+            await qq.get_filtered(page=2, background_refresh=False, refresh_timeout=0.02)
+    async def run():
+        await asyncio.wait_for(runtime.RequestTasksMiddleware(app)({"type": "http"}, None, None), 1)
+        assert stopped.is_set()
+        assert not qq._catalog_jobs
+    asyncio.run(run())
+
+
+def test_interactive_deadline_also_applies_to_an_existing_shared_catalog_job(monkeypatch):
+    import serverless_runtime as runtime
+    monkeypatch.setattr(runtime, "IS_VERCEL", True)
+    monkeypatch.setattr(qq, "_json_cached", lambda key: None)
+    monkeypatch.setattr(qq, "_catalog_jobs", {})
+    started = asyncio.Event()
+    async def blocked(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+    network = AsyncMock(side_effect=blocked)
+    monkeypatch.setattr(qq, "run_live", network)
+    async def app(scope, receive, send):
+        with pytest.raises(asyncio.TimeoutError):
+            await qq.get_filtered(page=2, background_refresh=False, refresh_timeout=0.02)
+    async def run():
+        # This refresh belongs to another request, outside this invocation's task set.
+        existing = asyncio.create_task(qq.get_filtered(page=2))
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            await asyncio.wait_for(runtime.RequestTasksMiddleware(app)({"type": "http"}, None, None), 1)
+            assert not existing.done()
+            network.assert_awaited_once()
+        finally:
+            jobs = [existing, *qq._catalog_jobs.values()]
+            for task in jobs:
+                task.cancel()
+            await asyncio.gather(*jobs, return_exceptions=True)
+    asyncio.run(run())
 
 
 def test_shared_revision_lookup_does_not_block_the_event_loop():

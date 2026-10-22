@@ -104,17 +104,39 @@ def test_slow_source_does_not_hold_ready_titles_and_finishes_shared_cache(memory
     memory[f"catalog:card-metadata:v1:{MDX_ID}"] = json.dumps({"id": MDX_ID, "title": "Vợ tôi là quỷ vương"})
     async def check():
         first = await asyncio.wait_for(cards.get_many([MDX_ID, LEGACY]), 0.2)
+        assert cards.has_pending_reads([LEGACY])
+        assert not cards.has_pending_reads([MDX_ID, "unrelated-123"])
         assert first == {MDX_ID: {"id": MDX_ID, "title": "Vợ tôi là quỷ vương"}}
         gate.set()
         # The background read includes thread-backed cache writes. Releasing
         # the source gate does not guarantee they finish within the 20ms batch
         # response budget, particularly while the full suite is running.
         await asyncio.wait_for(asyncio.gather(*tuple(cards._pending_reads)), 1)
+        assert not cards.has_pending_reads([LEGACY])
         second = await cards.get_many([MDX_ID, LEGACY])
         assert second[LEGACY]["title"] == TITLE
         assert LEGACY not in first  # returned snapshot is not mutated later
     asyncio.run(check())
     source.assert_awaited_once_with("basic", LEGACY)
+
+
+def test_interactive_metadata_deadline_includes_queued_jobs_and_vercel_finalization(memory, monkeypatch):
+    import serverless_runtime as runtime
+    monkeypatch.setattr(runtime, "IS_VERCEL", True)
+    monkeypatch.setattr(cards, "_qq_slots", asyncio.Semaphore(3))
+    monkeypatch.setattr(cards, "_BATCH_WAIT_SECONDS", 0.2)
+    identifiers = [f"unavailable-{100 + index}" for index in range(10)]
+    async def blocked(*args):
+        await asyncio.Event().wait()
+    source = AsyncMock(side_effect=blocked)
+    monkeypatch.setattr(qq, "run_live", source)
+    async def app(scope, receive, send):
+        assert await cards.get_many(identifiers, source_timeout=0.02) == {}
+        assert not cards.has_pending_reads(identifiers)
+    async def run():
+        await asyncio.wait_for(runtime.RequestTasksMiddleware(app)({"type": "http"}, None, None), 1)
+        assert source.await_count == 3  # queued jobs time out without another source call
+    asyncio.run(run())
 
 
 def test_unavailable_book_never_guesses_another_title(memory, monkeypatch):

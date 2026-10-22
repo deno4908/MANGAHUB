@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -69,6 +69,27 @@ it('keeps QQ popularity visible while a legacy alias is still being resolved', a
   expect(screen.getByRole('status')).toHaveTextContent('Đang cập nhật xếp hạng lượt xem');
   expect(screen.getByRole('status').querySelector('.animate-spin')).toBeNull();
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('stops automatically polling a QQ ranking that cannot finish and offers a manual retry', async () => {
+  vi.useFakeTimers();
+  try {
+    vi.mocked(mangaApi.getOTruyenFiltered).mockResolvedValue({ data: {
+      ...page([{ slug: 'ready-1', name: 'Verified QQ', source: 'truyenqq', local_view_count: 50 }]).data,
+      ranking_pending: true,
+    } });
+    show('/manga?source=truyenqq&sort=popular');
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(mangaApi.getOTruyenFiltered).toHaveBeenCalledTimes(3);
+    const retry = screen.getByRole('button', { name: 'Thử lại' });
+    expect(screen.getByRole('status').querySelector('.animate-spin')).toBeNull();
+    fireEvent.click(retry);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(mangaApi.getOTruyenFiltered).toHaveBeenCalledTimes(4);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it('uses the Vietnamese chapter feed for latest browsing without narrow filters', async () => {

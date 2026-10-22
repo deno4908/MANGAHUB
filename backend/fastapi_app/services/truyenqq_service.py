@@ -289,19 +289,24 @@ def _overlay_latest(payload, *, page=1, genres=(), status=None, latest_order=Fal
     return payload
 
 
-async def _catalog_page(method, *args, **kwargs):
+async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=None, **kwargs):
     digest = hashlib.sha256(json.dumps([method, args, kwargs], sort_keys=True).encode()).hexdigest()
     key = "truyenqq:page-snapshot:v3:" + digest
     snapshot = await asyncio.to_thread(_json_cached, key)
     if not isinstance(snapshot, dict) or not isinstance(snapshot.get("payload"), dict):
         snapshot = None
+    if snapshot is not None and not background_refresh:
+        # Interactive ranking reads can reuse this 30-minute source snapshot.
+        # Do not attach an unrelated stale-page refresh to their Vercel invocation.
+        return snapshot["payload"]
     if snapshot is None or snapshot.get("fresh_until", 0) < time.time():
         task_key = (asyncio.get_running_loop(), key)
         task = _catalog_jobs.get(task_key)
         if task is None:
             async def refresh():
                 try:
-                    raw = await run_live(method, *args, **kwargs)
+                    read = run_live(method, *args, **kwargs)
+                    raw = await asyncio.wait_for(read, refresh_timeout) if refresh_timeout else await read
                     if method == "home":
                         seen = {}
                         for section in raw["sections"]:
@@ -324,7 +329,10 @@ async def _catalog_page(method, *args, **kwargs):
                     done.exception()
             task.add_done_callback(finished)
         if snapshot is None:
-            return deepcopy(await asyncio.shield(task))
+            read = asyncio.shield(task)
+            # An existing refresh may belong to an unrelated, unbounded latest
+            # request. Bound this reader without cancelling that shared work.
+            return deepcopy(await asyncio.wait_for(read, refresh_timeout) if refresh_timeout else await read)
     return snapshot["payload"]
 
 
@@ -387,8 +395,10 @@ async def get_category_manga(slug, page=1):
     return await asyncio.to_thread(_remember, f"truyenqq:category:{slug}:{page}", value)
 
 
-async def get_filtered(*, genres=(), page=1, sort="updated_desc", status=None, overlay_latest=True):
-    value = await _catalog_page("discover", page=page, genres=genres, sort=sort, status=status)
+async def get_filtered(*, genres=(), page=1, sort="updated_desc", status=None, overlay_latest=True,
+                       background_refresh=True, refresh_timeout=None):
+    value = await _catalog_page("discover", page=page, genres=genres, sort=sort, status=status,
+                                background_refresh=background_refresh, refresh_timeout=refresh_timeout)
     if not overlay_latest:
         return value
     return await asyncio.to_thread(_overlay_latest, value, page=page, genres=genres, status=status, latest_order=sort == "updated_desc")

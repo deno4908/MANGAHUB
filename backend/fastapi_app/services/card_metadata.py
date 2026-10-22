@@ -11,19 +11,32 @@ from fastapi_app.services.request_coalescing import coalesce_reads
 
 _qq_slots = asyncio.Semaphore(3)
 _pending_reads = set()
+_pending_identifiers = {}
 _BATCH_WAIT_SECONDS = 3.0
 
 
-def _retain(task):
+def _retain(task, identifiers=()):
     _pending_reads.add(task)
+    for identifier in identifiers:
+        _pending_identifiers.setdefault(identifier, set()).add(task)
 
     def finished(done):
         _pending_reads.discard(done)
+        for identifier in identifiers:
+            tasks = _pending_identifiers.get(identifier, set())
+            tasks.discard(done)
+            if not tasks:
+                _pending_identifiers.pop(identifier, None)
         if not done.cancelled():
             done.exception()
 
     task.add_done_callback(finished)
     return task
+
+
+def has_pending_reads(identifiers):
+    return any(not task.done() for identifier in identifiers
+               for task in _pending_identifiers.get(identifier, ()))
 
 
 def _read(key, values=None):
@@ -61,7 +74,7 @@ def cached_metadata(identifier, values=None):
 
 
 @coalesce_reads
-async def _qq_metadata(identifier, title=None):
+async def _qq_metadata(identifier, title=None, *, source_timeout=None):
     existing = await asyncio.to_thread(cached_metadata, identifier)
     if existing:
         return existing
@@ -72,18 +85,21 @@ async def _qq_metadata(identifier, title=None):
         return None
     if re.fullmatch(r"[0-9a-f]{24}", identifier):
         return None  # An old OTruyen ObjectId does not identify a QQ book.
-    async with _qq_slots:
-        try:
-            value = (await qq.run_live("saved_metadata", identifier, title)
-                     if valid_title
-                     else await qq.run_live("basic", identifier))
-            item = _from_qq(await asyncio.to_thread(qq._item, value))
-            await asyncio.to_thread(cache.set, f"catalog:card-metadata:v1:{identifier}", json.dumps(item), ttl=3600)
-            return item
-        except HTTPException as error:
-            if error.status_code == 404:
-                return None
-            raise
+    async def fetch():
+        async with _qq_slots:
+            try:
+                value = (await qq.run_live("saved_metadata", identifier, title)
+                         if valid_title
+                         else await qq.run_live("basic", identifier))
+                item = _from_qq(await asyncio.to_thread(qq._item, value))
+                await asyncio.to_thread(cache.set, f"catalog:card-metadata:v1:{identifier}", json.dumps(item), ttl=3600)
+                return item
+            except HTTPException as error:
+                if error.status_code == 404:
+                    return None
+                raise
+    # Include time queued for the source semaphore in an interactive deadline.
+    return await asyncio.wait_for(fetch(), source_timeout) if source_timeout else await fetch()
 
 
 def _from_mdx(raw):
@@ -137,7 +153,7 @@ async def _mdx_metadata(identifiers):
     return found
 
 
-async def get_many(identifiers, titles=None):
+async def get_many(identifiers, titles=None, *, source_timeout=None):
     from fastapi_app.routers.manga import _extract_mangadex_id
     result = {}
     missing_mdx = {}
@@ -164,11 +180,11 @@ async def get_many(identifiers, titles=None):
             pass
     async def truyen_qq(identifier):
         try:
-            result[identifier] = await _qq_metadata(identifier, (titles or {}).get(identifier))
-        except (HTTPException, RuntimeError):
+            result[identifier] = await _qq_metadata(identifier, (titles or {}).get(identifier), source_timeout=source_timeout)
+        except (HTTPException, RuntimeError, asyncio.TimeoutError):
             pass
-    jobs = ([_retain(create_task(manga_dex()))] if missing_mdx else [])
-    jobs.extend(_retain(create_task(truyen_qq(identifier))) for identifier in missing_qq)
+    jobs = ([_retain(create_task(manga_dex()), tuple(missing_mdx))] if missing_mdx else [])
+    jobs.extend(_retain(create_task(truyen_qq(identifier)), (identifier,)) for identifier in missing_qq)
     if jobs:
         # Return the ready labels without making every card wait for one slow
         # source. Shared reads finish warming the cache for the client's retry.
