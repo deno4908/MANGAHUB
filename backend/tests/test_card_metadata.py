@@ -106,6 +106,10 @@ def test_slow_source_does_not_hold_ready_titles_and_finishes_shared_cache(memory
         first = await asyncio.wait_for(cards.get_many([MDX_ID, LEGACY]), 0.2)
         assert first == {MDX_ID: {"id": MDX_ID, "title": "Vợ tôi là quỷ vương"}}
         gate.set()
+        # The background read includes thread-backed cache writes. Releasing
+        # the source gate does not guarantee they finish within the 20ms batch
+        # response budget, particularly while the full suite is running.
+        await asyncio.wait_for(asyncio.gather(*tuple(cards._pending_reads)), 1)
         second = await cards.get_many([MDX_ID, LEGACY])
         assert second[LEGACY]["title"] == TITLE
         assert LEGACY not in first  # returned snapshot is not mutated later
