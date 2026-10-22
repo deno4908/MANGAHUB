@@ -7,6 +7,8 @@ const objectId = '65b1234567890abcdef12345';
 it('uses the manga identifier rather than a bookmark or follow row UUID', () => {
   expect(getSavedMangaDetailPath({ id: mdx, manga_slug: 'old-book' })).toBe('/manga/old-book');
   expect(getSavedMangaDetailPath({ id: 'row', manga_slug: `mdx-${mdx}` })).toBe(`/manga/${mdx}`);
+  expect(getSavedMangaDetailPath({ id: 'row', manga_slug: `mangadex:${mdx}` })).toBe(`/manga/${mdx}`);
+  expect(resolveSavedMangaCover(`mangadex:${mdx}`, `/api/manga/mangadex-cover/${mdx}`).primary).toContain(`/api/manga/mangadex-cover/${mdx}`);
   expect(getSavedMangaDetailPath({ manga_slug: objectId, manga_source_slug: 'matched-book-123' })).toBe('/manga/matched-book-123');
 });
 

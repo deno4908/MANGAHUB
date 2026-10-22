@@ -92,7 +92,7 @@ export function normalizeMangaDexId(value?: string | null): string | null {
   if (normalized.startsWith("mdx-")) {
     normalized = normalized.slice(4);
   }
-  if (normalized.startsWith("mangadex-")) {
+  if (normalized.startsWith("mangadex-") || normalized.startsWith("mangadex:")) {
     normalized = normalized.slice("mangadex-".length);
   }
   if (isOTruyenRouteId(normalized)) return null;
