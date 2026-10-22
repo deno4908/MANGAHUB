@@ -27,7 +27,7 @@ def _identity(identifier, values=None):
 def _key(source, identifier, values=None):
     revision_key = f"catalog:book-version:{source}:{identifier}"
     revision = (cache.get(revision_key) if values is None else values.get(revision_key)) or ""
-    return f"catalog:card-chapter:v2:{source}:{identifier}:rev={revision}"
+    return f"catalog:card-chapter:v3:{source}:{identifier}:rev={revision}"
 
 
 def _from_qq(item):
@@ -62,6 +62,8 @@ def _read(source, identifier, values=None):
         hint = card_metadata._read(f"truyenqq:cover-hint:{identifier}", values) or {}
         if time.time() - float(hint.get("card_observed_at") or 0) < CHAPTER_TTL:
             chapter = _from_qq(hint.get("card") or {})
+            if chapter and not chapter.get("publish_at"):
+                chapter = None  # Older card hints omitted the source update label.
     return {"chapter": chapter, "pending": False} if chapter else None
 
 

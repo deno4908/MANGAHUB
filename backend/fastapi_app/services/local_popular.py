@@ -27,10 +27,9 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
             labels.update(batch)
         await asyncio.to_thread(remember_matches, {key: item for key, item in labels.items()
                                                   if not item or item.get("source") != "uploaded"})
-        # Missing keys mean a slow/failed source, not a confirmed missing book.
-        # Do not silently publish a QQ ranking with its most-viewed titles absent.
-        if any(slug not in labels for slug in aliases):
-            raise HTTPException(503, "Đang đồng bộ danh sách phổ biến. Vui lòng thử lại.")
+    # Unresolved aliases continue warming in retained background jobs. Show only
+    # verified cards, and let the browser refresh this provisional ranking.
+    pending = any(slug not in labels for slug in aliases)
 
     ranked = {}
     excluded = set()
@@ -58,6 +57,10 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
     rows = sorted(ranked.values(), key=lambda row: (-row["views"], row["slug"]))
     offset = (page - 1) * limit
     selected = rows[offset:offset + limit]
+    if pending:
+        return {"data": {"items": selected, "ranking_pending": True, "params": {"pagination": {
+            "currentPage": page, "totalItemsPerPage": limit, "totalItems": None,
+            "totalPages": max(page, (len(rows) + limit - 1) // limit)}}}}
     if len(selected) == limit:
         # No source crawl is needed while the requested page is entirely local.
         return {"data": {"items": selected, "params": {"pagination": {

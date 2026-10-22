@@ -63,7 +63,8 @@ def test_first_response_is_immediate_and_shared_jobs_finish_in_background(memory
 
 def test_warm_qq_aliases_and_mangadex_chapters_need_no_network(memory, monkeypatch):
     qq._item({"id": "18078", "url": f"https://truyenqqko.com/truyen-tranh/{CANONICAL}", "title": "Native title",
-              "chapters": [{"number": "46", "url": f"https://truyenqqko.com/truyen-tranh/{CANONICAL}-chap-46"}]})
+              "chapters": [{"number": "46", "updated_at": "2026-10-22",
+                            "url": f"https://truyenqqko.com/truyen-tranh/{CANONICAL}-chap-46"}]})
     memory[mdx._latest_chapter_cache_key(MDX, "vi")] = json.dumps({"id": CHAPTER, "chapter_name": "450", "verified_head": True})
     source = AsyncMock(side_effect=AssertionError("No source request for warm cards"))
     monkeypatch.setattr(qq, "run_live", source)
@@ -121,6 +122,21 @@ def test_incomplete_search_card_does_not_hide_real_qq_latest_chapter():
         assert len(calls) == 1
     finally:
         service.close()
+
+
+def test_qq_old_card_without_time_refreshes_the_actual_chapter_date(memory, monkeypatch):
+    qq._item({"id": "18078", "url": f"https://truyenqqko.com/truyen-tranh/{CANONICAL}", "title": "Book",
+              "latest_chapter": {"number": "46"}})
+    source = AsyncMock(return_value={"id": "18078", "url": f"https://truyenqqko.com/truyen-tranh/{CANONICAL}",
+        "title": "Book", "updated_at": "2026-10-22", "latest_chapter": {"number": "46"}})
+    monkeypatch.setattr(qq, "run_live", source)
+    async def check():
+        assert (await cards.get_many([CANONICAL]))[CANONICAL]["pending"]
+        await asyncio.gather(*list(cards._jobs.values()))
+        chapter = (await cards.get_many([CANONICAL]))[CANONICAL]["chapter"]
+        assert chapter["chapter_name"] == "46" and chapter["publish_at"].startswith("2026-10-22")
+    asyncio.run(check())
+    source.assert_awaited_once_with("basic_latest", CANONICAL)
 
 
 def test_time_ago_text_is_never_fabricated_as_a_chapter_number():

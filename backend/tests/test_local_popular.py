@@ -57,14 +57,24 @@ def test_qq_ranking_preserves_genre_status_hidden_and_mature_filters(monkeypatch
     assert [row["slug"] for row in result["data"]["items"]] == ["action-4"]
 
 
-def test_qq_does_not_misrepresent_a_slow_high_ranked_title_as_missing(monkeypatch):
-    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: {"waiting-1": 100})
-    monkeypatch.setattr(card_metadata, "get_many", AsyncMock(return_value={}))
+def test_qq_shows_verified_ranking_while_slow_legacy_titles_finish(monkeypatch):
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: {"waiting-1": 100, "ready-2": 50})
+    metadata = AsyncMock(side_effect=[{"ready-2": qq("ready-2")},
+                                     {"waiting-1": qq("waiting-1"), "ready-2": qq("ready-2")}])
+    monkeypatch.setattr(card_metadata, "get_many", metadata)
     monkeypatch.setattr(local_popular, "remember_matches", lambda values: None)
-    with pytest.raises(HTTPException) as error:
-        asyncio.run(local_popular.qq_popular(page=1, limit=24, genres=[], status="", show_mature=True,
-                                           hidden={}, db=EmptyDB()))
-    assert error.value.status_code == 503
+    source = AsyncMock(side_effect=AssertionError("No zero-view filler while ranking is pending"))
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", source)
+    async def run():
+        args = dict(page=1, limit=2, genres=[], status="", show_mature=True, hidden={}, db=EmptyDB())
+        pending = await local_popular.qq_popular(**args)
+        ready = await local_popular.qq_popular(**args)
+        return pending["data"], ready["data"]
+    pending, ready = asyncio.run(run())
+    assert pending["ranking_pending"] is True
+    assert [row["slug"] for row in pending["items"]] == ["ready-2"]
+    assert [row["views"] for row in ready["items"]] == [100, 50]
+    assert not ready.get("ranking_pending")
 
 
 def test_mangadex_popular_endpoint_uses_global_local_ranking_not_upstream_follows(monkeypatch):

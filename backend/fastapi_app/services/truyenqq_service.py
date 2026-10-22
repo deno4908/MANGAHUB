@@ -203,7 +203,8 @@ def _item(value: dict, observed=None, *, cover_hints=None) -> dict:
             "view_count": 0, "local_view_count": 0, "views": 0,
             "updatedAt": _timestamp(value.get("updated_at"), observed),
             "source_updated_at": value.get("updated_at"),
-            "chaptersLatest": [_chapter(latest, slug, observed)] if latest else []}
+            "chaptersLatest": [_chapter({**latest, "updated_at": latest.get("updated_at") or value.get("updated_at")},
+                                        slug, observed)] if latest else []}
     if value.get("url"):
         card = {key: item[key] for key in ("slug", "name", "cover_url", "category", "status", "chaptersLatest")}
         observed_at = datetime.fromisoformat(observed).timestamp() if observed else time.time()
@@ -290,7 +291,7 @@ def _overlay_latest(payload, *, page=1, genres=(), status=None, latest_order=Fal
 
 async def _catalog_page(method, *args, **kwargs):
     digest = hashlib.sha256(json.dumps([method, args, kwargs], sort_keys=True).encode()).hexdigest()
-    key = "truyenqq:page-snapshot:v2:" + digest
+    key = "truyenqq:page-snapshot:v3:" + digest
     snapshot = await asyncio.to_thread(_json_cached, key)
     if not isinstance(snapshot, dict) or not isinstance(snapshot.get("payload"), dict):
         snapshot = None

@@ -47,7 +47,7 @@ class CardMetadataRequest(BaseModel):
 
 @router.post("/chapters/latest/batch")
 async def card_latest_chapters(payload: CardMetadataRequest, db=Depends(get_supabase_public)):
-    from fastapi_app.services import card_chapters, catalog_visibility
+    from fastapi_app.services import card_chapters, card_metadata, catalog_visibility
     requested = [value.lower() for value in payload.identifiers]
     uploaded = await catalog_visibility.published_uploads(db, requested)
     external = [identifier for identifier in requested if identifier not in uploaded]
@@ -55,8 +55,12 @@ async def card_latest_chapters(payload: CardMetadataRequest, db=Depends(get_supa
     found.update({identifier: {"chapter": None, "pending": False} for identifier in uploaded})
     await asyncio.to_thread(catalog_visibility.remember_matches,
         {identifier: None for identifier, item in found.items() if item.get("state") == "unavailable"})
+    pending_aliases = [identifier for identifier, result in found.items() if hidden and not result.get("chapter")]
+    metadata = await asyncio.to_thread(cache.get_many,
+        [key for identifier in pending_aliases for key in card_metadata.metadata_keys(identifier)]) if pending_aliases else {}
     for identifier, result in found.items():
-        canonical = (result.get("chapter") or {}).get("slug", "")
+        canonical = ((result.get("chapter") or {}).get("slug")
+                     or (card_metadata.cached_metadata(identifier, metadata) or {}).get("slug", ""))
         if _hidden_reason_for_slug(hidden, identifier) or _hidden_reason_for_slug(hidden, canonical):
             found[identifier] = {"chapter": None, "pending": False}
     return {"items": found}

@@ -1067,6 +1067,12 @@ const getLatestSortTimestamp = (manga: Manga): number => {
   if (cached !== undefined) return cached;
 
   const isMangaDexItem = isMangaDexSlug(String(manga.id || ''));
+  const displayedChapter = pickLatestReadableChapter(manga.chapters || []);
+  const displayedTs = parseTime(displayedChapter?.uploadDate);
+  if (displayedTs > 0) {
+    latestSortTimestampCache.set(manga, displayedTs);
+    return displayedTs;
+  }
   let chapterTs = 0;
   if (Array.isArray(manga.chapters)) {
     for (const chapter of manga.chapters) {
@@ -1823,7 +1829,8 @@ const BrowseManga = () => {
       hasLocalClientFilters ||
       Boolean(filters.status)
     );
-  const useMangaDexLatestFeedMode = false;
+  const useMangaDexLatestFeedMode = isMangaDexSourceTab && filters.sort === 'latest'
+    && mangaDexTranslatedLanguage === 'vi' && !mangaDexHasNarrowClientFilters;
   const mangaDexHasServerQueryableFilters =
     hasSearch ||
     filters.genres.length > 0 ||
@@ -1837,6 +1844,7 @@ const BrowseManga = () => {
   const useGlobalTopRatedMode = filters.sort === 'rating' && !useMangaDexServerRatingMode;
   const useMangaDexServerSearchMode =
     isMangaDexSourceTab &&
+    !useMangaDexLatestFeedMode &&
     !hasLocalClientFilters &&
     (
       mangaDexHasServerQueryableFilters ||
@@ -2286,7 +2294,8 @@ const BrowseManga = () => {
     ...qqPageOptions(page),
     enabled: browseUrlReady && useOTruyenFilteredServerMode && canQueryQQSelection,
     placeholderData: (previousData) => previousData,
-    refetchInterval: query => filters.sort === 'popular' && (query.state.error as Error & { status?: number })?.status === 503
+    refetchInterval: query => filters.sort === 'popular' && (query.state.data?.rankingPending ||
+      (query.state.error as Error & { status?: number })?.status === 503)
       ? 5000 : false,
   });
   const pagePrefetchBusy = useRef(false);
@@ -4810,9 +4819,9 @@ const BrowseManga = () => {
           parseChapterNumberFromText(latest?.chapter_title);
         if (!latestChapterText || !isValidChapterNumber(chapterNum)) continue;
 
-        const uploadDate = String(latest?.publish_at || '').trim() || new Date().toISOString();
+        const uploadDate = String(latest?.publish_at || '').trim();
         const latestChapter: Manga['chapters'][number] = {
-          id: `mdx-ch-${detailId}-latest`,
+          id: String(latest?.id || `mdx-ch-${detailId}-latest`),
           mangaId: detailId,
           number: chapterNum,
           title: chapterLabelFromNumber(chapterNum),
@@ -5197,6 +5206,11 @@ const BrowseManga = () => {
         : withMyRatings;
 
     const safeItems = ratingModeItems.filter((item) => !isUnresolvedPublicManga(item));
+    // Hydration can change the chapter date after the server page was sorted.
+    // Keep the order consistent with the dates actually rendered on the cards.
+    if (filters.sort === 'latest') {
+      safeItems.sort((a, b) => getLatestSortTimestamp(b) - getLatestSortTimestamp(a));
+    }
     if (showMatureContent) return safeItems;
     return safeItems.filter((item) => !isMatureManga(item));
   }, [
@@ -5350,6 +5364,11 @@ const BrowseManga = () => {
                   <Loader2 className="w-4 h-4 animate-spin text-primary" />
                 </div>
               )}
+              {isOTruyenSourceTab && filters.sort === 'popular' && otruyenFilteredServerQuery.data?.rankingPending && (
+                <p role="status" className="flex items-center justify-center gap-2 mb-4 text-sm text-muted-foreground">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Đang cập nhật xếp hạng lượt xem…
+                </p>
+              )}
               {activeBrowseQuery.isError && (
                 <div role="alert" className="rounded-xl border border-border bg-secondary/40 p-5 mb-4 text-center space-y-3">
                   <p className="text-muted-foreground font-medium">
@@ -5393,7 +5412,8 @@ const BrowseManga = () => {
                       <MangaPagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} onPageIntent={prefetchBrowsePage} />
                     </div>
                   )}
-                  <p className="text-muted-foreground font-medium">Không tìm thấy truyện nào phù hợp.</p>
+                  <p className="text-muted-foreground font-medium">{isOTruyenSourceTab && otruyenFilteredServerQuery.data?.rankingPending
+                    ? 'Đang tải các truyện đã xác minh…' : 'Không tìm thấy truyện nào phù hợp.'}</p>
                 </div>
               ) : null}
 

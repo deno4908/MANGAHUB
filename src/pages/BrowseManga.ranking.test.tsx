@@ -24,6 +24,7 @@ beforeEach(() => {
   vi.spyOn(mangaApi, 'getList').mockResolvedValue(page([]));
   vi.spyOn(mangaApi, 'getOTruyenFiltered').mockResolvedValue(page([]));
   vi.spyOn(mangaApi, 'searchMangaDex').mockResolvedValue(page([]));
+  vi.spyOn(mangaApi, 'getMangaDexLatestFeed').mockResolvedValue(page([]));
   vi.spyOn(mangaApi, 'getMangaDexViCatalog').mockResolvedValue({ mangas: [] });
   vi.spyOn(mangaApi, 'getMangaDexLatestChapters').mockResolvedValue({ items: {} });
   vi.spyOn(ratingApi, 'getTopRatedManga').mockResolvedValue({ items: [] });
@@ -55,4 +56,41 @@ it('resolves rated MangaDex covers in a metadata batch without fetching individu
   expect(screen.getByText('Rated MangaDex:0|')).toHaveAttribute('data-cover', cover);
   expect(batch).toHaveBeenCalledWith([mdx]);
   expect(detail).not.toHaveBeenCalled();
+});
+
+it('keeps QQ popularity visible while a legacy alias is still being resolved', async () => {
+  vi.mocked(mangaApi.getOTruyenFiltered).mockResolvedValue({ data: {
+    ...page([{ slug: 'ready-1', name: 'Verified QQ', source: 'truyenqq', local_view_count: 50 }]).data,
+    ranking_pending: true,
+  } });
+  show('/manga?source=truyenqq&sort=popular');
+  await screen.findByText('Verified QQ:50|');
+  expect(screen.getByRole('status')).toHaveTextContent('Đang cập nhật xếp hạng lượt xem');
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('uses the Vietnamese chapter feed for latest browsing without narrow filters', async () => {
+  vi.mocked(mangaApi.getMangaDexLatestFeed).mockResolvedValue(page([
+    { id: mdx, slug: mdx, name: 'Recent Vietnamese release', source: 'mangadex',
+      chaptersLatest: [{ id: '11111111-1111-4111-8111-111111111111', chapter_name: '1', publish_at: '2026-10-22T12:00:00Z' }] },
+  ]));
+  show('/manga?source=mangadex&sort=latest');
+  await screen.findByText('Recent Vietnamese release:0|');
+  expect(mangaApi.getMangaDexLatestFeed).toHaveBeenCalled();
+  expect(mangaApi.searchMangaDex).not.toHaveBeenCalled();
+});
+
+it('reorders latest results when hydrated chapter dates change, using the displayed chapter date', async () => {
+  const second = '77777777-7777-4777-8777-777777777777';
+  vi.mocked(mangaApi.searchMangaDex).mockResolvedValue(page([
+    { id: mdx, slug: mdx, name: 'One day old', source: 'mangadex',
+      chaptersLatest: [{ chapter_name: '1', publish_at: '2026-10-21T12:00:00Z' }] },
+    { id: second, slug: second, name: 'Just published', source: 'mangadex',
+      chaptersLatest: [{ chapter_name: '1', publish_at: '2026-10-20T12:00:00Z' }] },
+  ]));
+  vi.mocked(mangaApi.getMangaDexLatestChapters).mockResolvedValue({ items: {
+    [second]: { id: '22222222-2222-4222-8222-222222222222', chapter_name: '2', publish_at: '2026-10-22T12:00:00Z' },
+  } });
+  show('/manga?source=mangadex&sort=latest&status=ongoing');
+  await waitFor(() => expect(screen.getByTestId('ranked-cards')).toHaveTextContent('Just published:0|One day old:0|'));
 });

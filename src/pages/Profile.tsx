@@ -650,6 +650,7 @@ const Profile = () => {
 
 /* === OVERVIEW TAB === */
 const OverviewTab = ({ user, stats, followedManga, historyItems }: { user: any; stats: any; followedManga: any[]; historyItems: any[] }) => {
+  const followedScroll = useRef<HTMLDivElement>(null);
   const { labels, weeklyActivity } = (() => {
     const now = new Date();
     const result = [];
@@ -763,11 +764,11 @@ const OverviewTab = ({ user, stats, followedManga, historyItems }: { user: any; 
       )}
 
       {followedManga.length > 0 && (
-        <div>
+        <div className="min-w-0">
           <h3 className="text-sm font-bold mb-3 flex items-center gap-2"><Heart className="w-4 h-4 text-red-400" /> Đang theo dõi</h3>
           <div className="relative group/scroll">
-            <div id="followed-scroll" className="flex gap-3 overflow-x-auto scrollbar-hide pb-2 scroll-smooth">
-              {followedManga.slice(0, 6).map((m: any) => (
+            <div ref={followedScroll} id="followed-scroll" className="flex gap-3 overflow-x-auto scrollbar-hide pb-2 scroll-smooth">
+              {followedManga.map((m: any) => (
                 <Link key={m.manga_slug || m.id} to={getSavedMangaDetailPath(m)} className="shrink-0 w-28 group">
                   <OptimizedImage src={m.manga_thumb || m.cover || ''} fallbackSrc={m.manga_thumb_fallback || undefined} alt="" className="w-28 h-40 rounded-xl object-cover border border-border/50 group-hover:border-primary/50 transition-all" />
                   <p className="text-xs font-bold mt-1.5 line-clamp-2 group-hover:text-primary transition-colors">{m.manga_title || m.title}</p>
@@ -775,20 +776,22 @@ const OverviewTab = ({ user, stats, followedManga, historyItems }: { user: any; 
               ))}
             </div>
             <button
-              onClick={() => document.getElementById('followed-scroll')?.scrollBy({ left: -200, behavior: 'smooth' })}
+              type="button" aria-label="Cuộn truyện theo dõi sang trái"
+              onClick={() => followedScroll.current?.scrollBy({ left: -Math.max(200, followedScroll.current.clientWidth * 0.8), behavior: 'smooth' })}
               className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-2 w-7 h-7 rounded-full bg-background/90 border border-border shadow-md flex items-center justify-center opacity-0 group-hover/scroll:opacity-100 transition-opacity z-10"
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
             <button
-              onClick={() => document.getElementById('followed-scroll')?.scrollBy({ left: 200, behavior: 'smooth' })}
+              type="button" aria-label="Cuộn truyện theo dõi sang phải"
+              onClick={() => followedScroll.current?.scrollBy({ left: Math.max(200, followedScroll.current.clientWidth * 0.8), behavior: 'smooth' })}
               className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-2 w-7 h-7 rounded-full bg-background/90 border border-border shadow-md flex items-center justify-center opacity-0 group-hover/scroll:opacity-100 transition-opacity z-10"
             >
               <ChevronRight className="w-4 h-4" />
             </button>
           </div>
           {followedManga.length > 6 && (
-            <Link to="/bookmarks" className="flex items-center justify-center gap-1 mt-3 text-xs font-semibold text-primary hover:underline">
+            <Link to="/following" className="flex items-center justify-center gap-1 mt-3 text-xs font-semibold text-primary hover:underline">
               Xem tất cả ({followedManga.length}) →
             </Link>
           )}

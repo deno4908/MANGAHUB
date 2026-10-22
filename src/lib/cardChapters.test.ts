@@ -11,7 +11,9 @@ it('recognizes missing or obsolete chapters and keeps real source chapters', () 
   const manga = { id: 'legacy-book', source: 'truyenqq', chapters: [] } as unknown as Manga;
   expect(needsCardChapter(manga)).toBe(true);
   expect(needsCardChapter({ ...manga, chapters: [{ id: 'old-otruyen-object-id', number: 99 }] as any })).toBe(true);
-  expect(needsCardChapter({ ...manga, chapters: [{ id: 'qq--book-123--46', number: 46 }] as any })).toBe(false);
+  expect(needsCardChapter({ ...manga, chapters: [{ id: 'qq--book-123--46', number: 46 }] as any })).toBe(true);
+  expect(needsCardChapter({ ...manga, chapters: [{ id: 'qq--book-123--46', number: 46,
+    uploadDate: '2026-10-23T00:00:00Z' }] as any })).toBe(false);
   expect(needsCardChapter({ ...manga, source: 'uploaded' })).toBe(false);
   expect(needsCardChapter({ ...manga, id: mdx, availableTranslatedLanguages: ['en'] })).toBe(false);
   const english = { ...manga, id: mdx, chapters: [{ id: chapter, number: 44, translatedLanguage: 'en' }] as any };

@@ -136,6 +136,20 @@ def test_qq_adapter_discards_source_views(live):
     assert item["view_count"] == item["local_view_count"] == 0
 
 
+def test_qq_latest_chapter_inherits_the_source_update_label(live):
+    value = {"id": "123", "url": f"https://truyenqqko.com/truyen-tranh/{SLUG}", "title": "Test",
+             "updated_at": "5 Phút Trước", "latest_chapter": {
+                 "number": "45", "title": "Chapter 45", "url": f"https://truyenqqko.com/truyen-tranh/{SLUG}-chap-45"}}
+    item = qq._item(value, "2026-10-23T12:00:00+00:00")
+    assert item["chaptersLatest"][0]["updatedAt"] == item["updatedAt"] == "2026-10-23T11:54:00+00:00"
+    value["latest_chapter"]["updated_at"] = "2026-10-20"
+    item = qq._item(value, "2026-10-23T12:00:00+00:00")
+    assert item["chaptersLatest"][0]["updatedAt"].startswith("2026-10-20")
+    value.pop("updated_at")
+    value["latest_chapter"].pop("updated_at")
+    assert qq._item(value)["chaptersLatest"][0]["updatedAt"] == ""
+
+
 def test_qq_uses_fast_cdn_without_waiting_for_slow_original(live, monkeypatch):
     release = threading.Event()
     def request(url, **kwargs):

@@ -27,7 +27,8 @@ export function needsCardChapter(manga: Manga): boolean {
   if (!canHydrateChapter(manga)) return false;
   return !(manga.chapters || []).some(chapter => nativeChapter(manga, chapter)
     && ((Number.isFinite(chapter.number) && chapter.number >= 0)
-      || (chapter.number !== -1 && Boolean(chapter.title?.trim()))));
+      || (chapter.number !== -1 && Boolean(chapter.title?.trim())))
+    && (Boolean(normalizeMangaDexId(manga.id)) || Number.isFinite(Date.parse(chapter.uploadDate))));
 }
 
 export function applyCardChapter(manga: Manga, latest: CardChapter): Manga {

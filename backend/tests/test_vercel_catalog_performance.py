@@ -141,7 +141,8 @@ def test_48_ready_chapter_cards_need_three_batch_reads_and_no_single_reads(monke
     for slug in ids:
         values[f"truyenqq:cover-hint:{slug}"] = json.dumps({"card_observed_at": time.time(), "card": {
             "slug": slug, "name": "Book", "category": [], "chaptersLatest": [{
-                "chapter_name": "1", "chapter_api_data": f"qq--{slug}--1"}]}})
+                "chapter_name": "1", "updatedAt": "2026-10-22T12:00:00Z",
+                "chapter_api_data": f"qq--{slug}--1"}]}})
     cache = Mock()
     cache.get.side_effect = AssertionError("One Redis round trip per card must not return")
     cache.get_many.side_effect = lambda keys: {key: values.get(key) for key in keys}
