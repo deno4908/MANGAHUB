@@ -3,8 +3,9 @@ FastAPI application — main REST API service.
 """
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -540,5 +541,8 @@ app.include_router(editor.router, prefix="/api/editor", tags=["Image Editor"])
 
 
 @app.get("/health")
-async def health():
+async def health(response: Response):
+    revision = os.getenv("VERCEL_GIT_COMMIT_SHA", "")
+    if len(revision) == 40 and all(char in "0123456789abcdef" for char in revision.lower()):
+        response.headers["X-MangaHub-Revision"] = revision[:12]
     return {"status": "ok", "service": "fastapi-api"}

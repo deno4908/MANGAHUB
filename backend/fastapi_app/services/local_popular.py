@@ -1,11 +1,14 @@
 """Paginate QQ by MangaHub views before filling with unread source titles."""
 import asyncio
 import copy
+import logging
 
 from fastapi import HTTPException
 
 from fastapi_app.services import card_metadata, truyenqq_service
 from fastapi_app.services.catalog_visibility import published_uploads, remember_matches
+
+logger = logging.getLogger(__name__)
 
 
 async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
@@ -18,9 +21,26 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
     labels = {}
     if aliases:
         async def resolve(group):
-            uploaded = await published_uploads(db, group)
-            external = [identifier for identifier in group if identifier not in uploaded]
-            return {**uploaded, **(await card_metadata.get_many(external) if external else {})}
+            values = await asyncio.to_thread(card_metadata.cache.get_many,
+                [key for identifier in group for key in card_metadata.metadata_keys(identifier)])
+            verified = {identifier: item for identifier in group
+                        if (item := card_metadata.cached_metadata(identifier, values))
+                        and item.get("source") == "truyenqq"}
+            unknown = [identifier for identifier in group if identifier not in verified]
+            if not unknown:
+                return verified
+            try:
+                uploaded = await published_uploads(db, unknown)
+            except HTTPException as error:
+                if error.status_code != 503:
+                    raise
+                # A queued publication check must not discard already verified
+                # QQ books. Unknown entries stay pending, without being marked
+                # missing or sent to the external source as local uploads.
+                logger.warning("QQ popularity publication check deferred status=503")
+                return verified
+            external = [identifier for identifier in unknown if identifier not in uploaded]
+            return {**verified, **uploaded, **(await card_metadata.get_many(external) if external else {})}
         batches = await asyncio.gather(*(resolve(aliases[i:i + 48])
                                         for i in range(0, len(aliases), 48)))
         for batch in batches:
@@ -67,16 +87,25 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
             "currentPage": page, "totalItemsPerPage": limit, "totalItems": None,
             "totalPages": max(page + 1, (len(rows) + limit - 1) // limit)}}}}
 
-    # Source sorting has a different metric. Only its zero-local-view titles may
-    # fill the tail, with exclusions applied before pagination to avoid repeats.
+    # Every filler has zero local views, so ties may use the working latest
+    # listing. Do not depend on QQ's unrelated upstream popularity endpoint.
     needed = max(0, offset - len(rows)) + limit - len(selected)
     unread = []
     seen = set(excluded)
     source_page = 1
     total = 0
     while len(unread) < needed:
-        payload = await truyenqq_service.get_filtered(genres=genres, page=source_page,
-                                                     sort="views_desc", status=status or None)
+        try:
+            payload = await truyenqq_service.get_filtered(genres=genres, page=source_page,
+                                                         sort="updated_desc", status=status or None)
+        except HTTPException:
+            if not selected and not unread:
+                raise
+            # Filler availability is independent of the verified local ranking.
+            # Keep those books on screen and retry the remaining tail later.
+            pending = True
+            logger.warning("QQ popularity filler deferred; keeping verified local ranking")
+            break
         data = payload.get("data") or {}
         source_items = data.get("items") or []
         pagination = (data.get("params") or {}).get("pagination") or {}
@@ -98,4 +127,4 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
     selected += unread[start:start + limit - len(selected)]
     pagination = {"currentPage": page, "totalItemsPerPage": limit, "totalItems": max(total, len(rows)),
                   "totalPages": max(1, (max(total, len(rows)) + limit - 1) // limit)}
-    return {"data": {"items": selected, "params": {"pagination": pagination}}}
+    return {"data": {"items": selected, "ranking_pending": pending, "params": {"pagination": pagination}}}

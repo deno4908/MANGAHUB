@@ -42,6 +42,7 @@ def test_qq_popular_paginates_local_counts_before_source_order_and_keeps_alias_v
     rows = asyncio.run(run())
     assert [row["slug"] for row in rows] == ["top-book-2", "slow-source-1", "third-book-3", "unread-book-4"]
     assert [row["views"] for row in rows] == [101, 4, 3, 0]
+    assert source.call_args.kwargs["sort"] == "updated_desc"
 
 
 def test_qq_ranking_preserves_genre_status_hidden_and_mature_filters(monkeypatch):
@@ -179,3 +180,49 @@ def test_popularity_does_not_mark_a_local_upload_as_missing_on_qq(monkeypatch):
     assert result["data"]["items"][0]["source"] == "uploaded"
     assert remember == [{}]
     external.assert_not_awaited()
+
+
+def test_slow_publication_checks_keep_verified_qq_and_do_not_misclassify_uploads(monkeypatch):
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: {"ready-1": 90, "own-book": 10})
+    monkeypatch.setattr(card_metadata.cache, "get_many", lambda keys: {})
+    monkeypatch.setattr(card_metadata, "cached_metadata", lambda identifier, values: qq("ready-1") if identifier == "ready-1" else None)
+    publications = AsyncMock(side_effect=HTTPException(503, "Database read pending"))
+    monkeypatch.setattr(local_popular, "published_uploads", publications)
+    external = AsyncMock(side_effect=AssertionError("Unverified local publications must not be queried on QQ"))
+    monkeypatch.setattr(card_metadata, "get_many", external)
+    monkeypatch.setattr(local_popular, "remember_matches", lambda values: None)
+    result = asyncio.run(local_popular.qq_popular(page=1, limit=24, genres=[], status="", show_mature=True,
+                                                hidden={}, db=EmptyDB()))["data"]
+    assert result["ranking_pending"] is True
+    assert [(row["slug"], row["views"]) for row in result["items"]] == [("ready-1", 90)]
+    publications.assert_awaited_once()
+    assert publications.call_args.args[1] == ["own-book"]
+    external.assert_not_awaited()
+
+
+def test_warm_qq_popularity_does_not_need_an_extra_publication_database_read(monkeypatch):
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: {"ready-1": 90})
+    monkeypatch.setattr(card_metadata.cache, "get_many", lambda keys: {})
+    monkeypatch.setattr(card_metadata, "cached_metadata", lambda identifier, values: qq("ready-1"))
+    publications = AsyncMock(side_effect=AssertionError("Verified QQ identity needs no local upload query"))
+    monkeypatch.setattr(local_popular, "published_uploads", publications)
+    monkeypatch.setattr(local_popular, "remember_matches", lambda values: None)
+    result = asyncio.run(local_popular.qq_popular(page=1, limit=1, genres=[], status="", show_mature=True,
+                                                hidden={}, db=EmptyDB()))["data"]
+    assert result["items"][0]["views"] == 90
+    assert not result.get("ranking_pending")
+    publications.assert_not_awaited()
+
+
+def test_source_filler_outage_does_not_discard_the_local_popularity_ranking(monkeypatch):
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: {"ranked-1": 90})
+    monkeypatch.setattr(card_metadata.cache, "get_many", lambda keys: {})
+    monkeypatch.setattr(card_metadata, "cached_metadata", lambda identifier, values: qq("ranked-1"))
+    monkeypatch.setattr(local_popular, "remember_matches", lambda values: None)
+    source = AsyncMock(side_effect=HTTPException(502, "Temporary source outage"))
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", source)
+    result = asyncio.run(local_popular.qq_popular(page=1, limit=24, genres=[], status="", show_mature=True,
+                                                hidden={}, db=EmptyDB()))["data"]
+    assert [(row["slug"], row["views"]) for row in result["items"]] == [("ranked-1", 90)]
+    assert result["ranking_pending"] is True
+    assert source.call_args.kwargs["sort"] == "updated_desc"
