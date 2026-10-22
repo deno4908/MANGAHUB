@@ -11,7 +11,8 @@ PREFIX = "catalog:qq-sync:v1:"
 
 def legacy_qq_identifier(identifier):
     value = str(identifier or "").strip().lower()
-    if value.startswith("mdx-") or re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", value):
+    from fastapi_app.routers.manga import _extract_mangadex_id
+    if _extract_mangadex_id(value):
         return False
     return bool(value and not re.search(r"-\d+$", value))
 

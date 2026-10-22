@@ -51,6 +51,10 @@ beforeEach(() => {
     thumb: mdx.thumb_url, views: 100 }] });
   vi.spyOn(ratingApi, 'getTopRatedManga').mockResolvedValue({ items: [{ manga_slug: mdxId, average: 9, count: 1 }] });
   vi.spyOn(ratingApi, 'getBatchRatings').mockResolvedValue({ ratings: {}, my_scores: {} });
+  vi.spyOn(mangaApi, 'getCardMetadata').mockResolvedValue({ items: { [mdxId]: {
+    id: mdxId, slug: mdxId, title: mdx.name, source: 'mangadex', cover_url: mdx.thumb_url, content_rating: 'safe',
+  } } });
+  vi.spyOn(mangaApi, 'getMangaDexLatestChapters').mockResolvedValue({ items: {} });
   vi.spyOn(announcementApi, 'getActive').mockResolvedValue({ announcements: [] });
 });
 afterEach(() => { cleanup(); client.clear(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -123,4 +127,24 @@ it('keeps a banner visible when the selected MangaDex slide disappears into a sm
   expect(screen.getByRole('heading', { name: 'Truyện số 4' })).toBeInTheDocument();
   rerender(<MemoryRouter><HeroSlider manga={adaptListData(page([qq])).items} /></MemoryRouter>);
   expect(screen.getByRole('heading', { name: qq.name })).toBeInTheDocument();
+});
+
+it('retains MangaDex ranking entries when the independent homepage feed fails', async () => {
+  show();
+  expect(await screen.findByRole('heading', { level: 2, name: qq.name })).toBeInTheDocument();
+  // Let deferred ranking queries run; the old global outage filter dropped these rows.
+  await waitFor(() => expect(mangaApi.getTrending).toHaveBeenCalled());
+  await waitFor(() => expect(within(section('Phổ biến nhất')).getByText(mdx.name)).toBeInTheDocument());
+  await waitFor(() => expect(within(section('Đánh giá cao')).getByText(mdx.name)).toBeInTheDocument());
+});
+
+it('does not let one failed MangaDex cover erase other MangaDex rankings', async () => {
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([mdx]));
+  show();
+  const image = (await screen.findAllByRole('img', { name: mdx.name }))[0];
+  fireEvent.error(image);
+  fireEvent.error(image);
+  await waitFor(() => expect(mangaApi.getTrending).toHaveBeenCalled());
+  await waitFor(() => expect(within(section('Phổ biến nhất')).getByText(mdx.name)).toBeInTheDocument());
+  await waitFor(() => expect(within(section('Đánh giá cao')).getByText(mdx.name)).toBeInTheDocument());
 });

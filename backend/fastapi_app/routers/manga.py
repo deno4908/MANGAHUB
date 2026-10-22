@@ -130,7 +130,7 @@ COMBINED_LIST_TTL_SECONDS = 120
 COMBINED_LIST_STALE_TTL_SECONDS = 900
 COMBINED_LIST_MDX_TIMEOUT_SECONDS = 6.0
 TRENDING_CACHE_TTL_SECONDS = 120
-TRENDING_CACHE_VERSION = "v16-truyenqq"
+TRENDING_CACHE_VERSION = "v17-source-independent"
 TRENDING_ENABLE_NETWORK_DETAIL_ENRICH = False
 MANGADEX_STARTUP_WARMUP_ENABLED = str(
     os.getenv("MANGADEX_STARTUP_WARMUP_ENABLED", "false") or "false"
@@ -578,6 +578,8 @@ def _extract_mangadex_id(value: Any) -> str | None:
         return None
     if normalized.startswith("mdx-"):
         normalized = normalized[4:]
+    if normalized.startswith(("mangadex-", "mangadex:")):
+        normalized = normalized[9:]
     if _is_otruyen_route_uuid(normalized):
         return None
     return normalized if _MANGADEX_ID_RE.fullmatch(normalized) else None
@@ -619,6 +621,8 @@ def _hidden_slug_candidates(value: Any) -> list[str]:
     if mangadex_id:
         candidates.add(mangadex_id)
         candidates.add(f"mdx-{mangadex_id}")
+        candidates.add(f"mangadex-{mangadex_id}")
+        candidates.add(f"mangadex:{mangadex_id}")
 
     return list(candidates)
 
@@ -2946,13 +2950,18 @@ async def otruyen_filtered_manga(
         return {"status": "success", "data": {"items": [], "params": {"pagination": {
             "currentPage": page, "totalItemsPerPage": limit, "totalItems": 0, "totalPages": 1}}}}
 
-    # QQ supports these filters on one source page; no cross-page crawl needed.
-    payload = await truyenqq_service.get_filtered(
-        genres=genre_values, page=page,
-        sort={"popular": "views_desc", "newest": "created_desc", "oldest": "created_asc"}.get(normalized_sort, "updated_desc"),
-        status=normalized_status if normalized_status in {"ongoing", "completed"} else None,
-    )
     hidden = await _get_hidden_slugs(db)
+    if normalized_sort == "popular":
+        from fastapi_app.services.local_popular import qq_popular
+        payload = await qq_popular(page=page, limit=limit, genres=genre_values, status=normalized_status,
+                                   show_mature=show_mature, hidden=hidden, db=db)
+    else:
+        payload = await truyenqq_service.get_filtered(
+            genres=genre_values, page=page,
+            sort={"newest": "created_desc", "oldest": "created_asc"}.get(normalized_sort, "updated_desc"),
+            status=normalized_status if normalized_status in {"ongoing", "completed"} else None,
+        )
+        await _async_attach_local_views_to_otruyen_payload(payload, db)
     items = payload["data"]["items"]
     payload["data"]["items"] = _filter_hidden(items, hidden)
     if not show_mature:
@@ -3036,7 +3045,7 @@ def _fetch_local_views_lookup(db: Any) -> dict[str, int]:
             continue
         lookup[slug] = max(lookup.get(slug, 0), views)
         cleaned = _clean_slug(slug)
-        if cleaned and cleaned != slug:
+        if cleaned and cleaned != slug and not _extract_mangadex_id(slug):
             lookup[cleaned] = max(lookup.get(cleaned, 0), views)
 
     _manga_views_lookup_cache = lookup
@@ -3055,7 +3064,7 @@ def _bump_manga_views_lookup_cache(slug: Any, delta: int = 1) -> None:
 
     aliases = [normalized]
     cleaned = _clean_slug(normalized)
-    if cleaned and cleaned != normalized:
+    if cleaned and cleaned != normalized and not _extract_mangadex_id(normalized):
         aliases.append(cleaned)
 
     for alias in aliases:
@@ -5943,6 +5952,12 @@ async def mangadex_search(
                 user=user,
                 db=db,
             )
+        elif normalized_sort == "popular":
+            data = await _build_mangadex_popular_with_local_views(
+                keyword=keyword, page=page, limit=limit, translated_language=effective_translated_language,
+                genre_values=genre_values, original_language_values=original_language_values,
+                status_values=status_values, content_ratings=content_ratings, hidden=hidden, db=db,
+            )
         else:
             data = await mangadex_service.search_manga(
                 keyword=keyword,
@@ -7328,6 +7343,19 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
                     if merged_meta:
                         detail_meta_map[source_slug] = merged_meta
 
+            from fastapi_app.services.card_metadata import get_many
+            mdx_ids = [slug for slug in slugs if _extract_mangadex_id(slug)]
+            mdx_labels = {}
+            for start in range(0, len(mdx_ids), 48):
+                labels = await get_many(mdx_ids[start:start + 48])
+                mdx_labels.update(labels)
+                for slug, label in labels.items():
+                    if not label:
+                        continue
+                    detail_meta_map[slug] = {**detail_meta_map.get(slug, {}),
+                        "title": label["title"], "thumb": label.get("cover_url", ""),
+                        "genres": label.get("genres", []), "content_rating": label.get("content_rating", "")}
+
             merged_items: list[dict] = []
             for row in valid_rows:
                 slug = row["slug"]
@@ -7340,7 +7368,7 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
                     or str(history_meta.get("title") or history_meta.get("thumb") or "").strip()
                     or str(detail_meta.get("title") or detail_meta.get("thumb") or "").strip()
                 )
-                if not has_resolved_meta and is_mangadex_slug:
+                if is_mangadex_slug and slug in mdx_labels and mdx_labels[slug] is None and not has_resolved_meta:
                     continue
                 resolved_title = _pick_best_trending_title(
                     slug,
@@ -7352,7 +7380,7 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
                     source_meta.get("thumb")
                     or detail_meta.get("thumb")
                     or history_meta.get("thumb")
-                    or ("" if is_mangadex_slug else _fallback_trending_thumb(slug))
+                    or (f"/api/manga/mangadex-cover/{_extract_mangadex_id(slug)}" if is_mangadex_slug else _fallback_trending_thumb(slug))
                 )
                 resolved_genres = source_meta.get("genres") or detail_meta.get("genres") or []
                 resolved_tags = source_meta.get("tags") or detail_meta.get("tags") or []
@@ -7407,7 +7435,7 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
                     }
                 )
             for item in trending:
-                key = _normalize_title_key(item.get("title")) or item.get("slug", "")
+                key = item.get("slug", "")
                 existing = next((x for x in merged_items if x.get("key") == key), None)
                 if existing:
                     existing["views"] += int(item.get("views") or 0)

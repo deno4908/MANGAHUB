@@ -47,11 +47,8 @@ def _normalize_manga_slug(value: str) -> str:
     normalized = str(value or "").strip().lower()
     if not normalized:
         return ""
-    if normalized.startswith("mdx-"):
-        candidate = normalized[4:]
-        if _MANGADEX_ID_RE.fullmatch(candidate):
-            return candidate
-    return normalized
+    from fastapi_app.routers.manga import _extract_mangadex_id
+    return _extract_mangadex_id(normalized) or normalized
 
 
 def _slug_candidates(value: str) -> list[str]:
@@ -60,7 +57,7 @@ def _slug_candidates(value: str) -> list[str]:
         return []
     candidates = [normalized]
     if _MANGADEX_ID_RE.fullmatch(normalized):
-        candidates.append(f"mdx-{normalized}")
+        candidates.extend([f"mdx-{normalized}", f"mangadex-{normalized}", f"mangadex:{normalized}"])
     return candidates
 
 

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -23,6 +23,18 @@ function show(items: Manga[], client: QueryClient, maxItems?: number) {
     <MangaGrid manga={items} maxItems={maxItems} />
   </MemoryRouter></QueryClientProvider>);
 }
+
+it('loads a known MangaDex CDN cover immediately and recovers an expired filename through its ID', async () => {
+  const client = new QueryClient();
+  const id = '55555555-5555-4555-8555-555555555555';
+  const cover = `https://uploads.mangadex.org/covers/${id}/fast.jpg.256.jpg`;
+  show([card(id, { source: 'mangadex', cover, chapters: [{ id: '22222222-2222-4222-8222-222222222222', number: 2 } as any] })], client);
+  const image = screen.getByRole('img', { name: `Readable title ${id}` });
+  expect(image).toHaveAttribute('src', cover);
+  fireEvent.error(image);
+  await waitFor(() => expect(image.getAttribute('src')).toContain(`/api/manga/mangadex-cover/${id}`));
+  client.clear();
+});
 
 it('keeps omitted and missing legacy QQ matches out of the initial grid, then admits verified matches with their old statistics', async () => {
   const client = new QueryClient();

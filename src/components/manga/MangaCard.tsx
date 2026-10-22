@@ -5,6 +5,7 @@ import { Star, Eye, Clock, ArrowRight } from 'lucide-react';
 import { Manga } from '@/types/manga';
 import { mangaApi } from '@/lib/api';
 import { adaptMangaDetail } from '@/lib/adapters';
+import { resolveSavedMangaCover } from '@/lib/savedManga';
 import { getMangaDetailPath, getMangaSource } from '@/lib/mangaLinks';
 import OptimizedImage from '@/components/ui/OptimizedImage';
 import { useCallback } from 'react';
@@ -24,64 +25,7 @@ const statusClass: Record<string, string> = {
   hiatus: 'tag-hiatus',
   cancelled: 'tag-cancelled',
 };
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const DEFAULT_CARD_COVER_FALLBACK = '/no-cover.svg';
-
-const isImageProxyUrl = (value: string): boolean => {
-  const raw = String(value || '').trim();
-  if (!raw) return false;
-  try {
-    return new URL(raw, API_BASE).pathname === '/api/images/img';
-  } catch {
-    return false;
-  }
-};
-
-const isMangaDexImageUrl = (value: string): boolean => {
-  const raw = String(value || '').trim();
-  if (!/^https?:\/\//i.test(raw)) return false;
-  try {
-    const host = new URL(raw).hostname.toLowerCase();
-    return host.endsWith('uploads.mangadex.org') || host.endsWith('mangadex.network');
-  } catch {
-    return false;
-  }
-};
-
-const toMangaDexProxyImageUrl = (value: string): string => {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  if (isImageProxyUrl(raw)) return raw;
-  if (!isMangaDexImageUrl(raw)) return '';
-  return `${API_BASE}/api/images/img?url=${encodeURIComponent(raw)}`;
-};
-
-const resolveMangaDexCardCover = (cover?: string, fallback?: string): string => {
-  const candidates = [cover, fallback].map((value) => String(value || '').trim()).filter(Boolean);
-  const proxied = candidates.find(isImageProxyUrl);
-  if (proxied) return proxied;
-
-  for (const candidate of candidates) {
-    const proxiedCandidate = toMangaDexProxyImageUrl(candidate);
-    if (proxiedCandidate) return proxiedCandidate;
-  }
-
-  return candidates[0] || DEFAULT_CARD_COVER_FALLBACK;
-};
-
-const resolveMangaDexCurrentCover = (mangaId?: string): string => {
-  const normalized = String(mangaId || '').trim();
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(normalized)) {
-    return '';
-  }
-  return `${API_BASE}/api/manga/mangadex-cover/${encodeURIComponent(normalized)}`;
-};
-
-const isUsableCoverSrc = (value?: string): boolean => {
-  const raw = String(value || '').trim().toLowerCase();
-  if (!raw) return false;
-  return !raw.includes('/no-cover.svg') && !raw.includes('/no-cover-dark.svg');
-};
 
 const formatCompactViews = (value: number): string => {
   const views = Math.max(0, Math.floor(Number(value) || 0));
@@ -233,14 +177,9 @@ const MangaCard = ({ manga: originalManga, index = 0, variant = 'default' }: Man
     : chapterDisplay(lastChapter, manga.status, isMangaDexItem);
   const chapterMetaLabel = chapterTime ? `${chapterLabel} - ${chapterTime}` : chapterLabel;
   const safeCoverFallback = String(manga.coverProxy || '').trim() || DEFAULT_CARD_COVER_FALLBACK;
-  const mangaDexCatalogCover = resolveMangaDexCardCover(manga.cover, manga.coverProxy);
-  const mangaDexCurrentCover = resolveMangaDexCurrentCover(manga.id);
-  const coverSrc = isMangaDexItem
-    ? (isUsableCoverSrc(mangaDexCatalogCover) ? mangaDexCatalogCover : (mangaDexCurrentCover || DEFAULT_CARD_COVER_FALLBACK))
-    : manga.cover;
-  const coverFallbackSrc = isMangaDexItem
-    ? (mangaDexCurrentCover || (isUsableCoverSrc(mangaDexCatalogCover) ? mangaDexCatalogCover : DEFAULT_CARD_COVER_FALLBACK))
-    : safeCoverFallback;
+  const mangaDexCover = resolveSavedMangaCover(manga.id, manga.cover, manga.coverProxy);
+  const coverSrc = isMangaDexItem ? mangaDexCover.primary : manga.cover;
+  const coverFallbackSrc = isMangaDexItem ? mangaDexCover.fallback : safeCoverFallback;
   const coverFallbackDelayMs = isMangaDexItem ? 8000 : isOTruyenItem ? 10_000 : undefined;
   const coverPriority = variant === 'horizontal' ? index < 3 : index < 4;
   const coverMaxRetries = isMangaDexItem || isOTruyenItem ? 2 : 1;

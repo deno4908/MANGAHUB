@@ -22,6 +22,7 @@ import {
 } from '@/lib/adapters';
 import { isEcchiManga, isMatureManga } from '@/lib/contentFilter';
 import { normalizeMangaDexId } from '@/lib/mangaLinks';
+import { resolveSavedMangaCover } from '@/lib/savedManga';
 import { applyBatchRatingsPayload } from '@/lib/mangaRatings';
 import type { Manga } from '@/types/manga';
 
@@ -355,29 +356,13 @@ const scheduleHomeDeferredWork = (callback: () => void, timeoutMs = HOME_DEFERRE
   const timer = window.setTimeout(callback, timeoutMs);
   return () => window.clearTimeout(timer);
 };
-// Proxy URL = primary (local disk cache after startup warmup = instant)
-const toMangaDexCoverProxy = (coverUrl?: string, mangaId?: string) => {
-  const raw = String(coverUrl || '').trim();
-  try {
-    const parsed = new URL(raw, API_BASE);
-    if (parsed.pathname === '/api/images/img') {
-      return /^https?:\/\//i.test(raw) ? raw : `${API_BASE}${raw}`;
-    }
-  } catch {
-    // Fall through to the regular cover handling.
-  }
-  if (raw.startsWith('http://') || raw.startsWith('https://')) {
-    return `${API_BASE}/api/images/img?url=${encodeURIComponent(raw)}`;
-  }
-  return DEFAULT_CARD_COVER_FALLBACK;
+// Use the known CDN cover, with ID-based recovery provided by MangaCard.
+const mangaDexCoverSrc = (coverUrl?: string, mangaId?: string) => {
+  return resolveSavedMangaCover(mangaId || '', coverUrl).primary;
 };
 
-// Direct CDN URL kept only for metadata/debug. Cards should prefer the local proxy.
-const toMangaDexCoverDirect = (coverUrl?: string): string => {
-  const raw = String(coverUrl || '').trim();
-  if (raw.startsWith('https://') || raw.startsWith('http://')) return raw;
-  return '';
-};
+
+
 
 const parseTime = (value?: string) => {
   const ts = Date.parse(String(value || ''));
@@ -1260,7 +1245,7 @@ const Index = () => {
         continue;
       }
       const cover = rawThumb
-        ? (isMdx ? toMangaDexCoverProxy(rawThumb, slug) : thumbUrl(rawThumb, slug))
+        ? (isMdx ? mangaDexCoverSrc(rawThumb, slug) : thumbUrl(rawThumb, slug))
         : DEFAULT_CARD_COVER_FALLBACK;
       const coverProxy = rawThumb
         ? (isMdx ? DEFAULT_CARD_COVER_FALLBACK : (thumbFallbackUrl(rawThumb, slug) || rawThumb || DEFAULT_CARD_COVER_FALLBACK))
@@ -1367,9 +1352,8 @@ const Index = () => {
   });
 
   const guestTopRatedRows = useMemo<TopRatedGlobalItem[]>(
-    () => (((guestTopRatedData as any)?.items || []) as TopRatedGlobalItem[])
-      .filter(row => !isMangaDexUnavailable || !normalizeMangaDexId(row.manga_slug)),
-    [guestTopRatedData, isMangaDexUnavailable],
+    () => (((guestTopRatedData as any)?.items || []) as TopRatedGlobalItem[]),
+    [guestTopRatedData],
   );
 
   const topRatedKnownLookup = useMemo(() => {
@@ -1398,7 +1382,7 @@ const Index = () => {
       seen.add(slug);
       if (topRatedKnownLookup.has(slug)) continue;
       missing.push(slug);
-      if (missing.length >= 6) break;
+      if (missing.length >= GUEST_TOP_RATED_LIMIT) break;
     }
 
     return missing;
@@ -1406,9 +1390,11 @@ const Index = () => {
 
   const { data: guestTopRatedResolvedMap = {} } = useQuery({
     queryKey: ['rating', 'top', 'guest', 'card-metadata-v2', guestTopRatedMissingSlugs],
-    queryFn: () => loadHomeCardMetadata(guestTopRatedMissingSlugs, queryClient),
+    queryFn: ({ queryKey }) => loadHomeCardMetadata(guestTopRatedMissingSlugs, queryClient,
+      ready => queryClient.setQueryData(queryKey, ready)),
     enabled: canRunHomeDeferredQueries && guestTopRatedMissingSlugs.length > 0,
     staleTime: 10 * 60 * 1000,
+    refetchInterval: query => guestTopRatedMissingSlugs.some(id => !(id in (query.state.data || {}))) ? 5000 : false,
     retry: 0,
     placeholderData: (previousData) => previousData,
   });
@@ -1580,9 +1566,8 @@ const Index = () => {
   });
 
   const trendingRows = useMemo<TrendingMangaItem[]>(
-    () => (((trendingPayload as any)?.trending || []) as TrendingMangaItem[])
-      .filter(row => !isMangaDexUnavailable || !normalizeMangaDexId(row.slug)),
-    [trendingPayload, isMangaDexUnavailable],
+    () => (((trendingPayload as any)?.trending || []) as TrendingMangaItem[]),
+    [trendingPayload],
   );
 
   const popularFromTrending = useMemo<Manga[]>(() => {
@@ -1606,7 +1591,7 @@ const Index = () => {
       const rawThumb = toAbsoluteThumbUrl(String(row.thumb || '').trim());
       const isMdx = Boolean(detailId);
       const cover = rawThumb
-        ? (isMdx ? toMangaDexCoverProxy(rawThumb, detailId || slug) : thumbUrl(rawThumb, detailId || slug))
+        ? (isMdx ? mangaDexCoverSrc(rawThumb, detailId || slug) : thumbUrl(rawThumb, detailId || slug))
         : (base?.cover || DEFAULT_CARD_COVER_FALLBACK);
       const coverProxy = rawThumb
         ? (isMdx ? DEFAULT_CARD_COVER_FALLBACK : thumbFallbackUrl(rawThumb, slug) || rawThumb)

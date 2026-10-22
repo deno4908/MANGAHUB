@@ -789,7 +789,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
     const body = await res.json().catch(() => ({}));
     const detail = body?.detail;
     const msg = typeof detail === "string" ? detail : (body?.error || `API error: ${res.status}`);
-    throw new Error(msg);
+    throw Object.assign(new Error(msg), { status: res.status });
   }
   return res;
 }

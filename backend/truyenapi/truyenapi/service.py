@@ -167,6 +167,7 @@ class LiveService:
                     return self.source_url(comic["url"])
                 if len(matches) > 1:
                     raise HTTPException(404, "Không thể xác định duy nhất truyện QQ cho slug cũ")
+            raise HTTPException(404, "Không tìm thấy truyện QQ khớp chính xác slug cũ")
         bundle = self.catalog_bundle()
         comic = bundle["by_id"].get(identifier) or bundle["by_slug"].get(identifier)
         if comic:

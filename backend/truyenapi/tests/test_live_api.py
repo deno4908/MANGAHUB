@@ -216,6 +216,20 @@ def test_legacy_lookup_does_not_guess_between_books_with_the_same_title():
         service.close()
 
 
+def test_unmatched_legacy_book_does_not_crawl_all_sitemaps():
+    def handler(request):
+        assert request.url.path == "/frontend/search/search"
+        return httpx.Response(200, text='<div class="no_result">Không tìm thấy</div>')
+    service, calls = setup_service(handler)
+    try:
+        with pytest.raises(Exception) as error:
+            service.resolve("missing-old-title")
+        assert error.value.status_code == 404
+        assert len(calls) == 1
+    finally:
+        service.close()
+
+
 def test_nested_catalog_batch_and_image_workers_keep_request_context():
     authorization = ContextVar("verified_source_authorization", default=None)
     seen = []

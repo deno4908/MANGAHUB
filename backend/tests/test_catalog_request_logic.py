@@ -28,7 +28,7 @@ def isolate(monkeypatch):
     monkeypatch.setattr(manga, "_async_attach_ratings_to_items", AsyncMock())
 
 
-def test_popular_search_uses_one_native_page_with_filters(monkeypatch):
+def test_latest_search_uses_one_native_page_with_filters(monkeypatch):
     isolate(monkeypatch)
     expected = page([{"slug": "first"}, {"slug": "second"}], 2400)
     source = AsyncMock(return_value=expected)
@@ -36,7 +36,7 @@ def test_popular_search_uses_one_native_page_with_filters(monkeypatch):
     monkeypatch.setattr(manga, "_build_mangadex_popular_filtered_search", AsyncMock(side_effect=AssertionError("No candidate crawl")))
     result = asyncio.run(manga.mangadex_search(keyword="one piece", page=8, limit=24,
         genre_slugs="action", translated_language="vi", original_language="ja", status="ongoing",
-        sort="popular", show_mature=False, attach_ratings=False, filter_hidden=True, user=None, db=EmptyDB()))
+        sort="latest", show_mature=False, attach_ratings=False, filter_hidden=True, user=None, db=EmptyDB()))
     assert result["data"]["items"] == expected["data"]["items"]
     assert source.await_count == 1
     assert source.call_args.kwargs["page"] == 8

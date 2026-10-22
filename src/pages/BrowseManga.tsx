@@ -6,6 +6,8 @@ import { useSettingsStore } from '@/store/settingsStore';
 import { useUserStore } from '@/store/userStore';
 import { useCategoryManga, useCategories } from '@/hooks/useApi';
 import { mangaApi, ratingApi } from '@/lib/api';
+import { loadHomeCardMetadata } from '@/lib/homeCardMetadata';
+import { resolveSavedMangaCover } from '@/lib/savedManga';
 import { canCacheCover, warmCovers } from '@/lib/coverCache';
 import { adaptListData, adaptMangaDetail, thumbFallbackUrl, thumbUrl } from '@/lib/adapters';
 import { isMatureManga } from '@/lib/contentFilter';
@@ -123,7 +125,7 @@ const MANGADEX_VISIBLE_CHAPTER_FALLBACK_CONCURRENCY = 3;
 const MANGADEX_VISIBLE_CHAPTER_FALLBACK_CHAPTERS = 20;
 const MANGADEX_VISIBLE_CHAPTER_FALLBACK_TIMEOUT_MS = 8_000;
 const GUEST_TOP_RATED_LIMIT = 120;
-const GUEST_TOP_RATED_RESOLVE_MAX = 36;
+const GUEST_TOP_RATED_RESOLVE_MAX = GUEST_TOP_RATED_LIMIT;
 const MOJIBAKE_RE = /[ÃÂÄÅÆÐ]/;
 const NON_ASCII_RE = /[^\x00-\x7f]/;
 
@@ -573,28 +575,12 @@ const extractImageProxyTargetUrl = (value?: string): string => {
   }
 };
 
-// Return direct CDN URL — faster, no proxy cold-start latency
-const toMangaDexCoverDirect = (coverUrl?: string): string => {
-  const raw = String(coverUrl || '').trim();
-  if (raw.startsWith('https://') || raw.startsWith('http://')) return raw;
-  return '';
-};
 
-// Proxy URL used as fallback when direct CDN fails
-const toMangaDexCoverProxy = (coverUrl?: string, mangaId?: string): string => {
-  const raw = String(coverUrl || '').trim();
-  try {
-    const parsed = new URL(raw, API_BASE);
-    if (parsed.pathname === '/api/images/img') {
-      return /^https?:\/\//i.test(raw) ? raw : `${API_BASE}${raw}`;
-    }
-  } catch {
-    // Fall through to the regular cover handling.
-  }
-  if (raw.startsWith('http://') || raw.startsWith('https://')) {
-    return `${API_BASE}/api/images/img?url=${encodeURIComponent(raw)}`;
-  }
-  return DEFAULT_CARD_COVER_FALLBACK;
+
+
+// Recover saved proxy URLs while keeping known CDN covers direct.
+const mangaDexCoverSrc = (coverUrl?: string, mangaId?: string): string => {
+  return resolveSavedMangaCover(mangaId || '', coverUrl).primary;
 };
 
 const parseRelativeTime = (value: string): number => {
@@ -832,7 +818,7 @@ const getTrendingCoverSources = (item: { slug?: string; thumb?: string }): { cov
 
       if (isMangaDexCoverUrl(rawThumb)) {
         return {
-          cover: toMangaDexCoverProxy(rawThumb, slug),
+          cover: mangaDexCoverSrc(rawThumb, slug),
           coverProxy: DEFAULT_CARD_COVER_FALLBACK,
         };
       }
@@ -848,7 +834,7 @@ const getTrendingCoverSources = (item: { slug?: string; thumb?: string }): { cov
     const inferredProxyTarget = extractImageProxyTargetUrl(proxiedCover);
 
     return {
-      cover: isMdx ? (toMangaDexCoverProxy(rawThumb, slug) || proxiedCover) : proxiedCover,
+      cover: isMdx ? (mangaDexCoverSrc(rawThumb, slug) || proxiedCover) : proxiedCover,
       coverProxy: isMdx
         ? DEFAULT_CARD_COVER_FALLBACK
         : (thumbFallbackUrl(rawThumb, slug) || inferredProxyTarget || DEFAULT_CARD_COVER_FALLBACK),
@@ -1113,6 +1099,8 @@ const compareByPopularWithPriority = (
   b: Manga,
   priority: Map<string, number>,
 ): number => {
+  const viewDifference = getRealViewSortScore(b) - getRealViewSortScore(a);
+  if (viewDifference !== 0) return viewDifference;
   if (priority.size > 0) {
     const indexA = getMappedNumberByAlias(priority, a, 'min');
     const indexB = getMappedNumberByAlias(priority, b, 'min');
@@ -2298,6 +2286,8 @@ const BrowseManga = () => {
     ...qqPageOptions(page),
     enabled: browseUrlReady && useOTruyenFilteredServerMode && canQueryQQSelection,
     placeholderData: (previousData) => previousData,
+    refetchInterval: query => filters.sort === 'popular' && (query.state.error as Error & { status?: number })?.status === 503
+      ? 5000 : false,
   });
   const pagePrefetchBusy = useRef(false);
   const prefetchedCovers = useRef<() => void>(() => {});
@@ -3054,17 +3044,15 @@ const BrowseManga = () => {
           scanlationGroup: '',
         }];
       }
-      const coverDirect = toMangaDexCoverDirect(item.cover_url);
-      const coverProxy = toMangaDexCoverProxy(item.cover_url, item.id);
-      // Keep MangaDex covers on the local proxy so hotlink placeholders never reach cards.
+      const covers = resolveSavedMangaCover(item.id, item.cover_url);
       return {
         id: String(item.id || '').trim().toLowerCase(),
         title: pickDisplayTitle(item.id, item.title) || 'Chưa có tiêu đề',
         author: item.authors_text || 'MangaDex',
         artist: item.authors_text || 'MangaDex',
         description: '',
-        cover: coverProxy || coverDirect,
-        coverProxy: DEFAULT_CARD_COVER_FALLBACK,
+        cover: covers.primary,
+        coverProxy: covers.fallback,
         status: 'ongoing' as const,
         type: 'manga' as const,
         genres: item.genres || [],
@@ -3799,105 +3787,12 @@ const BrowseManga = () => {
   }, [guestTopRatedRows, guestTopRatedKnownLookup]);
 
   const { data: guestTopRatedResolvedMap = {} } = useQuery({
-    queryKey: ['rating', 'top', 'browse', 'guest', 'details-v1', guestTopRatedMissingSlugs],
-    queryFn: async () => {
-      const result: Record<string, Manga> = {};
-
-      await Promise.allSettled(
-        guestTopRatedMissingSlugs.map(async (slug) => {
-          const detailId = toMangaDexDetailId(slug);
-
-          if (detailId) {
-            const payload = await mangaApi.getMangaDexDetail(detailId, 1);
-            const item = (payload?.manga || {}) as any;
-            const chapterRows = Array.isArray(item.chapters) ? item.chapters : [];
-
-            const best = chapterRows
-              .map((chapter: any) => {
-                const chapterNum =
-                  parseChapterNumberFromText(chapter?.chapter) ||
-                  parseChapterNumberFromText(chapter?.chapter_with_groups) ||
-                  parseChapterNumberFromText(chapter?.title);
-                const chapterDate = String(
-                  chapter?.publish_at ||
-                    chapter?.readable_at ||
-                    chapter?.created_at ||
-                    chapter?.updated_at ||
-                    item?.updated_at ||
-                    '',
-                ).trim();
-
-                return {
-                  chapterNum,
-                  chapterDate,
-                  id: String(chapter?.id || '').trim(),
-                };
-              })
-              .filter((chapter) => isValidChapterNumber(chapter.chapterNum))
-              .sort((a, b) => {
-                const numberDiff = b.chapterNum - a.chapterNum;
-                if (numberDiff !== 0) return numberDiff;
-                return parseTime(b.chapterDate) - parseTime(a.chapterDate);
-              })[0];
-
-            const uploadDate =
-              best?.chapterDate ||
-              String(item?.updated_at || '').trim() ||
-              new Date().toISOString();
-            const rawGenres = Array.isArray(item.genres)
-              ? item.genres.map((genre: unknown) => repairMojibakeText(genre).trim()).filter(Boolean)
-              : [];
-
-            result[slug] = {
-              id: slug,
-              title: pickDisplayTitle(slug, item.title) || 'Chưa có tiêu đề',
-              author: repairMojibakeText(item.authors_text) || 'MangaDex',
-              artist: repairMojibakeText(item.authors_text) || 'MangaDex',
-              description: '',
-              cover: toMangaDexCoverProxy(item.cover_url, detailId),
-              coverProxy: DEFAULT_CARD_COVER_FALLBACK,
-              status: mapTrendingStatus(String(item.status || 'ongoing')),
-              type: 'manga',
-              genres: rawGenres,
-              tags: rawGenres
-                .map((genre) => genre.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''))
-                .filter(Boolean),
-              rating: 0,
-              ratingCount: 0,
-              myRating: null,
-              follows: 0,
-              views: Number(item.view_count || item.views || 0),
-              year: Number(item.year) || new Date().getFullYear(),
-              chapters: best
-                ? [{
-                    id: best.id || `mdx-ch-${detailId}-top`,
-                    mangaId: detailId,
-                    number: best.chapterNum,
-                    title: chapterLabelFromNumber(best.chapterNum),
-                    pages: [],
-                    uploadDate,
-                    scanlationGroup: '',
-                  }]
-                : [],
-              lastUpdated: uploadDate,
-              contentRating: String(item.content_rating || item.contentRating || '').trim().toLowerCase(),
-            };
-            return;
-          }
-
-          const raw = await mangaApi.getDetail(slug);
-          const adapted = adaptMangaDetail(raw);
-          result[slug] = {
-            ...adapted,
-            id: slug,
-          };
-        }),
-      );
-
-      return result;
-    },
+    queryKey: ['rating', 'top', 'browse', 'guest', 'card-metadata-v2', guestTopRatedMissingSlugs],
+    queryFn: ({ queryKey }) => loadHomeCardMetadata(guestTopRatedMissingSlugs, queryClient,
+      ready => queryClient.setQueryData(queryKey, ready)),
     enabled: browseUrlReady && useGlobalTopRatedMode && guestTopRatedMissingSlugs.length > 0,
     staleTime: 10 * 60 * 1000,
+    refetchInterval: query => guestTopRatedMissingSlugs.some(id => !(id in (query.state.data || {}))) ? 5000 : false,
     retry: 0,
     placeholderData: (previousData) => previousData,
   });
@@ -4150,7 +4045,7 @@ const BrowseManga = () => {
       }
 
       const cover = rawThumb
-        ? (isMdx ? toMangaDexCoverProxy(rawThumb, slug) : thumbUrl(rawThumb, slug))
+        ? (isMdx ? mangaDexCoverSrc(rawThumb, slug) : thumbUrl(rawThumb, slug))
         : DEFAULT_CARD_COVER_FALLBACK;
       const coverProxy = rawThumb
         ? (
@@ -5108,7 +5003,7 @@ const BrowseManga = () => {
           }
 
           const meta: MangaDexEnrichMeta = {
-            cover: coverUrl ? toMangaDexCoverProxy(coverUrl, detailId) : undefined,
+            cover: coverUrl ? mangaDexCoverSrc(coverUrl, detailId) : undefined,
             coverProxy: coverUrl ? DEFAULT_CARD_COVER_FALLBACK : undefined,
             genres,
             tags,

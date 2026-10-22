@@ -5,6 +5,16 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const PLACEHOLDER = '/no-cover.svg';
 type SavedRecord = Record<string, any>;
 
+/** Old saves may concatenate several titles. Only send the alias matching the stored slug. */
+export function savedMangaTitleHint(record: SavedRecord): string | undefined {
+  const title = repairMojibakeText(record.manga_title || record.title || record.name).trim();
+  const normalize = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/gi, 'd').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const lookup = savedMangaLookupId(record);
+  return [title, ...title.split(/\s+[–—-]\s+|\s*;\s*/)].find(alias =>
+    alias.length > 0 && alias.length <= 200 && normalize(alias) === lookup);
+}
+
 export function savedMangaId(record: SavedRecord): string {
   const raw = String(record.manga_slug || record.slug || record.manga_id || record.id || '').trim().toLowerCase();
   return normalizeMangaDexId(raw) || raw;
@@ -17,7 +27,8 @@ export function savedMangaLookupId(record: SavedRecord): string {
   const title = repairMojibakeText(record.manga_title || record.title || record.name).trim();
   if (!title || normalizeOTruyenObjectId(title) || normalizeMangaDexId(title)
       || /^(?:unknown|untitled|mangadex|chưa có tiêu đề|đang cập nhật)$/i.test(title)) return '';
-  const slug = title.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd')
+  const primaryTitle = title.split(/\s+[–—-]\s+|\s*;\s*/)[0];
+  const slug = primaryTitle.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd')
     .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   return slug.length <= 200 ? slug : '';
 }

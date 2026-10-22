@@ -4,12 +4,12 @@ import type { Manga } from '@/types/manga';
 import { normalizeMangaDexId } from '@/lib/mangaLinks';
 import { applyCardMetadata, isLegacyQQIdentifier, needsCanonicalTitle, requestCardMetadata } from '@/lib/cardMetadata';
 import { thumbUrl } from '@/lib/adapters';
-import { needsSavedCover, resolveSavedMangaCover, savedMangaId, savedMangaLookupId } from '@/lib/savedManga';
+import { needsSavedCover, resolveSavedMangaCover, savedMangaId, savedMangaLookupId, savedMangaTitleHint } from '@/lib/savedManga';
 
 const metadataOptions = (id: string, client: QueryClient, title?: string) => queryOptions({
   queryKey: ['manga', 'card-metadata', id],
   queryFn: () => requestCardMetadata(id, client, title),
-  staleTime: query => query.state.data === null ? 5 * 60 * 1000 : 60 * 60 * 1000,
+  staleTime: query => query.state.data === null ? (title ? 0 : 5 * 60 * 1000) : 60 * 60 * 1000,
   gcTime: 60 * 60 * 1000,
   retry: 2,
   retryDelay: (attempt: number) => 1000 * (attempt + 1),
@@ -48,7 +48,7 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
       && (refreshMetadata || isLegacyQQIdentifier(id) || needsCanonicalTitle(id, title) || (fillMissingCovers && needsSavedCover(cover)));
   }).map(savedMangaLookupId))] : [], [records, enabled, fillMissingCovers, refreshMetadata]);
   const savedTitles = useMemo(() => new Map((refreshMetadata ? records || [] : []).map(record => [
-    savedMangaLookupId(record), String(record.manga_title || record.title || record.name || '').trim(),
+    savedMangaLookupId(record), savedMangaTitleHint(record),
   ])), [records, refreshMetadata]);
   const metadata = useQueries({
     queries: ids.map(id => {
@@ -60,9 +60,14 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
   return useMemo(() => {
     if (!records) return records;
     const byId = new Map(ids.map((id, index) => [id, metadata[index]]));
-    return records.filter(record => retainUnavailable || record.source === 'uploaded' || record.is_user_upload
-      || !isLegacyQQIdentifier(recordId(record))
-      || (requireQQMatch && enabled ? Boolean(byId.get(savedMangaLookupId(record))) : byId.get(savedMangaLookupId(record)) !== null)).map(record => {
+    return records.filter(record => {
+      if (retainUnavailable || record.source === 'uploaded' || record.is_user_upload) return true;
+      const id = recordId(record);
+      const mustMatch = requireQQMatch && enabled &&
+        (isLegacyQQIdentifier(id) || (refreshMetadata && !normalizeMangaDexId(id)));
+      return mustMatch ? Boolean(byId.get(savedMangaLookupId(record)))
+        : !isLegacyQQIdentifier(id) || byId.get(savedMangaLookupId(record)) !== null;
+    }).map(record => {
       const id = recordId(record);
       const item = byId.get(savedMangaLookupId(record));
       if (!item || record.source === 'uploaded' || record.is_user_upload) return record;

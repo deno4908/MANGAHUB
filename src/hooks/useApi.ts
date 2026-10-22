@@ -508,7 +508,7 @@ export function useBookmarks() {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
-  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, retainUnavailable: true });
+  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true });
   return { ...query, data };
 }
 
@@ -619,7 +619,7 @@ export function useFollows() {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
-  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, retainUnavailable: true });
+  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true });
   return { ...query, data };
 }
 
@@ -742,7 +742,7 @@ export function useHistory(options: UseHistoryOptions = {}) {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
-  const data = useCanonicalMangaRecords(query.data, { enabled, fillMissingCovers: enrichThumbs, refreshMetadata: enrichThumbs, retainUnavailable: true });
+  const data = useCanonicalMangaRecords(query.data, { enabled, fillMissingCovers: enrichThumbs, refreshMetadata: enrichThumbs, requireQQMatch: true });
   return { ...query, data };
 }
 

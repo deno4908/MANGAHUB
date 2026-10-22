@@ -34,7 +34,8 @@ export function applyCardMetadata(manga: Manga, metadata: CardMetadata): Manga {
     pages: [], uploadDate: latest?.updatedAt || '', scanlationGroup: '' }] : manga.chapters;
   return { ...manga, title: metadata.title, source: metadata.source, slug: metadata.slug,
     chapterAvailability: manga.chapterAvailability === 'unavailable' ? undefined : manga.chapterAvailability,
-    cover: metadata.cover_url ? thumbUrl(metadata.cover_url, metadata.id) : manga.cover,
+    cover: metadata.cover_url ? resolveSavedMangaCover(metadata.id, metadata.cover_url).primary : manga.cover,
+    coverProxy: metadata.cover_url ? resolveSavedMangaCover(metadata.id, metadata.cover_url).fallback : manga.coverProxy,
     genres: metadata.genres?.length ? metadata.genres : manga.genres,
     tags: metadata.tags?.length ? metadata.tags : manga.tags,
     contentRating: metadata.content_rating || manga.contentRating, chapters };

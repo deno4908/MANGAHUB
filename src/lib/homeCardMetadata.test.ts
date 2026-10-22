@@ -30,3 +30,23 @@ it('fills home ranking labels through shared batches without requesting manga de
   expect(mdxDetail).not.toHaveBeenCalled();
   client.clear();
 });
+
+it('publishes ready MangaDex covers while another source is pending, and distinguishes 404 from a transport error', async () => {
+  const client = new QueryClient();
+  const mdx = '77777777-7777-4777-8777-777777777777';
+  let finish!: (value: any) => void;
+  vi.spyOn(mangaApi, 'getCardMetadata').mockImplementation(async ids => ids.includes(mdx)
+    ? { items: { [mdx]: { id: mdx, slug: mdx, title: 'Ready title', source: 'mangadex',
+        cover_url: `https://uploads.mangadex.org/covers/${mdx}/ready.jpg` } } }
+    : new Promise(resolve => { finish = resolve; }));
+  const publish = vi.fn();
+  const pending = loadHomeCardMetadata([mdx, 'missing-old-title', 'temporary-error'], client, publish);
+  await vi.waitFor(() => expect(publish).toHaveBeenCalledWith(expect.objectContaining({
+    [mdx]: expect.objectContaining({ title: 'Ready title' }),
+  })));
+  finish({ items: { 'missing-old-title': null } });
+  const result = await pending;
+  expect(result['missing-old-title']).toBeNull();
+  expect('temporary-error' in result).toBe(false);
+  client.clear();
+});

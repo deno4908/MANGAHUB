@@ -60,6 +60,22 @@ def test_native_qq_detail_keeps_native_id_and_ignores_unrelated_reference(cached
     fetch.assert_awaited_once_with("comic", CANONICAL)
 
 
+def test_verified_alternative_title_survives_another_function_cold_start(cached, monkeypatch):
+    alias = "saved-alternative-title"
+    cached["catalog:card-metadata:v1:" + alias] = json.dumps({
+        "id": CANONICAL, "slug": CANONICAL, "source": "truyenqq", "title": "A different source name"})
+    source = AsyncMock(return_value=native())
+    monkeypatch.setattr(qq, "run_live", source)
+    async def run():
+        item = (await qq.get_manga_detail(alias))["data"]["item"]
+        assert item["slug"] == item["id"] == alias
+        assert item["source_slug"] == CANONICAL
+        await qq.get_cover_info(alias)
+    asyncio.run(run())
+    assert source.await_args_list[0].args == ("comic", CANONICAL)
+    assert source.await_args_list[1].args == ("basic", CANONICAL)
+
+
 def test_legacy_route_cannot_bypass_a_hidden_native_qq_comic(cached, monkeypatch):
     monkeypatch.setattr(manga, "_get_hidden_slugs", AsyncMock(return_value={CANONICAL: "blocked"}))
     monkeypatch.setattr(manga, "_safe_query", lambda query: None)

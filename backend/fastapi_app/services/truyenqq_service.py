@@ -372,7 +372,8 @@ async def get_cover_info(identifier):
             return json.loads(raw)
         except ValueError:
             pass
-    return await run_live("basic", identifier)
+    canonical = await asyncio.to_thread(_cached_detail_identifier, identifier)
+    return await run_live("basic", canonical)
 
 
 async def get_total_count():
@@ -400,6 +401,11 @@ async def resolve_slug_from_id(manga_id):
 
 def _cached_detail_identifier(slug):
     """Reuse a QQ reference learned by cards instead of crawling every sitemap."""
+    from fastapi_app.services.card_metadata import cached_metadata
+    metadata = cached_metadata(slug) or {}
+    canonical = str(metadata.get("slug") or "")
+    if metadata.get("source") == "truyenqq" and re.fullmatch(r"[a-zA-Z0-9]+(?:-+[a-zA-Z0-9]+)*-\d+", canonical):
+        return canonical
     hint = _json_cached(f"truyenqq:cover-hint:{slug}")
     if isinstance(hint, dict) and isinstance(hint.get("url"), str):
         try:
@@ -432,7 +438,7 @@ async def get_manga_detail(slug):
     canonical = item["slug"]
     # Keep existing website IDs so ratings, views, comments and bookmarks keep
     # their original keys. Chapter tokens still carry the exact QQ comic ID.
-    if canonical != slug and (canonical.rsplit("-", 1)[0] == slug or normalized(item.get("name", "")) == normalized(slug)):
+    if canonical != slug:
         item["source_slug"] = canonical
         item["slug"] = item["id"] = slug
     return payload

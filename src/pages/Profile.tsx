@@ -371,7 +371,7 @@ const Profile = () => {
     [profileRatedPayload],
   );
   const ratedManga = useCanonicalMangaRecords(rawRatedManga, {
-    enabled: !!user, refreshMetadata: true, fillMissingCovers: true, retainUnavailable: true,
+    enabled: !!user, refreshMetadata: true, fillMissingCovers: true, requireQQMatch: true,
   }) || [];
   const profileMangaTitleBySlug = useMemo(() => {
     const titleBySlug: Record<string, string> = {};
@@ -1263,7 +1263,7 @@ const ListsTab = ({
   const activeList = allLists.find((list) => list.id === activeListId) || allLists.find((list) => list.items.length > 0) || allLists[0];
   const activeCustomId = activeList?.customId || '';
   const activeItems = useCanonicalMangaRecords(activeList?.items, {
-    refreshMetadata: true, fillMissingCovers: true, retainUnavailable: true,
+    refreshMetadata: true, fillMissingCovers: true, requireQQMatch: true,
   }) || [];
 
   useEffect(() => {
