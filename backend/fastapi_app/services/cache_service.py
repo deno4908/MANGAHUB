@@ -174,6 +174,16 @@ class _InMemoryCache:
             self._store.pop(key, None)
             self._dirty = True
 
+    def add(self, key: str, value: str, ttl: int = 300) -> bool:
+        with self._lock:
+            if key in self._store and self._store[key][1] > time.time():
+                return False
+            self._store[key] = (value, time.time() + ttl)
+            self._store.move_to_end(key)
+            self._prune_locked()
+            self._dirty = True
+            return True
+
     def get_many(self, keys):
         return {key: self.get(key) for key in dict.fromkeys(keys)}
 
@@ -210,6 +220,9 @@ class _RedisCache:
 
     def set(self, key: str, value: str, ttl: int = 300):
         self._client.setex(key, ttl, value)
+
+    def add(self, key: str, value: str, ttl: int = 300) -> bool:
+        return bool(self._client.set(key, value, ex=ttl, nx=True))
 
     def delete(self, key: str):
         self._client.delete(key)

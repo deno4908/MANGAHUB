@@ -66,6 +66,7 @@ it('keeps QQ popularity visible while a legacy alias is still being resolved', a
   show('/manga?source=truyenqq&sort=popular');
   await screen.findByText('Verified QQ:50|');
   expect(screen.getByRole('status')).toHaveTextContent('Đang cập nhật xếp hạng lượt xem');
+  expect(screen.getByRole('status').querySelector('.animate-spin')).toBeNull();
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
 

@@ -699,7 +699,7 @@ def _apply_override_fields(target: Any, override_row: dict[str, Any] | None) -> 
     target["admin_notes"] = override_row.get("admin_notes")
 
 
-async def _attach_overrides_to_otruyen_payload(payload: Any, db: Any) -> None:
+async def _attach_overrides_to_otruyen_payload(payload: Any, db: Any, *, attach_views: bool = True) -> None:
     if not isinstance(payload, dict):
         return
     items = (payload.get("data") or {}).get("items")
@@ -714,10 +714,10 @@ async def _attach_overrides_to_otruyen_payload(payload: Any, db: Any) -> None:
     if not slugs:
         return
 
-    override_rows, _ = await asyncio.gather(
-        _fetch_override_rows_by_slugs(db, slugs),
-        _async_attach_local_views_to_otruyen_payload(payload, db),
-    )
+    reads = [_fetch_override_rows_by_slugs(db, slugs)]
+    if attach_views:
+        reads.append(_async_attach_local_views_to_otruyen_payload(payload, db))
+    override_rows = (await asyncio.gather(*reads))[0]
     if not override_rows:
         for item in items:
             _apply_override_fields(item, None)
@@ -2971,7 +2971,7 @@ async def otruyen_filtered_manga(
     if not show_mature:
         payload["data"]["items"] = [item for item in payload["data"]["items"]
                                     if not _is_mature_metadata(item.get("content_rating"), item.get("category"), [])]
-    await _attach_overrides_to_otruyen_payload(payload, db)
+    await _attach_overrides_to_otruyen_payload(payload, db, attach_views=normalized_sort != "popular")
     if attach_ratings:
         await _async_attach_ratings_to_items(payload, db, user)
     return payload

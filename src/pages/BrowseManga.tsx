@@ -5359,14 +5359,14 @@ const BrowseManga = () => {
             </div>
           ) : (
             <>
-              {isFetching && displayItems.length > 0 && !isMangaDexServerPageTransition && (
+              {isFetching && displayItems.length > 0 && !isMangaDexServerPageTransition && !otruyenFilteredServerQuery.data?.rankingPending && (
                 <div className="flex justify-center mb-3">
                   <Loader2 className="w-4 h-4 animate-spin text-primary" />
                 </div>
               )}
               {isOTruyenSourceTab && filters.sort === 'popular' && otruyenFilteredServerQuery.data?.rankingPending && (
                 <p role="status" className="flex items-center justify-center gap-2 mb-4 text-sm text-muted-foreground">
-                  <Loader2 className="w-4 h-4 animate-spin" /> Đang cập nhật xếp hạng lượt xem…
+                  {displayItems.length === 0 && <Loader2 className="w-4 h-4 animate-spin" />} Đang cập nhật xếp hạng lượt xem…
                 </p>
               )}
               {activeBrowseQuery.isError && (

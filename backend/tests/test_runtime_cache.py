@@ -1,6 +1,7 @@
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -52,3 +53,16 @@ def test_bounded_disk_snapshot_prefers_recent_metadata_and_retains_lru_order(loc
     assert list(snapshot) == ["title", "page"]
     restored = OrderedDict(snapshot)
     assert restored.popitem(last=False)[0] == "title"
+
+
+def test_snapshot_creation_keeps_one_winner_until_expiry(local_cache):
+    def write(number):
+        return number, local_cache.add("ranking", str(number), ttl=90)
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        results = list(workers.map(write, range(32)))
+    winners = [number for number, won in results if won]
+    assert len(winners) == 1
+    assert local_cache.get("ranking") == str(winners[0])
+    local_cache._store["ranking"] = (str(winners[0]), time.time() - 1)
+    assert local_cache.add("ranking", "refreshed", ttl=90)
+    assert local_cache.get("ranking") == "refreshed"
