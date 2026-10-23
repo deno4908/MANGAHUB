@@ -76,8 +76,17 @@ export default function SiteAccessGate({ children }: { children: ReactNode }) {
   }, [client, key[1]]);
 
   const grantFresh = Date.now() < access.dataUpdatedAt + ACCESS_GRANT_MS;
+  // A background /auth/me or refresh failure can mark the existing account as
+  // restoring. It must not tear down an already approved reader. This applies
+  // only to the same known account and never extends the server grant's expiry.
+  const restoringApprovedViewer =
+    isRestoringSession &&
+    isLoggedIn &&
+    !!user?.id &&
+    wasAllowed.current &&
+    previousViewer.current === key[1];
   const allowed =
-    ready &&
+    (ready || restoringApprovedViewer) &&
     access.isFetchedAfterMount &&
     access.data?.allowed === true &&
     grantFresh;

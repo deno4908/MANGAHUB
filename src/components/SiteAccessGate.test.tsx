@@ -193,6 +193,48 @@ it("keeps an approved page and its caches through a failed background check", as
   expect(screen.queryByText("Chưa thể kiểm tra quyền truy cập")).toBeNull();
 });
 
+it("keeps a freshly approved account mounted while its session recovers in the background", async () => {
+  session.user = { id: "reader", role: "reader" };
+  session.isLoggedIn = true;
+  vi.mocked(siteAccessApi.getStatus).mockResolvedValue({ ...deny, allowed: true, authenticated: true });
+  const view = show("/manga?page=45");
+  await screen.findByText("Private reader content");
+  client.setQueryData(["manga", "page", 45], { items: ["cached-card"] });
+  vi.mocked(coverCache.clearCoverCache).mockClear();
+  session.isRestoringSession = true;
+  view.rerender(application());
+  expect(screen.getByText("Private reader content")).toBeInTheDocument();
+  expect(client.getQueryData(["manga", "page", 45])).toEqual({ items: ["cached-card"] });
+  expect(coverCache.clearCoverCache).not.toHaveBeenCalled();
+  expect(screen.queryByText("Đang kiểm tra quyền truy cập…")).toBeNull();
+});
+
+it("does not carry an approved grant to another account during session recovery", async () => {
+  session.user = { id: "reader", role: "reader" };
+  session.isLoggedIn = true;
+  vi.mocked(siteAccessApi.getStatus).mockResolvedValue({ ...deny, allowed: true, authenticated: true });
+  const view = show();
+  await screen.findByText("Private reader content");
+  session.user = { id: "different-reader", role: "reader" };
+  session.isRestoringSession = true;
+  view.rerender(application());
+  expect(screen.queryByText("Private reader content")).toBeNull();
+});
+
+it("expires an approved grant even while the same account is restoring", async () => {
+  vi.useFakeTimers();
+  session.user = { id: "reader", role: "reader" };
+  session.isLoggedIn = true;
+  vi.mocked(siteAccessApi.getStatus).mockResolvedValue({ ...deny, allowed: true, authenticated: true });
+  const view = show();
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  expect(screen.getByText("Private reader content")).toBeInTheDocument();
+  session.isRestoringSession = true;
+  view.rerender(application());
+  await act(async () => { await vi.advanceTimersByTimeAsync(61_000); });
+  expect(screen.queryByText("Private reader content")).toBeNull();
+});
+
 it("closes and clears caches when an approved grant cannot be renewed for a minute", async () => {
   vi.useFakeTimers();
   vi.mocked(siteAccessApi.getStatus).mockResolvedValue({ ...deny, enabled: false, allowed: true });

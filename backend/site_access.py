@@ -4,6 +4,7 @@ import time
 from uuid import UUID
 from contextvars import ContextVar
 from itertools import count
+from contextlib import contextmanager
 
 from itsdangerous import BadData, URLSafeTimedSerializer
 from config import config
@@ -16,6 +17,7 @@ CACHE_SECONDS = 3
 DEFAULT_MESSAGE = "Bạn không nằm trong whitelist của website. Vui lòng liên hệ admin để được cấp quyền truy cập."
 _cache = {}
 _lock = threading.RLock()
+_read_locks = {}
 source_authorization = ContextVar("site_access_source_authorization", default=None)
 
 
@@ -28,11 +30,40 @@ def _db():
     return get_supabase_admin()
 
 
+@contextmanager
+def _key_lock(key):
+    # A slow membership lookup must not hold the lock for every account and
+    # cached policy. Reference counts retain one lock for each active key only.
+    with _lock:
+        entry = _read_locks.setdefault(key, [threading.RLock(), 0])
+        entry[1] += 1
+    try:
+        with entry[0]:
+            yield
+    finally:
+        with _lock:
+            entry[1] -= 1
+            if entry[1] == 0:
+                _read_locks.pop(key, None)
+
+
+def _invalidate(key):
+    # Wait for an earlier read of this key before dropping its result. Otherwise
+    # a query started before revocation could restore a stale allowed value.
+    with _key_lock(key), _lock:
+        _cache.pop(key, None)
+
+
 def _read(key, *, force=False):
     with _lock:
         cached = _cache.get(key)
         if not force and cached and cached[0] > time.monotonic():
             return cached[1]
+    with _key_lock(key):
+        with _lock:
+            cached = _cache.get(key)
+            if not force and cached and cached[0] > time.monotonic():
+                return cached[1]
         try:
             rows = _db().table("system_settings").select("value").eq("key", key).limit(1).execute().data
             value = rows[0]["value"] if rows else {}
@@ -41,9 +72,10 @@ def _read(key, *, force=False):
         except Exception as error:
             # Never turn an unavailable policy store into anonymous access.
             raise AccessUnavailable("Không thể kiểm tra quyền truy cập. Vui lòng thử lại.") from error
-        if len(_cache) >= 2048:
-            _cache.clear()
-        _cache[key] = (time.monotonic() + CACHE_SECONDS, value)
+        with _lock:
+            if len(_cache) >= 2048:
+                _cache.clear()
+            _cache[key] = (time.monotonic() + CACHE_SECONDS, value)
         return value
 
 
@@ -68,8 +100,7 @@ def is_allowed(state, user):
 def set_state(enabled, message, actor):
     value = {"enabled": enabled, "message": (message or DEFAULT_MESSAGE).strip() or DEFAULT_MESSAGE}
     _db().table("system_settings").upsert({"key": SETTING_KEY, "value": value, "updated_by": actor}, on_conflict="key").execute()
-    with _lock:
-        _cache.pop(SETTING_KEY, None)
+    _invalidate(SETTING_KEY)
     return value
 
 
@@ -83,8 +114,7 @@ def set_member(user_id, allowed, actor):
         _db().table("system_settings").upsert({"key": key, "value": {"allowed": True}, "updated_by": actor}, on_conflict="key").execute()
     else:
         _db().table("system_settings").delete().eq("key", key).execute()
-    with _lock:
-        _cache.pop(key, None)
+    _invalidate(key)
 
 
 def list_members():
