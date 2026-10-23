@@ -81,6 +81,36 @@ it('limits active downloads and aborts queued covers after leaving a page', asyn
   expect(fetch).toHaveBeenCalledTimes(6);
 });
 
+it('leaves download slots available for visible covers while warming another page', async () => {
+  const finish: Array<() => void> = [];
+  vi.mocked(fetch).mockImplementation(() => new Promise(resolve => { finish.push(() => resolve(image())); }));
+  const prefetches = Array.from({ length: 6 }, (_, n) => acquireCover(cover(n), 'prefetch'));
+  expect(fetch).toHaveBeenCalledTimes(4);
+  const visible = acquireCover(cover(100), 'visible');
+  expect(fetch).toHaveBeenCalledTimes(5);
+  expect(vi.mocked(fetch).mock.calls[4][0]).toBe(cover(100));
+  expect(vi.mocked(fetch).mock.calls[4][1]).toMatchObject({ priority: 'high' });
+  const results = Promise.allSettled([...prefetches, visible].map(job => job.promise));
+  prefetches.forEach(job => job.release());
+  finish.forEach(done => done());
+  await results;
+  visible.release();
+});
+
+it('promotes a queued speculative cover when that image becomes visible', async () => {
+  const finish: Array<() => void> = [];
+  vi.mocked(fetch).mockImplementation(() => new Promise(resolve => { finish.push(() => resolve(image())); }));
+  const prefetches = Array.from({ length: 6 }, (_, n) => acquireCover(cover(n), 'prefetch'));
+  const visible = acquireCover(cover(5), 'visible');
+  expect(vi.mocked(fetch).mock.calls[4][0]).toBe(cover(5));
+  const results = Promise.allSettled([...prefetches, visible].map(job => job.promise));
+  prefetches.forEach(job => job.release());
+  finish.forEach(done => done());
+  await results;
+  visible.release();
+  expect(vi.mocked(fetch).mock.calls.filter(call => call[0] === cover(5))).toHaveLength(1);
+});
+
 it('expires old covers instead of keeping stale bytes indefinitely', async () => {
   vi.useFakeTimers();
   const a = acquireCover(cover(1)); const first = await a.promise; a.release();

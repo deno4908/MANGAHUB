@@ -36,6 +36,7 @@ afterEach(() => {
   cleanup();
   client.clear();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
 const deny = {
   enabled: true,
@@ -43,8 +44,8 @@ const deny = {
   authenticated: false,
   message: "Bạn chưa được admin cấp quyền.",
 };
-function show(path = "/") {
-  return render(
+function application(path = "/") {
+  return (
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[path]}>
         <SiteAccessGate>
@@ -54,6 +55,7 @@ function show(path = "/") {
     </QueryClientProvider>,
   );
 }
+function show(path = "/") { return render(application(path)); }
 
 it("blocks anonymous readers and provides a login link without mounting content or streams", async () => {
   vi.mocked(siteAccessApi.getStatus).mockResolvedValue(deny);
@@ -172,6 +174,64 @@ it("recovers automatically from a transient policy failure without opening conte
   expect(screen.queryByText("Private reader content")).toBeNull();
   expect(await screen.findByText("Private reader content")).toBeInTheDocument();
   expect(siteAccessApi.getStatus).toHaveBeenCalledTimes(2);
+});
+
+it("keeps an approved page and its caches through a failed background check", async () => {
+  session.user = { id: "reader", role: "reader" };
+  session.isLoggedIn = true;
+  vi.mocked(siteAccessApi.getStatus).mockResolvedValue({ ...deny, allowed: true, authenticated: true });
+  show("/manga?page=45");
+  await screen.findByText("Private reader content");
+  client.setQueryData(["manga", "page", 45], { items: ["cached-card"] });
+  vi.mocked(coverCache.clearCoverCache).mockClear();
+  vi.mocked(siteAccessApi.getStatus).mockRejectedValue(new Error("temporary network failure"));
+  await act(async () => { await client.invalidateQueries({ queryKey: ["site-access"] }); });
+  expect(client.getQueryState(["site-access", "reader"])?.status).toBe("error");
+  expect(screen.getByText("Private reader content")).toBeInTheDocument();
+  expect(client.getQueryData(["manga", "page", 45])).toEqual({ items: ["cached-card"] });
+  expect(coverCache.clearCoverCache).not.toHaveBeenCalled();
+  expect(screen.queryByText("Chưa thể kiểm tra quyền truy cập")).toBeNull();
+});
+
+it("closes and clears caches when an approved grant cannot be renewed for a minute", async () => {
+  vi.useFakeTimers();
+  vi.mocked(siteAccessApi.getStatus).mockResolvedValue({ ...deny, enabled: false, allowed: true });
+  show();
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  expect(screen.getByText("Private reader content")).toBeInTheDocument();
+  client.setQueryData(["manga", "page", 45], { items: ["cached-card"] });
+  vi.mocked(siteAccessApi.getStatus).mockRejectedValue(new Error("offline"));
+  await act(async () => { await vi.advanceTimersByTimeAsync(55_000); });
+  expect(screen.getByText("Private reader content")).toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(6_000); });
+  expect(screen.queryByText("Private reader content")).toBeNull();
+  expect(screen.getByText("Chưa thể kiểm tra quyền truy cập")).toBeInTheDocument();
+  expect(client.getQueryData(["manga", "page", 45])).toBeUndefined();
+});
+
+it("does not use the short grant after an explicit background denial", async () => {
+  vi.mocked(siteAccessApi.getStatus).mockResolvedValue({ ...deny, enabled: false, allowed: true });
+  show();
+  await screen.findByText("Private reader content");
+  client.setQueryData(["manga", "page", 45], { items: ["cached-card"] });
+  vi.mocked(siteAccessApi.getStatus).mockResolvedValue(deny);
+  await act(async () => { await client.invalidateQueries({ queryKey: ["site-access"] }); });
+  await waitFor(() => expect(screen.queryByText("Private reader content")).toBeNull());
+  expect(client.getQueryData(["manga", "page", 45])).toBeUndefined();
+});
+
+it("requires fresh approval after changing accounts even if that account has a cached grant", async () => {
+  session.user = { id: "first-reader", role: "reader" };
+  session.isLoggedIn = true;
+  vi.mocked(siteAccessApi.getStatus).mockResolvedValue({ ...deny, allowed: true, authenticated: true });
+  const view = show();
+  await screen.findByText("Private reader content");
+  client.setQueryData(["site-access", "other-reader"], { ...deny, allowed: true, authenticated: true });
+  vi.mocked(siteAccessApi.getStatus).mockImplementation(() => new Promise(() => {}));
+  session.user = { id: "other-reader", role: "reader" };
+  view.rerender(application());
+  expect(screen.queryByText("Private reader content")).toBeNull();
+  expect(screen.getByText("Đang kiểm tra quyền truy cập…")).toBeInTheDocument();
 });
 
 it("offers admin recovery after a network failure while keeping reader content closed", async () => {

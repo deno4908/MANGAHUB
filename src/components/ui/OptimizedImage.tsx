@@ -220,12 +220,12 @@ const OptimizedImage = memo(({
   useEffect(() => {
     if (!inView || error || !useCoverCache) return;
     let mounted = true;
-    const resource = acquireCover(activeSrc);
+    const resource = acquireCover(activeSrc, priority ? 'visible' : 'normal');
     void resource.promise.then(url => {
       if (mounted) setCoverResource({ source: activeSrc, url });
     }, () => { if (mounted) handleError(); });
     return () => { mounted = false; resource.release(); };
-  }, [activeSrc, inView, error, useCoverCache, handleError]);
+  }, [activeSrc, inView, error, useCoverCache, handleError, priority]);
 
   const handleManualRetry = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();

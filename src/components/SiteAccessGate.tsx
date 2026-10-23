@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "react-router-dom";
 import SiteAccessScreen from "./SiteAccessScreen";
@@ -20,6 +20,11 @@ const AUTH_PATHS = new Set([
   "/banned",
   "/forbidden",
 ]);
+
+// A short-lived, in-memory grant absorbs a failed background check without
+// tearing down the reader and deleting its caches. Initial access and account
+// changes still require a fresh response; explicit denials take effect at once.
+const ACCESS_GRANT_MS = 60_000;
 
 export default function SiteAccessGate({ children }: { children: ReactNode }) {
   const path = useLocation().pathname;
@@ -47,6 +52,15 @@ export default function SiteAccessGate({ children }: { children: ReactNode }) {
   });
   const wasAllowed = useRef(false);
   const previousViewer = useRef(key[1]);
+  const [, checkGrantExpiry] = useState(0);
+
+  useEffect(() => {
+    if (!access.isFetchedAfterMount || !access.data?.allowed) return;
+    const remaining = access.dataUpdatedAt + ACCESS_GRANT_MS - Date.now();
+    if (remaining <= 0) return;
+    const timer = window.setTimeout(() => checkGrantExpiry(value => value + 1), remaining + 1);
+    return () => window.clearTimeout(timer);
+  }, [access.dataUpdatedAt, access.data?.allowed, access.isFetchedAfterMount, key[1]]);
 
   useEffect(() => {
     if (!hasCheckedSession) void loadUser();
@@ -61,11 +75,12 @@ export default function SiteAccessGate({ children }: { children: ReactNode }) {
     return () => window.removeEventListener(FORCE_SITE_ACCESS_EVENT, denied);
   }, [client, key[1]]);
 
+  const grantFresh = Date.now() < access.dataUpdatedAt + ACCESS_GRANT_MS;
   const allowed =
     ready &&
     access.isFetchedAfterMount &&
     access.data?.allowed === true &&
-    !access.isError;
+    grantFresh;
   useEffect(() => {
     setSiteAccessRestricted(access.data?.enabled === true);
     if ((wasAllowed.current && !allowed) || previousViewer.current !== key[1]) {
@@ -98,7 +113,7 @@ export default function SiteAccessGate({ children }: { children: ReactNode }) {
     !ready ||
     access.isPending ||
     (!access.isFetchedAfterMount && !access.isError);
-  return <SiteAccessScreen loading={loading} failed={access.isError} fetching={access.isFetching}
+  return <SiteAccessScreen loading={loading} failed={access.isError || (access.data?.allowed === true && !grantFresh)} fetching={access.isFetching}
     loggedIn={isLoggedIn} admin={user?.role === "admin"} message={access.data?.message}
     onRetry={() => void access.refetch()} onLogout={() => logout()} />;
 }
