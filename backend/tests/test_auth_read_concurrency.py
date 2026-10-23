@@ -23,6 +23,7 @@ def provider(monkeypatch):
     monkeypatch.setattr(auth, "_auth_cache", {})
     monkeypatch.setattr(auth, "_profile_cache", {})
     monkeypatch.setattr(auth, "_fetch_auth_profile", lambda _: {"role": "reader"})
+    monkeypatch.setattr(auth, "verified_access_claims", lambda _: None)
     return client.auth.get_user
 
 

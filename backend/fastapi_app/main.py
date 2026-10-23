@@ -472,10 +472,16 @@ async def enforce_api_access_policy(request: Request, call_next):
         return JSONResponse(status_code=503, content={"code": "SITE_ACCESS_UNAVAILABLE", "detail": str(exc)},
                             headers=_api_auth_error_headers(request))
     except HTTPException as exc:
+        content = {"detail": exc.detail}
+        auth_stage = (exc.headers or {}).get("X-MangaHub-Auth-Stage")
+        auth_codes = {"signing-keys": "AUTH_KEYS_UNAVAILABLE", "token": "AUTH_TOKEN_UNAVAILABLE",
+                      "profile": "AUTH_PROFILE_UNAVAILABLE"}
+        if exc.status_code == 503 and auth_stage in auth_codes:
+            content["code"] = auth_codes[auth_stage]
         return JSONResponse(
             status_code=exc.status_code,
-            content={"detail": exc.detail},
-            headers=_api_auth_error_headers(request),
+            content=content,
+            headers={**_api_auth_error_headers(request), **(exc.headers or {})},
         )
 
     context = access_policy.source_authorization.set(authorization if user else None)

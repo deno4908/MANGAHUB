@@ -8,6 +8,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from time import time, sleep
+from types import SimpleNamespace
 
 from config import config
 from fastapi import Depends, Header, HTTPException
@@ -16,6 +17,7 @@ from gotrue.errors import AuthApiError, AuthRetryableError
 from postgrest.exceptions import APIError
 import httpx
 from fastapi_app.services.request_coalescing import coalesce_reads
+from fastapi_app.services.auth_claims import verified_access_claims
 
 # Lazy-initialized Supabase clients
 _supabase_admin: Client | None = None
@@ -211,13 +213,19 @@ def _get_current_user_sync(authorization: str | None):
             "role": cached_user.get("role", "reader"),
         }
 
+    stage = "token"
     try:
-        user_response = _retry_auth_read(lambda: _supabase_admin.auth.get_user(token), "get-user")
+        claims = verified_access_claims(token)
+        if claims is None:
+            user_response = _retry_auth_read(lambda: _supabase_admin.auth.get_user(token), "get-user")
+        else:
+            user_response = SimpleNamespace(user=SimpleNamespace(id=claims["sub"], email=claims.get("email")))
         if not user_response or not user_response.user:
             raise HTTPException(status_code=401, detail="Token không hợp lệ")
 
         user_id = str(user_response.user.id)
 
+        stage = "profile"
         cached_profile = _profile_cache.get(user_id)
         if cached_profile and cached_profile[0] > time():
             profile_data = cached_profile[1]
@@ -238,7 +246,10 @@ def _get_current_user_sync(authorization: str | None):
             "is_revoked": is_revoked,
         }
         if not is_banned and not is_revoked:
-            _auth_cache[token] = (time() + _AUTH_CACHE_TTL, cache_payload)
+            expires_at = time() + _AUTH_CACHE_TTL
+            if claims is not None:
+                expires_at = min(expires_at, float(claims["exp"]))
+            _auth_cache[token] = (expires_at, cache_payload)
         else:
             _auth_cache.pop(token, None)
             _profile_cache.pop(user_id, None)
@@ -259,11 +270,13 @@ def _get_current_user_sync(authorization: str | None):
     except (AuthApiError, AuthRetryableError) as e:
         if e.status in {400, 401, 403, 422}:
             raise HTTPException(status_code=401, detail="Token không hợp lệ hoặc đã hết hạn") from e
-        logger.warning("Authentication provider unavailable status=%s", e.status)
-        raise HTTPException(status_code=503, detail="Dịch vụ xác thực tạm thời không khả dụng") from e
+        logger.warning("Authentication provider unavailable stage=%s status=%s", stage, e.status)
+        raise HTTPException(status_code=503, detail="Dịch vụ xác thực tạm thời không khả dụng",
+                            headers={"X-MangaHub-Auth-Stage": stage, "Retry-After": "2"}) from e
     except Exception as e:
-        logger.exception("FastAPI authentication failed")
-        raise HTTPException(status_code=503, detail="Dịch vụ xác thực tạm thời không khả dụng") from e
+        logger.exception("FastAPI authentication failed stage=%s", stage)
+        raise HTTPException(status_code=503, detail="Dịch vụ xác thực tạm thời không khả dụng",
+                            headers={"X-MangaHub-Auth-Stage": stage, "Retry-After": "2"}) from e
 
 
 @coalesce_reads
