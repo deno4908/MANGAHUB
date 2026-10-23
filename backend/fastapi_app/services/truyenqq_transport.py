@@ -42,7 +42,7 @@ class TruyenQQTransport(httpx.BaseTransport):
             request.method == "GET" or (request.method == "POST" and request.url.path == "/frontend/search/search")
         )
 
-        def fetch(*, relay=False):
+        def fetch(*, relay=False, max_read_seconds=None):
             url = self._edge_url + request.url.raw_path.decode("ascii") if relay else str(request.url)
             # No application/source credentials or original Host header should
             # cross to the relay. The worker itself uses a fixed QQ origin.
@@ -56,7 +56,8 @@ class TruyenQQTransport(httpx.BaseTransport):
             return self._session().request(
                 request.method, url, headers=outgoing,
                 data=body, allow_redirects=False,
-                timeout=(timeout.get("connect") or 5, timeout.get("read") or 20),
+                timeout=(min(timeout.get("connect") or 5, 3) if max_read_seconds else timeout.get("connect") or 5,
+                         min(timeout.get("read") or 20, max_read_seconds) if max_read_seconds else timeout.get("read") or 20),
             )
 
         try:
@@ -66,6 +67,20 @@ class TruyenQQTransport(httpx.BaseTransport):
                 self._edge_until = time.monotonic() + 300
                 relay = True
                 result = fetch(relay=relay)
+            elif relay and result.status_code == 403 and result.headers.get("x-truyenqq-relay") == "1":
+                # The owned worker has authorized this read and the QQ origin
+                # rejected its egress. The direct egress can still be healthy.
+                # Gateway/whitelist denials never carry this source marker and
+                # must not be retried around their access check.
+                try:
+                    direct = fetch(max_read_seconds=5)
+                except RequestException:
+                    direct = None
+                if direct is not None and direct.status_code == 200:
+                    result = direct
+                    relay = False
+                # Keep the original source error if both routes fail, including
+                # the hints a browser can use to warm the shared source cache.
         except Timeout as error:
             raise httpx.ReadTimeout("TruyenQQ browser request timed out", request=request) from error
         except RequestException as error:

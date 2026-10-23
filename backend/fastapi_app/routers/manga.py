@@ -2940,6 +2940,7 @@ async def otruyen_filtered_manga(
     attach_ratings: bool = Query(False),
     user=Depends(get_optional_user),
     db=Depends(get_supabase_public),
+    response: Response = None,
 ):
     genre_values = [
         _clean_slug(part)
@@ -2958,7 +2959,7 @@ async def otruyen_filtered_manga(
     if normalized_sort == "popular":
         from fastapi_app.services.local_popular import qq_popular
         payload = await qq_popular(page=page, limit=limit, genres=genre_values, status=normalized_status,
-                                   show_mature=show_mature, hidden=hidden, db=db)
+                                   show_mature=show_mature, hidden=hidden, db=db, http_response=response)
     else:
         payload = await truyenqq_service.get_filtered(
             genres=genre_values, page=page,

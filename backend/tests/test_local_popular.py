@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
+from fastapi.responses import Response
 
 from fastapi_app.routers import manga, ratings
 from fastapi_app.services import card_metadata, local_popular
@@ -240,6 +241,26 @@ def test_source_filler_outage_does_not_discard_the_local_popularity_ranking(monk
     assert [(row["slug"], row["views"]) for row in result["items"]] == [("ranked-1", 90)]
     assert result["ranking_pending"] is True
     assert source.call_args.kwargs["sort"] == "views_desc"
+
+
+def test_partial_qq_ranking_keeps_source_hints_for_browser_recovery(monkeypatch):
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: {"ranked-1": 90})
+    monkeypatch.setattr(local_popular, "_cached_labels", lambda ids: {"ranked-1": qq("ranked-1")})
+    monkeypatch.setattr(manga, "_get_hidden_slugs", AsyncMock(return_value={}))
+    monkeypatch.setattr(manga, "_fetch_override_rows_by_slugs", AsyncMock(return_value={}))
+    monkeypatch.setattr(local_popular, "remember_matches", lambda values: None)
+    headers = {"X-TruyenQQ-Error": "http-403", "X-TruyenQQ-Source-Path": "/tim-kiem-nang-cao/trang-1?sort=4",
+               "Cache-Control": "no-store"}
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered",
+                        AsyncMock(side_effect=HTTPException(502, "Source rejected request", headers=headers)))
+    response = Response()
+    result = asyncio.run(manga.otruyen_filtered_manga(genre_slugs="", status="", sort="popular", page=1,
+        limit=42, show_mature=True, base_slug="", attach_ratings=False, user=None, db=EmptyDB(), response=response))["data"]
+    assert [row["slug"] for row in result["items"]] == ["ranked-1"]
+    assert result["ranking_pending"] is True
+    assert result["source_error"] == {"status": 502, "code": "http-403"}
+    for name, value in headers.items():
+        assert response.headers[name] == value
 
 
 def test_filtered_route_preserves_the_sum_of_verified_legacy_alias_views(monkeypatch):

@@ -51,7 +51,7 @@ def _cached_labels(identifiers):
             if (item := card_metadata.cached_metadata(identifier, values)) and item.get("source") == "truyenqq"}
 
 
-async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
+async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, http_response=None):
     from fastapi_app.routers import manga
 
     lookup = await asyncio.to_thread(manga._fetch_local_views_lookup, db)
@@ -132,10 +132,22 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
                                                {"rows": rows, "excluded": sorted(excluded)})
             rows, excluded = snapshot["rows"], set(snapshot["excluded"])
 
-    def response(items, *, refreshing=False, total=None, pages=None):
-        return {"data": {"items": items, "ranking_pending": refreshing, "params": {"pagination": {
+    def response(items, *, refreshing=False, total=None, pages=None, source_error=None):
+        data = {"items": items, "ranking_pending": refreshing, "params": {"pagination": {
             "currentPage": page, "totalItemsPerPage": limit, "totalItems": total,
-            "totalPages": pages or max(page + int(len(items) == limit), math.ceil(len(rows) / limit), 1)}}}}
+            "totalPages": pages or max(page + int(len(items) == limit), math.ceil(len(rows) / limit), 1)}}}
+        if source_error is not None:
+            headers = (source_error.headers or {}) if isinstance(source_error, HTTPException) else {}
+            # Partial success must keep the same browser recovery hints as an
+            # HTTP error. Otherwise a 200 response with only the local prefix
+            # silently prevents the existing relay recovery from ever running.
+            if http_response is not None:
+                http_response.headers.update(headers)
+            data["source_error"] = {
+                "status": source_error.status_code if isinstance(source_error, HTTPException) else 504,
+                "code": headers.get("X-TruyenQQ-Error", "timeout" if isinstance(source_error, asyncio.TimeoutError) else "source-error"),
+            }
+        return {"data": data}
 
     async def source(number):
         # The complete shared read, including its initial Redis lookup, survives
@@ -156,12 +168,13 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
         if not rows[offset:offset + limit]:
             raise HTTPException(504, "TruyenQQ phản hồi quá chậm, vui lòng thử lại.",
                                 headers={"X-TruyenQQ-Error": "timeout", "Cache-Control": "no-store"}) from error
-        return response(rows[offset:offset + limit], refreshing=True)
-    except HTTPException:
+        return response(rows[offset:offset + limit], refreshing=True, source_error=error)
+    except HTTPException as error:
         if not rows[offset:offset + limit]:
             raise
-        logger.warning("QQ popularity filler deferred; keeping verified local ranking")
-        return response(rows[offset:offset + limit], refreshing=True)
+        logger.warning("QQ popularity filler failed page=1 status=%s reason=%s", error.status_code,
+                       (error.headers or {}).get("X-TruyenQQ-Error", "source-error"))
+        return response(rows[offset:offset + limit], refreshing=True, source_error=error)
 
     # One normal listing warms exact QQ slug/stem matches in a batch.
     if snapshot is None:
@@ -228,7 +241,7 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
         if number not in payloads:
             # An incomplete swap plan could repeat or lose displaced titles.
             require_page_data()
-            return response(selected, refreshing=True)
+            return response(selected, refreshing=True, source_error=source_failure)
         prefix.extend((payloads[number].get("data") or {}).get("items") or [])
     prefix = prefix[:prefix_size]
     prefix_ids = {item.get("slug") for item in prefix}
@@ -254,4 +267,4 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db):
     require_page_data()
     total_items = source_total + uploads
     return response(selected, refreshing=pending, total=total_items if total is not None else None,
-                    pages=max(1, math.ceil(total_items / limit)))
+                    pages=max(1, math.ceil(total_items / limit)), source_error=source_failure)

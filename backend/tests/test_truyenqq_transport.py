@@ -213,3 +213,50 @@ def test_relay_access_failure_is_not_retried_directly_on_vercel(browser, monkeyp
         assert browser.request.call_args.args[1].startswith(edge)
     finally:
         client.close()
+
+
+def test_source_rejection_at_the_authorized_relay_can_use_healthy_direct_egress(browser, monkeypatch):
+    from site_access import source_authorization
+    monkeypatch.setenv('TRUYENQQ_PREFER_EDGE', '1')
+    success = browser.request.return_value
+    blocked = SimpleNamespace(status_code=403, content=b'QQ rejected worker',
+                              headers=httpx.Headers({'x-truyenqq-relay': '1', 'x-truyenqq-block': 'challenge'}))
+    browser.request.side_effect = [blocked, success]
+    marker = source_authorization.set('Bearer verified-reader')
+    edge = 'https://worker.example/api/truyenqq-edge'
+    client = SourceClient(Settings(request_delay=0, retries=1), transport=transport.TruyenQQTransport(edge_url=edge))
+    try:
+        url = 'https://truyenqqko.com/tim-kiem-nang-cao/trang-1?sort=4'
+        result = client.request(url)
+        assert result.status_code == 200 and result.extensions['truyenqq_transport'] == 'direct'
+        relay, direct = browser.request.call_args_list
+        assert relay.args[1] == edge + '/tim-kiem-nang-cao/trang-1?sort=4'
+        assert relay.kwargs['headers']['Authorization'] == 'Bearer verified-reader'
+        assert direct.args[1] == url
+        assert direct.kwargs['timeout'] == (3, 5)
+        assert 'Authorization' not in direct.kwargs['headers']
+    finally:
+        client.close()
+        source_authorization.reset(marker)
+
+
+@pytest.mark.parametrize('direct_error', [False, True])
+def test_both_egresses_failing_keep_the_relay_source_hints(browser, monkeypatch, direct_error):
+    monkeypatch.setenv('TRUYENQQ_PREFER_EDGE', '1')
+    blocked = SimpleNamespace(status_code=403, content=b'QQ source challenge',
+                              headers=httpx.Headers({'x-truyenqq-relay': '1', 'x-truyenqq-block': 'challenge'}))
+    direct = transport.Timeout('timeout') if direct_error else SimpleNamespace(
+        status_code=403, content=b'Direct forbidden', headers=httpx.Headers())
+    browser.request.side_effect = [blocked, direct]
+    client = SourceClient(Settings(request_delay=0, retries=1), transport=transport.TruyenQQTransport(edge_url='https://worker.example/api/truyenqq-edge'))
+    try:
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            client.request('https://truyenqqko.com/tim-kiem-nang-cao/trang-1?sort=4')
+        hints = _source_error_headers(caught.value)
+        assert hints['X-TruyenQQ-Error'] == 'http-403'
+        assert hints['X-TruyenQQ-Transport'] == 'edge-source'
+        assert hints['X-TruyenQQ-Block'] == 'challenge'
+        assert hints['X-TruyenQQ-Source-Path'] == '/tim-kiem-nang-cao/trang-1?sort=4'
+        assert browser.request.call_count == 2
+    finally:
+        client.close()

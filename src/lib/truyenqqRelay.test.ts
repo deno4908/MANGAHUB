@@ -42,6 +42,26 @@ it('recovers a missing QQ source in partial combined search results using a publ
   });
 });
 
+it('fills a partial local ranking after a blocked QQ catalog is warmed by the browser', async () => {
+  setSiteAccessRestricted(true);
+  const rows = Array.from({ length: 11 }, (_, index) => ({ slug: `ranked-${index}`, views: 50 - index }));
+  const fullRows = [...rows, ...Array.from({ length: 31 }, (_, index) => ({ slug: `unread-${index}`, views: 0 }))];
+  const fetcher = vi.fn().mockResolvedValueOnce(json({ data: {
+    items: rows, ranking_pending: true, source_error: { status: 502, code: 'http-403' },
+  } }, 200, { 'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/tim-kiem-nang-cao/trang-1?sort=4' }))
+    .mockResolvedValueOnce(new Response('<div class="list_grid">QQ catalog</div>'))
+    .mockResolvedValueOnce(json({ data: { items: fullRows, ranking_pending: false } }));
+  vi.stubGlobal('fetch', fetcher);
+  const result = await fetchWithTruyenQQRelay(api, { headers: { Authorization: 'Bearer verified-reader' } }, 35_000);
+  const payload = await result.json();
+  expect(payload.data.items).toHaveLength(42);
+  expect(payload.data.ranking_pending).toBe(false);
+  expect(fetcher.mock.calls.map(call => call[0])).toEqual([
+    api, 'https://mangahub-mangadex-edge.vinhytb3010.workers.dev/api/truyenqq-edge/tim-kiem-nang-cao/trang-1?sort=4', api,
+  ]);
+  expect(fetcher.mock.calls[1][1].headers).toEqual({ Authorization: 'Bearer verified-reader' });
+});
+
 it('keeps source errors when recovery fails and rejects paths outside the fixed relay', async () => {
   const fetcher = vi.fn().mockResolvedValue(json({ detail: 'Unavailable' }, 502, {
     'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '//other.example/secret',
