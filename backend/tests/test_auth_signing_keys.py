@@ -104,6 +104,15 @@ def test_key_discovery_failure_does_not_accept_unverified_claims(keys):
     assert USER not in str(error.value.detail)
 
 
+@pytest.mark.parametrize("body", [b"<html>temporarily unavailable</html>", b'{"keys": [{"kty": "invalid"}]}'])
+def test_broken_key_endpoint_is_an_outage_not_an_invalid_user_session(keys, body):
+    keys[1].side_effect = lambda *args, **kwargs: io.BytesIO(body)
+    with pytest.raises(HTTPException) as error:
+        verification.verified_access_claims(signed(keys[0]))
+    assert error.value.status_code == 503
+    assert error.value.headers["X-MangaHub-Auth-Stage"] == "signing-keys"
+
+
 def test_rotated_signing_key_is_discovered_without_redeploying(keys):
     private, fetch = keys
     verification.verified_access_claims(signed(private))

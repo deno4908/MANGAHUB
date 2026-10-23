@@ -4,6 +4,7 @@ Only signing keys are cached here, never a user's role, ban or session state.
 Those remain database checks in dependencies.py.
 """
 from functools import lru_cache
+from json import JSONDecodeError
 from threading import Lock
 from uuid import UUID
 
@@ -48,7 +49,7 @@ def verified_access_claims(token: str) -> dict | None:
         if claims["role"] != "authenticated":
             raise jwt.InvalidTokenError("Not a user access token")
         return claims
-    except PyJWKClientConnectionError as error:
+    except (PyJWKClientConnectionError, jwt.PyJWKSetError, JSONDecodeError, OSError) as error:
         raise HTTPException(503, "Dịch vụ xác thực tạm thời không khả dụng",
                             headers={"X-MangaHub-Auth-Stage": "signing-keys", "Retry-After": "2"}) from error
     except (jwt.InvalidTokenError, PyJWKClientError, ValueError, TypeError) as error:
