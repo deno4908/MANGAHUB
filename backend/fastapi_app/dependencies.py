@@ -7,12 +7,14 @@ import base64
 import json
 import logging
 from datetime import datetime, timezone
-from time import time
+from time import time, sleep
 
 from config import config
 from fastapi import Depends, Header, HTTPException
 from supabase import Client, create_client
-from gotrue.errors import AuthApiError
+from gotrue.errors import AuthApiError, AuthRetryableError
+from postgrest.exceptions import APIError
+import httpx
 from fastapi_app.services.request_coalescing import coalesce_reads
 
 # Lazy-initialized Supabase clients
@@ -62,6 +64,21 @@ def _is_token_revoked(token: str, profile_data: dict) -> bool:
     return bool(latest_cutoff and issued_at <= latest_cutoff)
 
 
+def _retry_auth_read(load, operation):
+    """Retry a transient read once; never reuse an expired authorization grant."""
+    for attempt in range(2):
+        try:
+            return load()
+        except (httpx.TransportError, OSError, AuthApiError, AuthRetryableError, APIError) as error:
+            status = getattr(error, "status", None) or getattr(error, "code", None)
+            transient = isinstance(error, (httpx.TransportError, OSError, AuthRetryableError)) or str(status) in {"500", "502", "503", "504"}
+            if attempt or not transient or str(status) in {"400", "401", "403", "422", "429"}:
+                raise
+            logger.warning("Retrying authentication read operation=%s error=%s status=%s",
+                           operation, type(error).__name__, status if str(status).isdigit() else "network")
+            sleep(0.15)
+
+
 def _fetch_auth_profile(user_id: str) -> dict:
     try:
         profile = (
@@ -72,7 +89,11 @@ def _fetch_auth_profile(user_id: str) -> dict:
             .execute()
         )
         return profile.data or {}
-    except Exception:
+    except APIError as error:
+        # Only an old schema may omit the session-cutoff columns. Network or
+        # database failures must not turn into a query that skips revocation.
+        if str(error.code) not in {"42703", "PGRST204"}:
+            raise
         profile = (
             _supabase_admin.table("profiles")
             .select("role, is_banned")
@@ -191,18 +212,18 @@ def _get_current_user_sync(authorization: str | None):
         }
 
     try:
-        user_response = _supabase_admin.auth.get_user(token)
+        user_response = _retry_auth_read(lambda: _supabase_admin.auth.get_user(token), "get-user")
         if not user_response or not user_response.user:
             raise HTTPException(status_code=401, detail="Token không hợp lệ")
 
         user_id = str(user_response.user.id)
 
         cached_profile = _profile_cache.get(user_id)
-        if cached_profile and cached_profile[0] > now:
+        if cached_profile and cached_profile[0] > time():
             profile_data = cached_profile[1]
         else:
-            profile_data = _fetch_auth_profile(user_id)
-            _profile_cache[user_id] = (now + _AUTH_CACHE_TTL, profile_data)
+            profile_data = _retry_auth_read(lambda: _fetch_auth_profile(user_id), "profile")
+            _profile_cache[user_id] = (time() + _AUTH_CACHE_TTL, profile_data)
 
         role = str(profile_data.get("role", "reader") or "reader").strip().lower()
         if role not in ROLE_HIERARCHY:
@@ -217,7 +238,7 @@ def _get_current_user_sync(authorization: str | None):
             "is_revoked": is_revoked,
         }
         if not is_banned and not is_revoked:
-            _auth_cache[token] = (now + _AUTH_CACHE_TTL, cache_payload)
+            _auth_cache[token] = (time() + _AUTH_CACHE_TTL, cache_payload)
         else:
             _auth_cache.pop(token, None)
             _profile_cache.pop(user_id, None)
@@ -235,7 +256,7 @@ def _get_current_user_sync(authorization: str | None):
         }
     except HTTPException:
         raise
-    except AuthApiError as e:
+    except (AuthApiError, AuthRetryableError) as e:
         if e.status in {400, 401, 403, 422}:
             raise HTTPException(status_code=401, detail="Token không hợp lệ hoặc đã hết hạn") from e
         logger.warning("Authentication provider unavailable status=%s", e.status)

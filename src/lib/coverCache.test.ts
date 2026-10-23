@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { acquireCover, cachedCover, canCacheCover, clearCoverCache, invalidateCover } from './coverCache';
+import { acquireCover, cachedCover, canCacheCover, clearCoverCache, invalidateCover, retainCachedCover } from './coverCache';
 const origin = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const cover = (id: number) => `${origin}/api/manga/truyenqq/cover/book-${id}`;
 const image = () => new Response(new Blob(['bytes'], { type: 'image/jpeg' }), { headers: { 'content-type': 'image/jpeg' } });
@@ -118,6 +118,37 @@ it('expires old covers instead of keeping stale bytes indefinitely', async () =>
   expect(cachedCover(cover(1))).toBeUndefined();
   const b = acquireCover(cover(1)); expect(await b.promise).not.toBe(first); b.release();
   expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it('keeps an existing cover through a long chapter and the return to detail without another download', async () => {
+  vi.useFakeTimers();
+  const detail = acquireCover(cover(1));
+  const original = await detail.promise;
+  detail.release();
+  const leaveReader = retainCachedCover(cover(1));
+  await Promise.resolve();
+  vi.advanceTimersByTime(10 * 60_000);
+  expect(cachedCover(cover(1))).toBe(original);
+  leaveReader();
+  const returned = acquireCover(cover(1));
+  expect(await returned.promise).toBe(original);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(URL.revokeObjectURL).not.toHaveBeenCalledWith(original);
+  returned.release();
+  await Promise.resolve();
+  expect(cachedCover(cover(1))).toBeUndefined();
+});
+
+it('never fetches a missing reader cover and clears retained bytes immediately on access loss', async () => {
+  const missing = retainCachedCover(cover(1));
+  expect(fetch).not.toHaveBeenCalled(); missing();
+  const detail = acquireCover(cover(2)); const original = await detail.promise;
+  const leaveReader = retainCachedCover(cover(2)); detail.release();
+  clearCoverCache();
+  expect(cachedCover(cover(2))).toBeUndefined();
+  expect(URL.revokeObjectURL).toHaveBeenCalledWith(original);
+  leaveReader(); await Promise.resolve();
+  expect(cachedCover(cover(2))).toBeUndefined();
 });
 
 it('discards image bytes that the browser cannot decode', async () => {

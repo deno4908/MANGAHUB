@@ -86,7 +86,22 @@ function pump() {
 
 export function cachedCover(value: string): string | undefined {
   const entry = entries.get(value);
-  return entry?.objectUrl && entry.expires > Date.now() ? entry.objectUrl : undefined;
+  return entry?.objectUrl && (entry.expires > Date.now() || entry.users > 0) ? entry.objectUrl : undefined;
+}
+
+/** Hold an already downloaded cover while reading; never start a new fetch. */
+export function retainCachedCover(key: string): () => void {
+  const entry = entries.get(key);
+  if (!entry?.objectUrl) return () => {};
+  entry.users++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    // React cleans up the reader before the returning detail page acquires
+    // its cover. Let that page adopt the same bytes before checking expiry.
+    queueMicrotask(() => { entry.users--; prune(); });
+  };
 }
 
 export function invalidateCover(value: string) {
@@ -120,7 +135,9 @@ export function acquireCover(key: string, priority: CoverPriority = 'normal') {
       discard(current);
       if (!current.started) current.reject(new DOMException('Cover cancelled', 'AbortError'));
     }
-    prune();
+    // Preserve loaded bytes through React's cleanup/setup handoff to a reader.
+    if (current.objectUrl) queueMicrotask(prune);
+    else prune();
   } };
 }
 

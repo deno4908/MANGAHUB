@@ -14,6 +14,7 @@ import { motion } from 'framer-motion';
 import { Heart, Bookmark, Eye, Users, Calendar, BookOpen, UsersRound, Loader2, EyeOff, ShieldAlert, ArrowLeft, AlertTriangle, StickyNote, Languages } from 'lucide-react';
 import OptimizedImage from '@/components/ui/OptimizedImage';
 import { canCacheCover } from '@/lib/coverCache';
+import { getMangaDexImageFallback } from '@/lib/mangaDexImages';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import type { ChapterTranslationSource, Manga } from '@/types/manga';
 import { getMangaDetailPath, resolveMangaRoute } from '@/lib/mangaLinks';
@@ -821,12 +822,13 @@ const MangaDetail = () => {
   };
 
   const detailCover = manga.coverProxy && canCacheCover(manga.coverProxy) ? manga.coverProxy : manga.cover;
+  const detailCoverFallback = isMangaDex ? getMangaDexImageFallback(detailCover) || manga.cover : manga.cover;
 
   return (
     <div className="min-h-screen -mt-16 pt-0">
       {/* Banner */}
       <div className="relative h-64 md:h-80 overflow-hidden">
-        <OptimizedImage src={detailCover} fallbackSrc={manga.cover} alt="" className="w-full h-full object-cover blur-xl scale-110 opacity-30" priority />
+        <OptimizedImage src={detailCover} fallbackSrc={detailCoverFallback} alt="" className="w-full h-full object-cover blur-xl scale-110 opacity-30" priority />
         <div className="absolute inset-0 bg-gradient-to-b from-background/50 to-background" />
         <div className="absolute inset-0 comic-dots" />
       </div>
@@ -843,7 +845,7 @@ const MangaDetail = () => {
             animate={{ rotate: 1 }}
             className="w-48 md:w-56 shrink-0 mx-auto md:mx-0"
           >
-            <OptimizedImage src={detailCover} fallbackSrc={manga.cover} alt={manga.title} className="w-full aspect-[3/4] object-cover rounded-xl comic-border-accent" priority />
+            <OptimizedImage src={detailCover} fallbackSrc={detailCoverFallback} alt={manga.title} className="w-full aspect-[3/4] object-cover rounded-xl comic-border-accent" priority />
           </motion.div>
 
           {/* Info */}

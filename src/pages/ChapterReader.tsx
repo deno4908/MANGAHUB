@@ -9,6 +9,7 @@ import { adaptChapterPages, adaptMangaDetail, getChapterPageFallback } from '@/l
 import { getMangaDetailPath, normalizeMangaDexId } from '@/lib/mangaLinks';
 import { loadMangaDexChapterPages, getMangaDexImageFallback } from '@/lib/mangaDexImages';
 import { incrementMangaViewsInQueryCache, invalidateMangaRealtimeQueries } from '@/lib/querySync';
+import { retainCachedCover } from '@/lib/coverCache';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import ReaderImage from '@/components/reader/ReaderImage';
@@ -478,6 +479,7 @@ const ChapterReader = () => {
   const mangaDetailPath = mangaDetailId ? getMangaDetailPath(mangaDetailId) : '/manga';
   const mangaTitle = chapterState.mangaTitle || persistedMeta.mangaTitle || fallbackMangaTitle;
   const mangaThumb = String(chapterState.mangaThumb || persistedMeta.mangaThumb || fallbackMangaThumb || '').trim();
+  useEffect(() => retainCachedCover(mangaThumb), [mangaThumb]);
   const provisionalChapterNumber = parseChapterNumber(chapterState.chapterNumber) ?? fallbackChapterNumber;
   const stateChapters = useMemo(
     () => normalizeReaderChapters(chapterState.chapters || []),
