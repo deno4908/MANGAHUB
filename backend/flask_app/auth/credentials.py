@@ -14,6 +14,7 @@ from pathlib import Path
 from threading import Lock
 
 from jwcrypto import jwk, jwe
+from zxcvbn import zxcvbn
 from config import config
 
 PURPOSES = {"login", "register", "change-password", "reset-password"}
@@ -178,4 +179,8 @@ def legacy_passwords(password):
 def password_strength_error(password):
     if not isinstance(password, str) or not 8 <= len(password) <= 128:
         return "Mật khẩu mới phải từ 8 đến 128 ký tự."
+    # Evaluate the original password, before deriving the provider verifier.
+    # Pattern/dictionary checks also reject superficially complex Password123!.
+    if zxcvbn(password, user_inputs=["mangahub", "truyenqq", "matkhau"], max_length=128)["score"] < 3:
+        return "Mật khẩu quá dễ đoán. Hãy dùng nhiều từ không liên quan hoặc một chuỗi ngẫu nhiên dài hơn."
     return None

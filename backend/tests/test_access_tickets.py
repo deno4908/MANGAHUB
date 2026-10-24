@@ -436,14 +436,95 @@ def test_password_routes_revoke_all_registered_read_sessions(environment, monkey
     monkeypatch.setattr(routes, 'open_credentials', lambda data, purpose: {'password': 'new password value', 'current_password': 'old password value'})
     monkeypatch.setattr(routes, 'derive_password', lambda value, email: 'derived-password')
     monkeypatch.setattr(routes, '_verify_current_password', lambda *args: (True, ''))
-    monkeypatch.setattr(routes, '_is_recent_recovery_session', lambda value: True)
     app = Flask(__name__)
     app.config.update(TESTING=True, RATELIMIT_ENABLED=False)
     limiter.init_app(app)
     app.register_blueprint(routes.auth_bp, url_prefix='/auth')
-    response = app.test_client().post('/auth/' + operation, json={}, headers={**bearer(token()), 'X-MangaHub-CSRF': '1', 'Origin': config.FRONTEND_URL})
+    recovery = {'amr': [{'method': 'otp', 'timestamp': int(time.time()) - 10}], 'phone': ''} if operation == 'reset-password' else {}
+    response = app.test_client().post('/auth/' + operation, json={}, headers={**bearer(token(**recovery)), 'X-MangaHub-CSRF': '1', 'Origin': config.FRONTEND_URL})
     assert response.status_code == 200, response.json
     db.auth.admin.update_user_by_id.assert_called_once()
     assert c.get('/api/images/_ticket/image').status_code == 403
     assert second.get('/api/images/_ticket/image').status_code == 403
     assert c.get('/api/site-access', headers=bearer(token(iat=int(time.time())))).status_code == 401
+
+
+@pytest.fixture
+def password_client(environment, monkeypatch):
+    from flask import Flask
+    from flask_app import limiter, middleware
+    from flask_app.auth import credentials, routes
+    from jwcrypto import jwk, jwe
+    db, token = environment
+    db.auth.get_user = Mock(return_value=SimpleNamespace(user=SimpleNamespace(id=READER, email='test@example.com')))
+    db.auth.admin = SimpleNamespace(update_user_by_id=Mock(), sign_out=Mock())
+    monkeypatch.setattr(middleware, '_get_supabase', lambda: db)
+    monkeypatch.setattr(middleware, '_auth_cache', {})
+    monkeypatch.setattr(middleware, '_profile_cache', {})
+    monkeypatch.setattr(routes, '_get_sb_admin', lambda: db)
+    monkeypatch.setattr(routes, '_get_sb', Mock(side_effect=AssertionError('unexpected provider mutation')))
+    monkeypatch.setattr(credentials, 'get_private_key', lambda: key)
+    # Isolate the credential nonce store as well as the access-session Redis.
+    # FakeRedis without the optional Lua runtime cannot execute GETDEL scripts.
+    monkeypatch.setattr(credentials, '_redis', lambda: None)
+    monkeypatch.setattr(credentials, '_nonces', {})
+    key = jwk.JWK.generate(kty='RSA', size=2048)
+    app = Flask(__name__)
+    app.config.update(TESTING=True, RATELIMIT_ENABLED=False)
+    limiter.init_app(app)
+    app.register_blueprint(routes.auth_bp, url_prefix='/auth')
+    def envelope(password='violet canoe lunar orchard', purpose='reset-password'):
+        challenge = credentials.issue_challenge(purpose)
+        public = jwk.JWK(**challenge['public_key'])
+        sealed = jwe.JWE(json.dumps({'nonce': challenge['nonce'], 'purpose': purpose,
+            'fields': {'password': password, 'current_password': 'previous password value',
+                       'email': 'test@example.com', 'username': 'test-reader'}}).encode(),
+            protected=json.dumps({'alg': 'RSA-OAEP-256', 'enc': 'A256GCM', 'kid': public['kid']}))
+        sealed.add_recipient(public)
+        return {'credential': sealed.serialize(compact=True)}
+    return app.test_client(), envelope, db, token
+
+
+def test_encrypted_email_otp_reset_succeeds_and_cannot_be_replayed(password_client):
+    visitor, envelope, db, token = password_client
+    first, second = client(), client()
+    first.get('/api/site-access', headers=bearer(token()))
+    second.get('/api/site-access', headers=bearer(token(sid=str(uuid.uuid4()))))
+    recovery = token(amr=[{'method': 'otp', 'timestamp': int(time.time()) - 5}], phone='')
+    headers = {**bearer(recovery), 'X-MangaHub-CSRF': '1', 'Origin': config.FRONTEND_URL}
+    body = envelope()
+    result = visitor.post('/auth/reset-password', headers=headers, json=body)
+    assert result.status_code == 200, result.json
+    assert result.json['requires_relogin'] is True
+    db.auth.admin.update_user_by_id.assert_called_once()
+    update = db.auth.admin.update_user_by_id.call_args.args
+    assert update[0] == READER and 'password' in update[1]
+    assert update[1]['password'] != 'violet canoe lunar orchard'
+    assert first.get('/api/images/_ticket/image').status_code == 403
+    assert second.get('/api/images/_ticket/image').status_code == 403
+    assert visitor.post('/auth/reset-password', headers=headers, json=envelope()).status_code == 401
+    db.auth.admin.update_user_by_id.assert_called_once()
+
+
+@pytest.mark.parametrize('amr,phone', [
+    ([{'method': 'password', 'timestamp': int(time.time())}], ''),
+    ([{'method': 'oauth', 'timestamp': int(time.time())}], ''),
+    ([{'method': 'otp', 'timestamp': int(time.time()) - 901}, {'method': 'token_refresh', 'timestamp': int(time.time())}], ''),
+    ([{'method': 'otp', 'timestamp': int(time.time())}], '+10000000000'),
+])
+def test_non_email_or_stale_proof_cannot_reset_even_with_a_valid_login(password_client, amr, phone):
+    visitor, envelope, db, token = password_client
+    headers = {**bearer(token(amr=amr, phone=phone)), 'X-MangaHub-CSRF': '1', 'Origin': config.FRONTEND_URL}
+    result = visitor.post('/auth/reset-password', headers=headers, json=envelope())
+    assert result.status_code == 403
+    db.auth.admin.update_user_by_id.assert_not_called()
+
+
+@pytest.mark.parametrize('operation', ['register', 'reset-password', 'change-password'])
+def test_weak_new_password_is_rejected_before_any_provider_update(password_client, operation):
+    visitor, envelope, db, token = password_client
+    headers = {**bearer(token(amr=[{'method': 'otp', 'timestamp': int(time.time())}], phone='')), 'X-MangaHub-CSRF': '1', 'Origin': config.FRONTEND_URL}
+    result = visitor.post('/auth/' + operation, headers=headers, json=envelope('Password123!', operation))
+    assert result.status_code == 400, result.json
+    assert 'dễ đoán' in result.json['error']
+    db.auth.admin.update_user_by_id.assert_not_called()

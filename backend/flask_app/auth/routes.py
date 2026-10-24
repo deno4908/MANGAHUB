@@ -1223,12 +1223,17 @@ def reset_password():
 
 def _is_recent_recovery_session(token: str) -> bool:
     # require_auth has already verified this exact token with Supabase. Inspect
-    # its signed AMR claim; a normal login token cannot bypass current-password
-    # verification by calling /reset-password directly.
+    # its signed AMR claim; a normal password/OAuth login cannot bypass the
+    # current-password check by changing a client-side URL type to "recovery".
+    # Supabase's implicit email recovery flow issues AMR method "otp" (verify.go,
+    # issueRefreshToken(...models.OTP...)), not the URL's "recovery" type. A
+    # recent, email-only OTP proves inbox access just like a recovery email.
     try:
         claims = jwt.decode(token, options={"verify_signature": False})
         now = time.time()
-        return any(isinstance(entry, dict) and entry.get("method") == "recovery"
+        email_otp = bool(_is_valid_email(str(claims.get("email") or ""))) and not claims.get("phone")
+        return any(isinstance(entry, dict)
+                   and (entry.get("method") == "recovery" or (entry.get("method") == "otp" and email_otp))
                    and 0 <= now - float(entry.get("timestamp", 0)) <= 15 * 60
                    for entry in claims.get("amr", []))
     except Exception:

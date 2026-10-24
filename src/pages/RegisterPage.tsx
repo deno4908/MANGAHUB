@@ -1,12 +1,13 @@
 import { useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { Eye, EyeOff, Mail, Lock, User, CheckCircle2, Circle } from "lucide-react";
+import { Mail, User, CheckCircle2, Circle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import { authApi } from "@/lib/api";
 import BrandLogo from "@/components/manga/BrandLogo";
+import { NewPasswordFields, usePasswordAssessment } from '@/components/security/NewPasswordFields';
 import ReCaptchaV2, { isRecaptchaConfigured, type ReCaptchaV2Handle } from "@/components/security/ReCaptchaV2";
 
 const RegisterPage = () => {
@@ -14,7 +15,6 @@ const RegisterPage = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
   const [captchaToken, setCaptchaToken] = useState("");
   const [loading, setLoading] = useState(false);
   const captchaRef = useRef<ReCaptchaV2Handle>(null);
@@ -31,14 +31,8 @@ const RegisterPage = () => {
     [hasUsernameWhitespace, name],
   );
 
-  const passwordChecks = useMemo(
-    () => [
-      { label: "Từ 8 đến 128 ký tự", valid: Array.from(password).length >= 8 && Array.from(password).length <= 128 },
-    ],
-    [password],
-  );
-
-  const isPasswordStrong = passwordChecks.every((rule) => rule.valid);
+  const assessment = usePasswordAssessment(password);
+  const isPasswordStrong = assessment.accepted;
   const isPasswordMatch = password === confirmPassword;
   const isUsernameValid = usernameChecks.every((rule) => rule.valid);
   const canSubmit =
@@ -218,91 +212,9 @@ const RegisterPage = () => {
               </div>
             </div>
 
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">Mật khẩu</label>
-              <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                <Input
-                  type={showPassword ? "text" : "password"}
-                  placeholder="Tối thiểu 8 ký tự"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="pl-10 pr-10"
-                  minLength={8}
-                  required
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-
-              <AnimatePresence>
-                {password.length > 0 && (
-                  <motion.ul
-                    initial={{ opacity: 0, height: 0, marginTop: 0 }}
-                    animate={{ opacity: 1, height: "auto", marginTop: 8 }}
-                    exit={{ opacity: 0, height: 0, marginTop: 0 }}
-                    transition={{ duration: 0.3, ease: "easeOut" }}
-                    className="space-y-1.5 rounded-md border border-border bg-muted/40 p-3 overflow-hidden"
-                  >
-                    {passwordChecks.map((rule, i) => (
-                      <motion.li
-                        key={rule.label}
-                        initial={{ opacity: 0, x: -10 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        transition={{ delay: i * 0.05, duration: 0.2 }}
-                        className={`flex items-center gap-2 text-xs transition-colors duration-200 ${rule.valid ? "text-primary" : "text-muted-foreground"}`}
-                      >
-                        <motion.span
-                          animate={{ scale: rule.valid ? [1, 1.3, 1] : 1 }}
-                          transition={{ duration: 0.2 }}
-                        >
-                          {rule.valid ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Circle className="h-3.5 w-3.5" />}
-                        </motion.span>
-                        <span>{rule.label}</span>
-                      </motion.li>
-                    ))}
-                  </motion.ul>
-                )}
-              </AnimatePresence>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">Xác nhận mật khẩu</label>
-              <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                <Input
-                  type={showPassword ? "text" : "password"}
-                  placeholder="Nhập lại mật khẩu"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="pl-10"
-                  minLength={8}
-                  required
-                />
-              </div>
-              <AnimatePresence>
-                {confirmPassword.length > 0 && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: "auto" }}
-                    exit={{ opacity: 0, height: 0 }}
-                    transition={{ duration: 0.2 }}
-                    className={`flex items-center gap-2 text-xs mt-1.5 ${isPasswordMatch ? "text-primary" : "text-destructive"}`}
-                  >
-                    {isPasswordMatch ? (
-                      <><CheckCircle2 className="h-3.5 w-3.5" /> Mật khẩu khớp</>
-                    ) : (
-                      <><Circle className="h-3.5 w-3.5" /> Mật khẩu không khớp</>
-                    )}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
+            <NewPasswordFields passwordLabel="Mật khẩu" password={password} confirmation={confirmPassword}
+              onPasswordChange={setPassword} onConfirmationChange={setConfirmPassword} assessment={assessment}
+              disabled={loading} />
 
             <ReCaptchaV2 ref={captchaRef} onTokenChange={setCaptchaToken} />
 

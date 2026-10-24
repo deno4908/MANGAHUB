@@ -133,6 +133,15 @@ def test_current_login_uses_one_verifier_and_does_not_scan_auth_users(auth_clien
     assert "HttpOnly" in response.headers["Set-Cookie"]
 
 
+def test_existing_passwords_still_allow_login_after_new_password_policy_changes(auth_client, monkeypatch):
+    client, _ = auth_client
+    provider = Mock()
+    provider.auth.sign_in_with_password.return_value = session_result()
+    monkeypatch.setattr(routes, "_get_sb", lambda: provider)
+    result = post_login(client, {"email": EMAIL, "password": "Password123!"})
+    assert result.status_code == 200
+
+
 def test_legacy_account_migrates_after_successful_verification(auth_client, monkeypatch):
     client, admin = auth_client
     provider = Mock()
@@ -169,22 +178,37 @@ def test_banned_login_revokes_new_session_without_returning_tokens(auth_client, 
 def test_new_password_policy_is_enforced_server_side():
     assert c.password_strength_error("weak")
     assert c.password_strength_error("x" * 7)
-    assert c.password_strength_error("x" * 8) is None
-    assert c.password_strength_error("x" * 14) is None
-    assert c.password_strength_error("x" * 128) is None
+    assert c.password_strength_error("x" * 8)
+    assert c.password_strength_error("x" * 14)
+    assert c.password_strength_error("x" * 128)
     assert c.password_strength_error("😀" * 7)
-    assert c.password_strength_error("😀" * 8) is None
+    assert c.password_strength_error("😀" * 8)
     assert c.password_strength_error("x" * 129)
     assert c.password_strength_error(PASSWORD) is None
+
+
+def test_password_policy_matches_shared_browser_fixtures():
+    from pathlib import Path
+    cases = json.loads((Path(__file__).resolve().parents[2] / "test-fixtures" / "password-policy.json").read_text(encoding="utf-8"))
+    for case in cases:
+        assert (c.password_strength_error(case["password"]) is None) == case["accepted"]
 
 
 def test_password_reset_requires_recent_recovery_proof():
     import jwt
     import time
-    def token(method, age):
-        return jwt.encode({"amr": [{"method": method, "timestamp": time.time() - age}]}, "test-secret")
+    def token(method, age, **claims):
+        return jwt.encode({"email": EMAIL, "phone": "", "amr": [{"method": method, "timestamp": time.time() - age}], **claims}, "test-secret")
     assert routes._is_recent_recovery_session(token("recovery", 10))
+    assert routes._is_recent_recovery_session(token("otp", 10))
     assert not routes._is_recent_recovery_session(token("password", 10))
+    assert not routes._is_recent_recovery_session(token("oauth", 10))
+    assert not routes._is_recent_recovery_session(token("token_refresh", 10))
+    assert not routes._is_recent_recovery_session(token("totp", 10))
+    assert not routes._is_recent_recovery_session(token("otp", 10, phone="+10000000000"))
+    assert not routes._is_recent_recovery_session(token("otp", 10, email=""))
+    assert not routes._is_recent_recovery_session(token("otp", 901))
+    assert not routes._is_recent_recovery_session(token("otp", -60))
     assert not routes._is_recent_recovery_session(token("recovery", 901))
     assert not routes._is_recent_recovery_session("invalid")
 

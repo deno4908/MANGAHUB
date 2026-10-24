@@ -18,15 +18,15 @@ describe('credential encryption', () => {
     expect(JSON.parse(new TextDecoder().decode(result.plaintext))).toEqual({ fields, nonce: challenge.nonce, purpose: 'login' });
   });
 
-  it('rejects incomplete challenges and enforces the password length policy', async () => {
+  it('rejects incomplete challenges and weak patterns as well as invalid lengths', async () => {
     await expect(sealCredentials({ password: 'secret' }, 'register', { nonce: '', public_key: {}, expires_in: 0 })).rejects.toThrow();
     expect(passwordStrengthError('weak')).toBeTruthy();
     expect(passwordStrengthError('x'.repeat(7))).toBeTruthy();
-    expect(passwordStrengthError('x'.repeat(8))).toBeNull();
-    expect(passwordStrengthError('x'.repeat(14))).toBeNull();
-    expect(passwordStrengthError('x'.repeat(128))).toBeNull();
+    expect(passwordStrengthError('x'.repeat(8))).toBeTruthy();
+    expect(passwordStrengthError('x'.repeat(14))).toBeTruthy();
+    expect(passwordStrengthError('x'.repeat(128))).toBeTruthy();
     expect(passwordStrengthError('😀'.repeat(7))).toBeTruthy();
-    expect(passwordStrengthError('😀'.repeat(8))).toBeNull();
+    expect(passwordStrengthError('😀'.repeat(8))).toBeTruthy();
     expect(passwordStrengthError('x'.repeat(129))).toBeTruthy();
     expect(passwordStrengthError('a long memorable passphrase')).toBeNull();
   });

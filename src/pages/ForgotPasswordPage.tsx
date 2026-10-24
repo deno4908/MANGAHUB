@@ -26,10 +26,10 @@ const ForgotPasswordPage = () => {
     setLoading(true);
     try {
       await authApi.forgotPassword(email, captchaToken);
-      toast.success("Đã gửi mã xác minh tới email của bạn!");
+      toast.success("Đã gửi liên kết đặt lại mật khẩu tới email của bạn!");
       navigate(`/auth/callback?email=${encodeURIComponent(email)}`);
     } catch (err: any) {
-      toast.error(err.message || "Không thể gửi mã. Vui lòng thử lại.");
+      toast.error(err.message || "Không thể gửi email. Vui lòng thử lại.");
     } finally {
       captchaRef.current?.reset();
       setLoading(false);
@@ -55,7 +55,7 @@ const ForgotPasswordPage = () => {
               <div className="text-center mb-6">
                 <h2 className="text-xl font-bold text-foreground">Quên mật khẩu?</h2>
                 <p className="text-sm text-muted-foreground mt-2">
-                  Nhập email đã đăng ký, chúng tôi sẽ gửi mã xác minh.
+                  Nhập email đã đăng ký để nhận liên kết đặt lại mật khẩu.
                 </p>
               </div>
               <form onSubmit={handleSubmit} className="space-y-5">
@@ -83,7 +83,7 @@ const ForgotPasswordPage = () => {
                       Đang gửi...
                     </span>
                   ) : (
-                    "Gửi mã xác minh"
+                    "Gửi liên kết đặt lại"
                   )}
                 </Button>
               </form>

@@ -12,6 +12,8 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useIsMobile } from '@/hooks/use-mobile';
+import { NewPasswordFields, usePasswordAssessment } from '@/components/security/NewPasswordFields';
+import { passwordStrengthError } from '@/lib/passwordPolicy';
 
 type SettingsSection = 'account' | 'reader' | 'notifications' | 'privacy' | 'security' | 'appearance' | 'danger';
 
@@ -517,12 +519,14 @@ const SecuritySection = () => {
   const [currentPw, setCurrentPw] = useState('');
   const [newPw, setNewPw] = useState('');
   const [confirmPw, setConfirmPw] = useState('');
+  const assessment = usePasswordAssessment(newPw);
   const [changingPw, setChangingPw] = useState(false);
 
   const handleChangePassword = async () => {
     if (!currentPw) { toast.error('Vui lòng nhập mật khẩu hiện tại'); return; }
-    if (Array.from(newPw).length < 8 || Array.from(newPw).length > 128) {
-      toast.error('Mật khẩu mới phải từ 8 đến 128 ký tự.');
+    const strengthError = passwordStrengthError(newPw);
+    if (strengthError) {
+      toast.error(strengthError);
       return;
     }
     if (newPw !== confirmPw) { toast.error('Mật khẩu xác nhận không khớp'); return; }
@@ -545,9 +549,9 @@ const SecuritySection = () => {
       <SectionCard title="Đổi mật khẩu" description="Cập nhật mật khẩu tài khoản">
         <div className="space-y-3">
           <InputField label="Mật khẩu hiện tại" value={currentPw} onChange={setCurrentPw} type="password" />
-          <InputField label="Mật khẩu mới" value={newPw} onChange={setNewPw} type="password" />
-          <InputField label="Xác nhận mật khẩu" value={confirmPw} onChange={setConfirmPw} type="password" />
-          <button onClick={handleChangePassword} disabled={changingPw || !currentPw || !newPw || !confirmPw}
+          <NewPasswordFields password={newPw} confirmation={confirmPw} onPasswordChange={setNewPw}
+            onConfirmationChange={setConfirmPw} assessment={assessment} disabled={changingPw} />
+          <button onClick={handleChangePassword} disabled={changingPw || !currentPw || !assessment.accepted || newPw !== confirmPw}
             className="px-5 py-2.5 rounded-xl manga-gradient text-primary-foreground text-sm font-bold flex items-center gap-2 disabled:opacity-50">
             <Lock className="w-4 h-4" /> {changingPw ? 'Đang lưu...' : 'Đổi mật khẩu'}
           </button>

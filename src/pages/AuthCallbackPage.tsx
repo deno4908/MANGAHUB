@@ -3,9 +3,10 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { AlertCircle, ArrowLeft, Lock, Loader2, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { NewPasswordFields, usePasswordAssessment } from '@/components/security/NewPasswordFields';
+import { passwordStrengthError } from '@/lib/passwordPolicy';
 import { useToast } from "@/hooks/use-toast";
-import { authApi, clearTokens, setTokens } from "@/lib/api";
+import { authApi, setTokens } from "@/lib/api";
 import BrandLogo from "@/components/manga/BrandLogo";
 
 /**
@@ -24,6 +25,7 @@ const VerifyOtpPage = () => {
   const [verified, setVerified] = useState(false);
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const assessment = usePasswordAssessment(newPassword);
   const [resetting, setResetting] = useState(false);
   const [retryingOAuth, setRetryingOAuth] = useState(false);
   const [callbackError, setCallbackError] = useState<{
@@ -166,8 +168,9 @@ const VerifyOtpPage = () => {
   };
 
   const handleResetPassword = async () => {
-    if (Array.from(newPassword).length < 8 || Array.from(newPassword).length > 128) {
-      toast({ variant: "destructive", title: "Mật khẩu chưa hợp lệ", description: "Mật khẩu mới phải từ 8 đến 128 ký tự." });
+    const strengthError = passwordStrengthError(newPassword);
+    if (strengthError) {
+      toast({ variant: "destructive", title: "Mật khẩu chưa đủ mạnh", description: strengthError });
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -177,7 +180,8 @@ const VerifyOtpPage = () => {
     setResetting(true);
     try {
       await authApi.resetPassword(newPassword);
-      clearTokens();
+      const { useUserStore } = await import('@/store/userStore');
+      useUserStore.getState().logout('global', { server: false });
       toast({ title: "Đặt lại mật khẩu thành công!", description: "Đang chuyển hướng về trang đăng nhập..." });
       setTimeout(() => navigate("/login"), 2000);
     } catch (err: any) {
@@ -268,17 +272,10 @@ const VerifyOtpPage = () => {
                 <h2 className="text-xl font-bold text-foreground">Đặt mật khẩu mới</h2>
                 <p className="text-sm text-muted-foreground mt-2">Nhập mật khẩu mới cho tài khoản của bạn.</p>
               </div>
-              <div className="space-y-3">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-foreground">Mật khẩu mới</label>
-                  <Input type="password" placeholder="Từ 8 đến 128 ký tự" value={newPassword} onChange={e => setNewPassword(e.target.value)} />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-foreground">Xác nhận mật khẩu</label>
-                  <Input type="password" placeholder="Nhập lại mật khẩu" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} />
-                </div>
-              </div>
-              <Button onClick={handleResetPassword} className="w-full h-11 font-bold" disabled={resetting || !newPassword || !confirmPassword}>
+              <NewPasswordFields password={newPassword} confirmation={confirmPassword}
+                onPasswordChange={setNewPassword} onConfirmationChange={setConfirmPassword}
+                assessment={assessment} disabled={resetting} />
+              <Button onClick={handleResetPassword} className="w-full h-11 font-bold" disabled={resetting || !assessment.accepted || newPassword !== confirmPassword}>
                 {resetting ? (
                   <span className="flex items-center gap-2">
                     <span className="w-4 h-4 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />
@@ -321,16 +318,8 @@ const VerifyOtpPage = () => {
                 variant="outline"
                 className="w-full h-11 font-bold"
                 onClick={async () => {
-                  if (!email) {
-                    navigate("/forgot-password");
-                    return;
-                  }
-                  try {
-                    await authApi.forgotPassword(email);
-                    toast({ title: "Đã gửi lại email", description: `Link mới đã được gửi tới ${email}.` });
-                  } catch {
-                    toast({ variant: "destructive", title: "Lỗi", description: "Không thể gửi lại email." });
-                  }
+                  // Sending another email requires a fresh CAPTCHA on that form.
+                  navigate('/forgot-password');
                 }}
               >
                 Gửi lại link xác minh
