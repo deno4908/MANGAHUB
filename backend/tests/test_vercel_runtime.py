@@ -12,6 +12,21 @@ from flask_app.auth import credentials
 from proxy_trust import resolve_client_ip
 
 
+def test_password_checker_is_installed_by_both_pip_and_vercel_uv():
+    import tomllib
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / 'pyproject.toml').read_text(encoding='utf-8'))
+    lock = tomllib.loads((root / 'uv.lock').read_text(encoding='utf-8'))
+    assert 'zxcvbn==4.5.0' in project['project']['dependencies']
+    assert 'zxcvbn==4.5.0' in (root / 'requirements.txt').read_text(encoding='utf-8').splitlines()
+    packages = {package['name']: package for package in lock['package']}
+    backend = packages[project['project']['name']]
+    assert {'name': 'zxcvbn'} in backend['dependencies']
+    assert {'name': 'zxcvbn', 'specifier': '==4.5.0'} in backend['metadata']['requires-dist']
+    assert packages['zxcvbn']['version'] == '4.5.0'
+
+
 def test_request_work_and_nested_jobs_finish_before_invocation_returns(monkeypatch):
     asyncio.run(_request_work_and_nested_jobs(monkeypatch))
 
