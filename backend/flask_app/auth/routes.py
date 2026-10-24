@@ -40,7 +40,6 @@ _refresh_singleflight_guard = Lock()
 _refresh_singleflight_locks: dict[str, Lock] = {}
 _refresh_result_cache: dict[str, tuple[float, dict]] = {}
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
-_USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _SIGN_OUT_SCOPES = {"local", "global", "others"}
 _REFRESH_COOKIE_NAME = "mh_refresh_token"
 _OAUTH_VERIFIER_COOKIE_NAME = "mh_oauth_code_verifier"
@@ -730,12 +729,10 @@ def _is_valid_email(value: str) -> bool:
 
 def _validate_username(username: str) -> str | None:
     value = str(username or "").strip()
-    if len(value) < 3 or len(value) > 50:
-        return "Username phải từ 3-50 ký tự"
-    if re.search(r"\s", value):
-        return "Username không được chứa khoảng trắng"
-    if not _USERNAME_RE.fullmatch(value):
-        return "Username chỉ được chứa chữ, số, dấu chấm (.), gạch dưới (_) hoặc gạch ngang (-)"
+    if not value:
+        return "Username là bắt buộc"
+    if len(value) > 50:
+        return "Username tối đa 50 ký tự"
     return None
 
 

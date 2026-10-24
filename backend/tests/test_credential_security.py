@@ -142,6 +142,37 @@ def test_existing_passwords_still_allow_login_after_new_password_policy_changes(
     assert result.status_code == 200
 
 
+@pytest.mark.parametrize('username', ['a', 'Độc giả vui vẻ', 'Reader ! #42'])
+def test_registration_accepts_unique_names_without_character_rules(auth_client, monkeypatch, username):
+    client, admin = auth_client
+    monkeypatch.setattr(routes, '_get_auth_users_by_email', lambda email: [])
+    monkeypatch.setattr(routes, '_email_exists', lambda *args, **kwargs: False)
+    admin.table.return_value.select.return_value.eq.return_value.execute.return_value = SimpleNamespace(data=[])
+    provider = Mock()
+    provider.auth.sign_up.return_value = session_result()
+    monkeypatch.setattr(routes, '_get_sb', lambda: provider)
+    body = seal(c.issue_challenge('register'), purpose='register', fields={
+        'email': EMAIL, 'password': PASSWORD, 'username': username,
+    })
+    result = client.post('/auth/register', json=body, headers={'X-MangaHub-CSRF': '1'})
+    assert result.status_code == 201, result.json
+    assert provider.auth.sign_up.call_args.args[0]['options']['data']['username'] == username
+
+
+def test_registration_rejects_duplicate_username_before_creating_an_account(auth_client, monkeypatch):
+    client, admin = auth_client
+    monkeypatch.setattr(routes, '_get_auth_users_by_email', lambda email: [])
+    admin.table.return_value.select.return_value.eq.return_value.execute.return_value = SimpleNamespace(data=[{'id': 'existing-reader'}])
+    provider = Mock()
+    monkeypatch.setattr(routes, '_get_sb', lambda: provider)
+    body = seal(c.issue_challenge('register'), purpose='register', fields={
+        'email': EMAIL, 'password': PASSWORD, 'username': 'Độc giả vui vẻ',
+    })
+    result = client.post('/auth/register', json=body, headers={'X-MangaHub-CSRF': '1'})
+    assert result.status_code == 409 and result.json['error'] == 'Username đã tồn tại'
+    provider.auth.sign_up.assert_not_called()
+
+
 def test_legacy_account_migrates_after_successful_verification(auth_client, monkeypatch):
     client, admin = auth_client
     provider = Mock()

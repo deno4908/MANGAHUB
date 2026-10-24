@@ -27,7 +27,8 @@ it('uses the same checklist as registration and clears the signed-in account aft
   fireEvent.change(password, { target: { value: 'Password123!' } });
   fireEvent.change(confirmation, { target: { value: 'Password123!' } });
   expect(submit).toBeDisabled();
-  expect(screen.getByRole('progressbar', { name: 'Độ mạnh mật khẩu' })).toBeInTheDocument();
+  expect(screen.getByRole('list', { name: 'Yêu cầu mật khẩu' })).toBeInTheDocument();
+  expect(screen.queryByRole('progressbar')).toBeNull();
   fireEvent.change(password, { target: { value: 'violet canoe lunar orchard' } });
   expect(submit).toBeDisabled();
   fireEvent.change(confirmation, { target: { value: 'violet canoe lunar orchard' } });

@@ -20,7 +20,7 @@ it('shows animated strength and matching feedback, rejecting long but predictabl
   const confirmation = screen.getByLabelText('Xác nhận mật khẩu');
   fireEvent.change(password, { target: { value: 'a'.repeat(20) } });
   fireEvent.change(confirmation, { target: { value: 'a'.repeat(20) } });
-  expect(screen.getByRole('progressbar', { name: 'Độ mạnh mật khẩu' })).toBeInTheDocument();
+  expect(screen.queryByRole('progressbar')).toBeNull();
   expect(screen.getByRole('list', { name: 'Yêu cầu mật khẩu' })).toBeInTheDocument();
   expect(screen.getByText('Mật khẩu khớp')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Lưu mật khẩu' })).toBeDisabled();
@@ -33,5 +33,5 @@ it('shows animated strength and matching feedback, rejecting long but predictabl
   expect(password).toHaveAttribute('type', 'text');
   expect(confirmation).toHaveAttribute('type', 'text');
   fireEvent.change(password, { target: { value: '' } });
-  await waitFor(() => expect(screen.queryByRole('progressbar')).toBeNull());
+  await waitFor(() => expect(screen.queryByRole('list', { name: 'Yêu cầu mật khẩu' })).toBeNull());
 });

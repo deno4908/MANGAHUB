@@ -26,9 +26,8 @@ export function NewPasswordFields({ password, confirmation, onPasswordChange, on
   const matches = password === confirmation;
   const rules = [
     { label: 'Từ 8 đến 128 ký tự', valid: assessment.lengthValid },
-    { label: 'Đạt mức Khá mạnh trở lên', valid: assessment.score >= 3 },
+    { label: 'Không dùng mật khẩu phổ biến hoặc mẫu dễ đoán', valid: assessment.score >= 3 },
   ];
-  const strength = ['Rất yếu', 'Yếu', 'Trung bình', 'Khá mạnh', 'Mạnh'][assessment.score];
   return <div className="space-y-4">
     <div className="space-y-2">
       <label htmlFor={`${id}-password`} className="text-sm font-medium text-foreground">{passwordLabel}</label>
@@ -49,17 +48,6 @@ export function NewPasswordFields({ password, confirmation, onPasswordChange, on
           initial={reduceMotion ? false : { opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }}
           exit={{ opacity: 0, height: 0 }} transition={{ duration: reduceMotion ? 0 : 0.2 }} className="overflow-hidden">
           <div className="space-y-3 rounded-xl border border-border bg-muted/40 p-3">
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <span className="text-muted-foreground">Độ mạnh mật khẩu</span>
-              <span className={assessment.accepted ? 'font-semibold text-emerald-600 dark:text-emerald-400' : 'font-medium text-muted-foreground'}>{strength}</span>
-            </div>
-            <div role="progressbar" aria-label="Độ mạnh mật khẩu" aria-valuemin={0} aria-valuemax={4}
-              aria-valuenow={assessment.score} aria-valuetext={strength} className="flex gap-1.5">
-              {[0, 1, 2, 3].map(index => <motion.span key={index}
-                animate={{ opacity: index < Math.max(1, assessment.score) ? 1 : 0.25 }}
-                transition={{ duration: reduceMotion ? 0 : 0.2 }}
-                className={`h-1.5 flex-1 rounded-full ${assessment.accepted ? 'bg-emerald-500' : assessment.score >= 2 ? 'bg-amber-500' : 'bg-destructive'}`} />)}
-            </div>
             <ul aria-label="Yêu cầu mật khẩu" className="space-y-2">
               {rules.map(rule => <motion.li key={rule.label} layout={!reduceMotion}
                 className={`flex items-start gap-2 text-xs transition-colors ${rule.valid ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'}`}>
@@ -70,7 +58,6 @@ export function NewPasswordFields({ password, confirmation, onPasswordChange, on
                 <span>{rule.label}<span className="sr-only">{rule.valid ? ': Đạt' : ': Chưa đạt'}</span></span>
               </motion.li>)}
             </ul>
-            {!assessment.accepted && <p className="text-xs leading-relaxed text-muted-foreground">Tránh mật khẩu phổ biến, chuỗi lặp hoặc dãy ký tự. Dùng nhiều từ không liên quan hoặc một chuỗi ngẫu nhiên dài hơn.</p>}
           </div>
         </motion.div>}
       </AnimatePresence>

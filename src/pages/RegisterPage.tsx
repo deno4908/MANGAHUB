@@ -1,7 +1,7 @@
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
-import { Mail, User, CheckCircle2, Circle } from "lucide-react";
+import { motion } from "framer-motion";
+import { Mail, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
@@ -21,24 +21,13 @@ const RegisterPage = () => {
   const captchaRequired = isRecaptchaConfigured();
   const { toast } = useToast();
   const navigate = useNavigate();
-  const hasUsernameWhitespace = /\s/.test(name);
-
-  const usernameChecks = useMemo(
-    () => [
-      { label: "Không chứa khoảng trắng", valid: name.length > 0 && !hasUsernameWhitespace, key: "no-whitespace" as const },
-      { label: "Chỉ dùng chữ, số, dấu chấm, gạch dưới hoặc gạch ngang", valid: /^[A-Za-z0-9._-]+$/.test(name) },
-    ],
-    [hasUsernameWhitespace, name],
-  );
 
   const assessment = usePasswordAssessment(password);
   const isPasswordStrong = assessment.accepted;
   const isPasswordMatch = password === confirmPassword;
-  const isUsernameValid = usernameChecks.every((rule) => rule.valid);
   const canSubmit =
     !loading &&
     name.trim().length > 0 &&
-    isUsernameValid &&
     email.trim().length > 0 &&
     isPasswordStrong &&
     isPasswordMatch &&
@@ -46,15 +35,6 @@ const RegisterPage = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-
-    if (!isUsernameValid) {
-      toast({
-        title: "Username không hợp lệ",
-        description: "Username không chứa khoảng trắng và chỉ dùng chữ, số, dấu chấm, gạch dưới hoặc gạch ngang.",
-        variant: "destructive",
-      });
-      return;
-    }
 
     if (!isPasswordStrong) {
       toast({
@@ -141,10 +121,11 @@ const RegisterPage = () => {
         <div className="bg-card border border-border rounded-2xl p-8 shadow-sm">
           <form onSubmit={handleSubmit} className="space-y-5">
             <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">Username</label>
+              <label htmlFor="register-username" className="text-sm font-medium text-foreground">Username</label>
               <div className="relative">
                 <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                 <Input
+                  id="register-username"
                   type="text"
                   placeholder="username"
                   value={name}
@@ -154,47 +135,6 @@ const RegisterPage = () => {
                 />
               </div>
 
-              <AnimatePresence>
-                {name.length > 0 && (
-                  <motion.ul
-                    initial={{ opacity: 0, height: 0, marginTop: 0 }}
-                    animate={{ opacity: 1, height: "auto", marginTop: 8 }}
-                    exit={{ opacity: 0, height: 0, marginTop: 0 }}
-                    transition={{ duration: 0.3, ease: "easeOut" }}
-                    className="space-y-1.5 rounded-md border border-border bg-muted/40 p-3 overflow-hidden"
-                  >
-                    {usernameChecks.map((rule, i) => (
-                      <motion.li
-                        key={rule.label}
-                        initial={{ opacity: 0, x: -10 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        transition={{ delay: i * 0.05, duration: 0.2 }}
-                        className={`flex items-center gap-2 text-xs transition-colors duration-200 ${
-                          rule.valid
-                            ? "text-primary"
-                            : rule.key === "no-whitespace" && hasUsernameWhitespace
-                              ? "text-destructive"
-                              : "text-muted-foreground"
-                        }`}
-                      >
-                        <motion.span
-                          animate={{ scale: rule.valid ? [1, 1.3, 1] : 1 }}
-                          transition={{ duration: 0.2 }}
-                        >
-                          {rule.valid ? (
-                            <CheckCircle2 className="h-3.5 w-3.5" />
-                          ) : rule.key === "no-whitespace" && hasUsernameWhitespace ? (
-                            <span className="inline-flex h-3.5 w-3.5 items-center justify-center text-[11px] font-bold leading-none">x</span>
-                          ) : (
-                            <Circle className="h-3.5 w-3.5" />
-                          )}
-                        </motion.span>
-                        <span>{rule.label}</span>
-                      </motion.li>
-                    ))}
-                  </motion.ul>
-                )}
-              </AnimatePresence>
             </div>
 
             <div className="space-y-2">
