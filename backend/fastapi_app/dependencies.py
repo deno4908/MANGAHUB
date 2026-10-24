@@ -16,6 +16,7 @@ from supabase import Client, create_client
 from gotrue.errors import AuthApiError, AuthRetryableError
 from postgrest.exceptions import APIError
 import httpx
+import access_tickets
 from fastapi_app.services.request_coalescing import coalesce_reads
 from fastapi_app.services.auth_claims import verified_access_claims
 
@@ -181,7 +182,7 @@ def invalidate_auth_cache(user_id: str | None = None) -> None:
             _auth_cache.pop(token, None)
 
 
-def _get_current_user_sync(authorization: str | None):
+def _get_current_user_sync(authorization: str | None, force_live=False):
     """
     Extract and verify current user from Bearer token.
     Always fetches role from profiles table.
@@ -201,7 +202,7 @@ def _get_current_user_sync(authorization: str | None):
         _cleanup_expired_caches()
 
     cached_auth = _auth_cache.get(token)
-    if cached_auth and cached_auth[0] > now:
+    if not force_live and cached_auth and cached_auth[0] > now:
         cached_user = cached_auth[1]
         if cached_user.get("is_banned"):
             raise HTTPException(status_code=403, detail=BANNED_ACCOUNT_DETAIL)
@@ -227,7 +228,7 @@ def _get_current_user_sync(authorization: str | None):
 
         stage = "profile"
         cached_profile = _profile_cache.get(user_id)
-        if cached_profile and cached_profile[0] > time():
+        if not force_live and cached_profile and cached_profile[0] > time():
             profile_data = cached_profile[1]
         else:
             profile_data = _retry_auth_read(lambda: _fetch_auth_profile(user_id), "profile")
@@ -280,10 +281,46 @@ def _get_current_user_sync(authorization: str | None):
 
 
 @coalesce_reads
-async def get_current_user(authorization: str = Header(None)):
+async def _live_user_read(authorization, force_live):
     # Supabase auth/profile clients are synchronous. Share the verification for
     # concurrent reads and keep their network waits out of the ASGI event loop.
-    return await asyncio.to_thread(_get_current_user_sync, authorization)
+    return await asyncio.to_thread(_get_current_user_sync, authorization, force_live)
+
+
+def _ticket_read(authorization):
+    if not authorization or not authorization.startswith("Bearer "):
+        return None, False
+    claims = verified_access_claims(authorization[7:])
+    who = access_tickets.identity(claims)
+    if not who:
+        return None, False
+    try:
+        return access_tickets.read_session(who), False
+    except access_tickets.Changed:
+        return None, True
+    except access_tickets.Rejected as error:
+        raise HTTPException(401, SESSION_REVOKED_DETAIL) from error
+    except access_tickets.Unavailable as error:
+        raise HTTPException(503, str(error), headers={"X-MangaHub-Auth-Stage": "access-session"}) from error
+
+
+@coalesce_reads
+async def _shared_ticket_read(authorization):
+    return await asyncio.to_thread(_ticket_read, authorization)
+
+
+async def get_current_user(authorization: str = Header(None)):
+    access_tickets.current_record.set(None)
+    force_live = access_tickets.live_auth.get()
+    # Revocation guards apply to writes too; a revoked login must not regain
+    # access through live profile verification or a short-lived profile cache.
+    record, changed = await _shared_ticket_read(authorization)
+    access_tickets.refresh_required.set(changed)
+    if record and not force_live:
+        access_tickets.current_record.set(record)
+        return access_tickets.user(record)
+    force_live = force_live or changed
+    return await _live_user_read(authorization, force_live)
 
 
 async def get_optional_user(authorization: str = Header(None)):
@@ -321,7 +358,11 @@ async def authorize_api_request(
             raise HTTPException(status_code=401, detail=TOKEN_REQUIRED_DETAIL)
         return None
 
-    user = await get_current_user(authorization)
+    context = access_tickets.live_auth.set(bool(required_role) or access_tickets.live_auth.get())
+    try:
+        user = await get_current_user(authorization)
+    finally:
+        access_tickets.live_auth.reset(context)
     if not required_role:
         return user
 
@@ -342,7 +383,14 @@ def require_role(*allowed_roles: str):
     Usage: Depends(require_role("moderator", "admin"))
     """
 
-    async def _check(user=Depends(get_current_user)):
+    async def _check(user=Depends(get_current_user), authorization: str = Header(None)):
+        if access_tickets.current_record.get():
+            # Also protect privileged dependencies outside /admin namespaces.
+            context = access_tickets.live_auth.set(True)
+            try:
+                user = await get_current_user(authorization)
+            finally:
+                access_tickets.live_auth.reset(context)
         user_role = str(user.get("role", "reader") or "reader").strip().lower()
         user_level = ROLE_HIERARCHY.get(user_role, 0)
 

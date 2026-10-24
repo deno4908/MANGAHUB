@@ -10,6 +10,7 @@ from io import BytesIO
 import re
 import time
 import uuid
+import access_tickets
 from typing import Any
 from urllib.parse import unquote
 
@@ -2344,14 +2345,15 @@ async def ban_user(
     if target_role == "admin":
         raise HTTPException(status_code=403, detail="Không thể cấm admin")
 
-    db.table("profiles").update(
-        {
-            "is_banned": True,
-            "ban_reason": data.ban_reason,
-            "session_revoked_at": datetime.now(timezone.utc).isoformat(),
-        }
-    ).eq("id", data.user_id).execute()
-    invalidate_auth_cache(data.user_id)
+    with access_tickets.security_change(data.user_id):
+        db.table("profiles").update(
+            {
+                "is_banned": True,
+                "ban_reason": data.ban_reason,
+                "session_revoked_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("id", data.user_id).execute()
+        invalidate_auth_cache(data.user_id)
 
     _log_action(db, admin, "Ban user", data.user_id)
     return {"message": "Đã cấm user"}
@@ -2362,12 +2364,13 @@ async def unban_user(
     user_id: str, admin=Depends(require_admin), db=Depends(get_supabase)
 ):
     """Bỏ cấm user."""
-    db.table("profiles").update(
-        {
-            "is_banned": False,
-            "ban_reason": None,
-        }
-    ).eq("id", user_id).execute()
+    with access_tickets.security_change(user_id):
+        db.table("profiles").update(
+            {
+                "is_banned": False,
+                "ban_reason": None,
+            }
+        ).eq("id", user_id).execute()
     # Keep the prior session_revoked_at value: the user must sign in again.
     invalidate_auth_cache(user_id)
     _log_action(db, admin, "Unban user", user_id)
@@ -2387,12 +2390,13 @@ async def change_role(
             status_code=403, detail="Chỉ admin mới có thể cấp quyền admin"
         )
 
-    db.table("profiles").update(
-        {
-            "role": data.role.value,
-        }
-    ).eq("id", data.user_id).execute()
-    invalidate_auth_cache(data.user_id)
+    with access_tickets.security_change(data.user_id):
+        db.table("profiles").update(
+            {
+                "role": data.role.value,
+            }
+        ).eq("id", data.user_id).execute()
+        invalidate_auth_cache(data.user_id)
 
     _log_action(db, admin, "Đổi role", f"{data.user_id} → {data.role.value}")
     return {"message": f"Đã đổi role thành {data.role.value}"}

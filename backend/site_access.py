@@ -8,6 +8,7 @@ from contextlib import contextmanager
 
 from itsdangerous import BadData, URLSafeTimedSerializer
 from config import config
+import access_tickets
 
 SETTING_KEY = "site_access"
 MEMBER_PREFIX = "site_access:user:"
@@ -87,34 +88,36 @@ def get_state(*, force=False):
             "message": str(value.get("message") or DEFAULT_MESSAGE)[:1000]}
 
 
-def is_allowed(state, user):
+def is_allowed(state, user, *, force=False):
     if not state["enabled"]:
         return True
     if not user:
         return False
     if user.get("role") == "admin":
         return True
-    return _read(MEMBER_PREFIX + str(UUID(user["id"]))).get("allowed") is True
+    return _read(MEMBER_PREFIX + str(UUID(user["id"])), force=force).get("allowed") is True
 
 
 def set_state(enabled, message, actor):
     value = {"enabled": enabled, "message": (message or DEFAULT_MESSAGE).strip() or DEFAULT_MESSAGE}
-    _db().table("system_settings").upsert({"key": SETTING_KEY, "value": value, "updated_by": actor}, on_conflict="key").execute()
-    _invalidate(SETTING_KEY)
+    with access_tickets.security_change():
+        _db().table("system_settings").upsert({"key": SETTING_KEY, "value": value, "updated_by": actor}, on_conflict="key").execute()
+        _invalidate(SETTING_KEY)
     return value
 
 
 def set_member(user_id, allowed, actor):
     user_id = str(UUID(str(user_id)))
     key = MEMBER_PREFIX + user_id
-    if allowed:
-        profiles = _db().table("profiles").select("id").eq("id", user_id).limit(1).execute().data
-        if not profiles:
-            raise LookupError("Không tìm thấy tài khoản.")
-        _db().table("system_settings").upsert({"key": key, "value": {"allowed": True}, "updated_by": actor}, on_conflict="key").execute()
-    else:
-        _db().table("system_settings").delete().eq("key", key).execute()
-    _invalidate(key)
+    with access_tickets.security_change(user_id):
+        if allowed:
+            profiles = _db().table("profiles").select("id").eq("id", user_id).limit(1).execute().data
+            if not profiles:
+                raise LookupError("Không tìm thấy tài khoản.")
+            _db().table("system_settings").upsert({"key": key, "value": {"allowed": True}, "updated_by": actor}, on_conflict="key").execute()
+        else:
+            _db().table("system_settings").delete().eq("key", key).execute()
+        _invalidate(key)
 
 
 def list_members():

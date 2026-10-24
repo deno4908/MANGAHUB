@@ -1,5 +1,5 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, onlineManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SiteAccessGate from "./SiteAccessGate";
@@ -286,4 +286,71 @@ it("offers admin recovery after a network failure while keeping reader content c
   view.unmount();
   show("/admin");
   expect(await screen.findByText("Private reader content")).toBeInTheDocument();
+});
+
+it('checks permission once while the issued access session remains valid, including focus and restoration', async () => {
+  vi.useFakeTimers();
+  session.user = { id: 'reader', role: 'reader' };
+  session.isLoggedIn = true;
+  vi.mocked(siteAccessApi.getStatus).mockResolvedValue({ ...deny, allowed: true, authenticated: true,
+    access_expires_at: Date.now() + 24 * 60 * 60 * 1000 });
+  const view = show('/manga?page=45');
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  expect(screen.getByText('Private reader content')).toBeInTheDocument();
+  await act(async () => {
+    focusManager.setFocused(false); focusManager.setFocused(true);
+    onlineManager.setOnline(false); onlineManager.setOnline(true);
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+  });
+  session.isRestoringSession = true;
+  view.rerender(application('/manga?page=46'));
+  expect(screen.getByText('Private reader content')).toBeInTheDocument();
+  session.isRestoringSession = false;
+  view.rerender(application());
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  expect(siteAccessApi.getStatus).toHaveBeenCalledTimes(1);
+});
+
+it('renews a ticket shortly before its deadline and keeps the reader mounted', async () => {
+  vi.useFakeTimers();
+  session.user = { id: 'reader', role: 'reader' }; session.isLoggedIn = true;
+  const start = Date.now();
+  vi.mocked(siteAccessApi.getStatus)
+    .mockResolvedValueOnce({ ...deny, allowed: true, authenticated: true, access_expires_at: start + 120_000 })
+    .mockResolvedValueOnce({ ...deny, allowed: true, authenticated: true, access_expires_at: start + 86_400_000 });
+  show();
+  await act(async () => { await vi.advanceTimersByTimeAsync(89_000); });
+  expect(siteAccessApi.getStatus).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect(siteAccessApi.getStatus).toHaveBeenCalledTimes(2);
+  expect(screen.getByText('Private reader content')).toBeInTheDocument();
+});
+
+it('closes at the ticket deadline if renewal fails and does not extend the server lease', async () => {
+  vi.useFakeTimers();
+  session.user = { id: 'reader', role: 'reader' }; session.isLoggedIn = true;
+  vi.mocked(siteAccessApi.getStatus)
+    .mockResolvedValueOnce({ ...deny, allowed: true, authenticated: true, access_expires_at: Date.now() + 120_000 })
+    .mockRejectedValue(new Error('provider unavailable'));
+  show();
+  await act(async () => { await vi.advanceTimersByTimeAsync(119_000); });
+  expect(screen.getByText('Private reader content')).toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect(screen.queryByText('Private reader content')).toBeNull();
+});
+
+it('discards the grant on logout so signing into the same account requires a new check', async () => {
+  session.user = { id: 'reader', role: 'reader' }; session.isLoggedIn = true;
+  vi.mocked(siteAccessApi.getStatus).mockResolvedValue({ ...deny, allowed: true, authenticated: true,
+    access_expires_at: Date.now() + 86_400_000 });
+  const view = show();
+  await screen.findByText('Private reader content');
+  session.user = null; session.isLoggedIn = false;
+  vi.mocked(siteAccessApi.getStatus).mockResolvedValue(deny);
+  view.rerender(application());
+  await waitFor(() => expect(client.getQueryData(['site-access', 'reader'])).toBeUndefined());
+  vi.mocked(siteAccessApi.getStatus).mockImplementation(() => new Promise(() => {}));
+  session.user = { id: 'reader', role: 'reader' }; session.isLoggedIn = true;
+  view.rerender(application());
+  expect(screen.queryByText('Private reader content')).toBeNull();
 });

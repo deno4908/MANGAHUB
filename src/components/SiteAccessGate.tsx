@@ -21,9 +21,9 @@ const AUTH_PATHS = new Set([
   "/forbidden",
 ]);
 
-// A short-lived, in-memory grant absorbs a failed background check without
-// tearing down the reader and deleting its caches. Initial access and account
-// changes still require a fresh response; explicit denials take effect at once.
+// The server controls the access session's expiry. A short in-memory grant
+// supports older backends during rollout. Account changes and explicit denials
+// always close the reader until its own session has been checked.
 const ACCESS_GRANT_MS = 60_000;
 
 export default function SiteAccessGate({ children }: { children: ReactNode }) {
@@ -43,12 +43,13 @@ export default function SiteAccessGate({ children }: { children: ReactNode }) {
     queryKey: key,
     queryFn: () => siteAccessApi.getStatus(),
     enabled: ready,
-    staleTime: 0,
+    staleTime: query => query.state.data?.access_expires_at ? Infinity : 0,
+    refetchOnMount: 'always',
     retry: 1,
     retryDelay: 600,
-    refetchInterval: 10_000,
-    refetchOnWindowFocus: true,
-    refetchOnReconnect: true,
+    refetchInterval: query => query.state.data?.access_expires_at && query.state.status !== 'error' ? false : 10_000,
+    refetchOnWindowFocus: query => !query.state.data?.access_expires_at,
+    refetchOnReconnect: query => !query.state.data?.access_expires_at,
   });
   const wasAllowed = useRef(false);
   const previousViewer = useRef(key[1]);
@@ -56,11 +57,17 @@ export default function SiteAccessGate({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!access.isFetchedAfterMount || !access.data?.allowed) return;
+    if (access.data.access_expires_at) {
+      const remaining = access.data.access_expires_at - Date.now() - 30_000;
+      const timer = window.setTimeout(() => void access.refetch(), Math.max(0, remaining));
+      const expiry = window.setTimeout(() => checkGrantExpiry(value => value + 1), Math.max(0, remaining + 30_001));
+      return () => { window.clearTimeout(timer); window.clearTimeout(expiry); };
+    }
     const remaining = access.dataUpdatedAt + ACCESS_GRANT_MS - Date.now();
     if (remaining <= 0) return;
     const timer = window.setTimeout(() => checkGrantExpiry(value => value + 1), remaining + 1);
     return () => window.clearTimeout(timer);
-  }, [access.dataUpdatedAt, access.data?.allowed, access.isFetchedAfterMount, key[1]]);
+  }, [access.dataUpdatedAt, access.data?.allowed, access.data?.access_expires_at, access.isFetchedAfterMount, key[1]]);
 
   useEffect(() => {
     if (!hasCheckedSession) void loadUser();
@@ -75,7 +82,7 @@ export default function SiteAccessGate({ children }: { children: ReactNode }) {
     return () => window.removeEventListener(FORCE_SITE_ACCESS_EVENT, denied);
   }, [client, key[1]]);
 
-  const grantFresh = Date.now() < access.dataUpdatedAt + ACCESS_GRANT_MS;
+  const grantFresh = Date.now() < (access.data?.access_expires_at || access.dataUpdatedAt + ACCESS_GRANT_MS);
   // A background /auth/me or refresh failure can mark the existing account as
   // restoring. It must not tear down an already approved reader. This applies
   // only to the same known account and never extends the server grant's expiry.
@@ -99,6 +106,10 @@ export default function SiteAccessGate({ children }: { children: ReactNode }) {
         query.queryKey[0] !== "site-access";
       void client.cancelQueries({ predicate });
       client.removeQueries({ predicate });
+    }
+    if (previousViewer.current !== key[1]) {
+      // A later login, including the same account, must obtain its own grant.
+      client.removeQueries({ queryKey: ["site-access", previousViewer.current], exact: true });
     }
     wasAllowed.current = allowed;
     previousViewer.current = key[1];

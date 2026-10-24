@@ -9,6 +9,9 @@ from config import config
 from supabase import create_client
 from time import time
 from datetime import datetime, timezone
+from types import SimpleNamespace
+import access_tickets
+from fastapi import HTTPException
 
 _supabase = None
 logger = logging.getLogger(__name__)
@@ -94,9 +97,20 @@ def require_auth(f):
             return jsonify({"error": "Token không được cung cấp"}), 401
 
         try:
+            from fastapi_app.dependencies import _ticket_read
+            record, changed = _ticket_read(auth_header)
+            force_live = changed or request.method not in {"GET", "HEAD"}
+            if not force_live:
+                # Reuse only a registered, signed-in website session. Writes
+                # continue through live Supabase authentication and RBAC below.
+                if record:
+                    g.current_user = SimpleNamespace(id=record["uid"], email=record.get("email"))
+                    g.access_token = token
+                    g.current_role = record["role"]
+                    return f(*args, **kwargs)
             now = time()
             cached_auth = _auth_cache.get(token)
-            if cached_auth and cached_auth[0] > now:
+            if not force_live and cached_auth and cached_auth[0] > now:
                 cached_user = cached_auth[1]
                 g.current_user = cached_user["user_obj"]
                 g.access_token = token
@@ -120,7 +134,7 @@ def require_auth(f):
 
             user_id = str(user_response.user.id)
             cached_profile = _profile_cache.get(user_id)
-            if cached_profile and cached_profile[0] > now:
+            if not force_live and cached_profile and cached_profile[0] > now:
                 profile_data = cached_profile[1]
             else:
                 profile_data = _fetch_auth_profile(sb, user_id)
@@ -146,6 +160,8 @@ def require_auth(f):
             if is_revoked:
                 return jsonify({"error": "Phiên đăng nhập đã hết hạn"}), 401
 
+        except HTTPException as e:
+            return jsonify({"error": str(e.detail)}), e.status_code
         except Exception as e:
             logger.exception("Flask authentication failed")
             return jsonify({"error": "Xác thực thất bại"}), 401

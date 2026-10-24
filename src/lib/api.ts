@@ -15,7 +15,7 @@ export const FORCE_FORBIDDEN_EVENT = "mb:force-forbidden";
 export const FORCE_MAINTENANCE_EVENT = "mb:force-maintenance";
 export const FORCE_SITE_ACCESS_EVENT = 'mb:site-access-denied';
 function siteAccessDenied(body: any) {
-  if (body?.code !== 'WHITELIST_REQUIRED') return;
+  if (body?.code !== 'WHITELIST_REQUIRED' && body?.code !== 'ACCESS_TICKET_REVOKED') return;
   setSiteAccessRestricted(true);
   window.dispatchEvent(new CustomEvent(FORCE_SITE_ACCESS_EVENT, { detail: body.site_access }));
   throw new Error(String(body.detail || 'Bạn không nằm trong whitelist của website.'));
@@ -1372,11 +1372,24 @@ export const authApi = {
     }
     return data;
   },
-  logout: (scope: "local" | "global" | "others" = "local") =>
-    auth<any>("/auth/logout", {
-      method: "POST",
+  logout: async (scope: "local" | "global" | "others" = "local") => {
+    // Capture before userStore clears the in-memory access token. The API host
+    // owns the HttpOnly access cookie; revoke it even if Supabase Auth is slow.
+    const headers = accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
+    const ended = fetchWithTimeout(`${API_BASE}/api/site-access/logout`, {
+      method: "POST", keepalive: true,
+      headers: { ...headers, "Content-Type": "application/json", "X-MangaHub-CSRF": "1" },
       body: JSON.stringify({ scope }),
-    }),
+    }, 5_000).then(response => {
+      if (!response.ok) throw new Error("Không thể thu hồi phiên truy cập");
+      return response.json();
+    });
+    const provider = auth<any>("/auth/logout", { method: "POST", headers, body: JSON.stringify({ scope }) });
+    const [apiResult, authResult] = await Promise.allSettled([ended, provider]);
+    if (authResult.status === "fulfilled" && (authResult.value.revoked || apiResult.status === "fulfilled")) return authResult.value;
+    if (apiResult.status === "fulfilled") return { message: "Đã đăng xuất", revoked: true };
+    throw authResult.status === "rejected" ? authResult.reason : new Error("Chưa thể thu hồi phiên trên máy chủ. Vui lòng thử lại.");
+  },
   getMe: () => auth<any>("/auth/me", { timeoutMs: 10_000 }),
   ping: () => auth<any>("/auth/ping"),
   forgotPassword: (email: string, recaptchaToken?: string) =>
@@ -2085,6 +2098,7 @@ export type SiteAccessState = {
   authenticated: boolean;
   is_admin?: boolean;
   message: string;
+  access_expires_at?: number;
 };
 export const siteAccessApi = {
   getStatus: async () => {

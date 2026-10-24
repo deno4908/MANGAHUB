@@ -45,6 +45,7 @@ from fastapi_app.routers import (
 from fastapi_app.services import truyenqq_service
 from fastapi_app.routers import site_access as site_access_router
 import site_access as access_policy
+import access_tickets
 from fastapi_app.services.catalog_updates import catalog_updates
 from fastapi_app.services.chapter_checker import chapter_check_loop
 from security_runtime import ensure_security_redis_available
@@ -407,7 +408,7 @@ async def enforce_maintenance_mode(request: Request, call_next):
         return await call_next(request)
 
     path = request.url.path
-    if path in {"/health", "/api/maintenance", "/docs", "/redoc", "/openapi.json"}:
+    if path in {"/health", "/api/maintenance", "/api/site-access/logout", "/docs", "/redoc", "/openapi.json"}:
         return await call_next(request)
 
     state = await get_maintenance_state_async()
@@ -447,35 +448,61 @@ async def enforce_api_access_policy(request: Request, call_next):
 
     try:
         path = request.url.path
+        if path == "/api/site-access/logout" and request.method == "POST":
+            return await call_next(request)  # This revoke-only route checks its own CSRF and credentials.
         minimum_role = _minimum_api_role_for_path(path)
         authorization = request.headers.get("Authorization")
+        access_tickets.current_record.set(None)
+        access_tickets.refresh_required.set(False)
+        record = None
+        read_capability = request.method in {"GET", "HEAD"} and minimum_role is None
+        capability = authorization[13:] if authorization and authorization.startswith("AccessTicket ") else None
+        if not authorization and read_capability and path not in {"/api/site-access", "/api/maintenance"}:
+            capability = request.cookies.get(access_tickets.cookie_name())
+        if capability:
+            if not read_capability:
+                raise HTTPException(401, "Token đăng nhập là bắt buộc")
+            try:
+                record = await asyncio.to_thread(access_tickets.decode, capability)
+            except access_tickets.Rejected as error:
+                return JSONResponse(status_code=403, content={
+                    "code": "ACCESS_TICKET_REVOKED", "detail": "Phiên truy cập đã hết hạn hoặc bị thu hồi",
+                }, headers=_api_auth_error_headers(request))
+            authorization = "AccessTicket " + capability
         # Cookie grants are only for public reads (including <img> requests).
         # Mutations and privileged namespaces always require their bearer token.
         if not authorization and minimum_role is None and request.method in {"GET", "HEAD"} and path not in {"/api/site-access", "/api/maintenance"}:
             token = access_policy.asset_token(request.cookies.get(access_policy.COOKIE_NAME))
             if token:
                 authorization = "Bearer " + token
-        user = await authorize_api_request(authorization, minimum_role=minimum_role)
+        live_context = access_tickets.live_auth.set(not read_capability)
+        try:
+            user = access_tickets.user(record) if record else await authorize_api_request(authorization, minimum_role=minimum_role)
+        finally:
+            access_tickets.live_auth.reset(live_context)
+        record = record or access_tickets.current_record.get()
         request.state.api_user = user
+        request.state.access_ticket = record
         request.state.site_access_authorization = authorization
         if path not in {"/api/site-access", "/api/maintenance"}:
             # Admins must remain able to repair settings even if the store fails.
-            if not user or user.get("role") != "admin":
-                state = await asyncio.to_thread(access_policy.get_state)
-                if not await asyncio.to_thread(access_policy.is_allowed, state, user):
+            if not record and (not user or user.get("role") != "admin"):
+                refresh = access_tickets.refresh_required.get()
+                state = await asyncio.to_thread(access_policy.get_state, force=refresh)
+                if not await asyncio.to_thread(access_policy.is_allowed, state, user, force=refresh):
                     return JSONResponse(status_code=403, content={
                         "code": "WHITELIST_REQUIRED", "detail": state["message"],
                         "site_access": {"enabled": True, "allowed": False,
                                         "authenticated": user is not None, "message": state["message"]},
                     }, headers=_api_auth_error_headers(request))
-    except access_policy.AccessUnavailable as exc:
+    except (access_policy.AccessUnavailable, access_tickets.Unavailable) as exc:
         return JSONResponse(status_code=503, content={"code": "SITE_ACCESS_UNAVAILABLE", "detail": str(exc)},
                             headers=_api_auth_error_headers(request))
     except HTTPException as exc:
         content = {"detail": exc.detail}
         auth_stage = (exc.headers or {}).get("X-MangaHub-Auth-Stage")
         auth_codes = {"signing-keys": "AUTH_KEYS_UNAVAILABLE", "token": "AUTH_TOKEN_UNAVAILABLE",
-                      "profile": "AUTH_PROFILE_UNAVAILABLE"}
+                      "profile": "AUTH_PROFILE_UNAVAILABLE", "access-session": "ACCESS_SESSION_UNAVAILABLE"}
         if exc.status_code == 503 and auth_stage in auth_codes:
             content["code"] = auth_codes[auth_stage]
         return JSONResponse(

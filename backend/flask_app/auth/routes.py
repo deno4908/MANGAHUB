@@ -9,6 +9,7 @@ import json
 import jwt
 import logging
 import time
+import access_tickets
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -558,6 +559,13 @@ def _mark_session_security_event(user_id: str, *, password_changed: bool = False
         return False, str(error)
 
 
+def _revoke_access_sessions(user_id, scope="local", *, check_session=True):
+    # g.access_token was verified by require_auth or the logout verifier.
+    who = access_tickets.identity(_decode_access_token_payload(getattr(g, "access_token", "")))
+    if who and who["uid"] == str(user_id):
+        access_tickets.revoke_sessions(who, scope, check_session=check_session)
+
+
 def _decode_access_token_payload(token: str) -> dict:
     try:
         payload_part = str(token or "").split(".")[1]
@@ -1085,6 +1093,11 @@ def logout():
         }, 401, clear_refresh=True)
 
     user_id = get_current_user_id()
+    if has_auth and user_id:
+        try:
+            _revoke_access_sessions(user_id, scope)
+        except access_tickets.Unavailable:
+            return _json({"error": "Không thể thu hồi phiên truy cập. Vui lòng thử lại."}, 503, clear_refresh=True)
     profile_marked = True
     profile_error = ""
     if has_auth and scope == "global" and user_id:
@@ -1187,8 +1200,11 @@ def reset_password():
         if not user_id:
             return jsonify({"error": "Không xác thực được"}), 401
 
-        _get_sb_admin().auth.admin.update_user_by_id(user_id, {"password": new_password})
-        profile_marked, profile_error = _mark_session_security_event(user_id, password_changed=True)
+        with access_tickets.security_change(user_id):
+            _revoke_access_sessions(user_id, "global", check_session=False)
+            _get_sb_admin().auth.admin.update_user_by_id(user_id, {"password": new_password})
+            profile_marked, profile_error = _mark_session_security_event(user_id, password_changed=True)
+            _revoke_access_sessions(user_id, "global", check_session=False)
         revoked, revoke_error = _revoke_supabase_sessions("global")
         if profile_error:
             logger.error("Could not persist password reset security event: %s", profile_error)
@@ -1247,8 +1263,11 @@ def change_password():
             return jsonify({"error": verify_error}), 401
         new_password = derive_password(data["password"], user_email)
 
-        _get_sb_admin().auth.admin.update_user_by_id(user_id, {"password": new_password})
-        profile_marked, profile_error = _mark_session_security_event(user_id, password_changed=True)
+        with access_tickets.security_change(user_id):
+            _revoke_access_sessions(user_id, "global", check_session=False)
+            _get_sb_admin().auth.admin.update_user_by_id(user_id, {"password": new_password})
+            profile_marked, profile_error = _mark_session_security_event(user_id, password_changed=True)
+            _revoke_access_sessions(user_id, "global", check_session=False)
         revoked, revoke_error = _revoke_supabase_sessions("global")
         if profile_error:
             logger.error("Could not persist password change security event: %s", profile_error)

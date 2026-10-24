@@ -8,6 +8,7 @@ from fastapi_app.services.catalog_updates import catalog_updates, POLL_SECONDS
 from serverless_runtime import IS_VERCEL, create_task
 from fastapi_app.dependencies import authorize_api_request
 import site_access as access_policy
+import access_tickets
 
 router = APIRouter()
 
@@ -56,10 +57,16 @@ async def event_stream(request):
         async for chunk in _catalog_event_stream(request):
             # Recheck existing streams as well as new HTTP connections.
             try:
-                user = await authorize_api_request(authorization)
-                state = await asyncio.to_thread(access_policy.get_state)
-                if not await asyncio.to_thread(access_policy.is_allowed, state, user):
-                    return
+                if authorization and authorization.startswith("AccessTicket "):
+                    await asyncio.to_thread(access_tickets.decode, authorization[13:])
+                    registered = True
+                else:
+                    user = await authorize_api_request(authorization)
+                    registered = bool(access_tickets.current_record.get())
+                if not registered:
+                    state = await asyncio.to_thread(access_policy.get_state)
+                    if not await asyncio.to_thread(access_policy.is_allowed, state, user):
+                        return
             except Exception:
                 return
             yield chunk
