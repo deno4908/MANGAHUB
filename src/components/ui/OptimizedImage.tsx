@@ -77,7 +77,8 @@ const OptimizedImage = memo(({
   const [retryCount, setRetryCount] = useState(0);
   const [needsRecover, setNeedsRecover] = useState(false);
   const [recoverAttempts, setRecoverAttempts] = useState(0);
-  const [coverResource, setCoverResource] = useState<{ source: string; url: string }>();
+  const [coverResource, setCoverResource] = useState<{ source: string; attempt: number; url: string }>();
+  const [visible, setVisible] = useState(priority || alreadyCached);
 
   const hasRemoteCandidate =
     isRemoteUrl(normalizedSrc) || isRemoteUrl(normalizedFallbackSrc);
@@ -96,16 +97,19 @@ const OptimizedImage = memo(({
 
   // ── Intersection observer ──────────────────────────────────────────────────
   useEffect(() => {
-    if (priority || inView) return;
     const el = containerRef.current;
     if (!el) return;
+    if (typeof IntersectionObserver === 'undefined') { setInView(true); setVisible(true); return; }
     const observer = new IntersectionObserver(
-      ([entry]) => { if (entry.isIntersecting) { setInView(true); observer.disconnect(); } },
+      ([entry]) => {
+        setVisible(entry.isIntersecting);
+        if (entry.isIntersecting) setInView(true);
+      },
       { rootMargin, threshold: 0 }
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [priority, inView, rootMargin]);
+  }, [rootMargin]);
 
   // ── Delayed fallback ───────────────────────────────────────────────────────
   // Give the primary CDN a fair chance before switching. If the remote
@@ -185,8 +189,8 @@ const OptimizedImage = memo(({
     loadedRef.current = true;
     setLoaded(true);
     const loadedPlaceholder = isNoCoverSrc(activeSrc);
-    if (loadedPlaceholder && hasRemoteCandidate && recoverAttempts < maxRecoverAttempts) {
-      setNeedsRecover(true);
+    if (loadedPlaceholder && hasRemoteCandidate) {
+      setNeedsRecover(recoverAttempts < maxRecoverAttempts);
       return;
     }
     setNeedsRecover(false);
@@ -194,6 +198,7 @@ const OptimizedImage = memo(({
   }, [activeSrc, hasRemoteCandidate, recoverAttempts, maxRecoverAttempts]);
 
   const handleError = useCallback(() => {
+    loadedCache.delete(activeSrc);
     if (cacheCover) invalidateCover(activeSrc);
     loadedRef.current = false;
     // Primary failed; switch to the fallback source if available.
@@ -222,10 +227,10 @@ const OptimizedImage = memo(({
     let mounted = true;
     const resource = acquireCover(activeSrc, priority ? 'visible' : 'normal');
     void resource.promise.then(url => {
-      if (mounted) setCoverResource({ source: activeSrc, url });
+      if (mounted) setCoverResource({ source: activeSrc, attempt: retryCount, url });
     }, () => { if (mounted) handleError(); });
     return () => { mounted = false; resource.release(); };
-  }, [activeSrc, inView, error, useCoverCache, handleError, priority]);
+  }, [activeSrc, retryCount, inView, error, useCoverCache, handleError, priority]);
 
   const handleManualRetry = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -255,7 +260,9 @@ const OptimizedImage = memo(({
 
   // If a card ended up showing placeholder cover, keep trying to recover real cover in background.
   useEffect(() => {
-    if (!inView || !needsRecover || !hasRemoteCandidate) return;
+    // Wait for the current attempt to finish. Previously this timer kept
+    // rotating sources while a download was still queued or in flight.
+    if (!inView || !needsRecover || !hasRemoteCandidate || (!isNoCoverSrc(activeSrc) && !error)) return;
     if (recoverAttempts >= maxRecoverAttempts) {
       setNeedsRecover(false);
       return;
@@ -282,6 +289,7 @@ const OptimizedImage = memo(({
       loadedRef.current = false;
       setLoaded(false);
       setError(false);
+      setNeedsRecover(false);
       setActiveSrc(nextSrc);
       setRetryCount((r) => r + 1);
       setRecoverAttempts((count) => count + 1);
@@ -296,14 +304,38 @@ const OptimizedImage = memo(({
     maxRecoverAttempts,
     normalizedSrc,
     normalizedFallbackSrc,
+    activeSrc,
+    error,
   ]);
+
+  // A temporary CDN outage must not pin a mounted card to the placeholder
+  // forever. Retry quietly at a bounded rate, only near the viewport and while
+  // the tab is visible. Navigating to a detail page is no longer needed.
+  useEffect(() => {
+    if (!visible || !hasRemoteCandidate || recoverAttempts < maxRecoverAttempts
+        || (!isNoCoverSrc(activeSrc) && !error)) return;
+    const recover = () => {
+      if (document.visibilityState === 'hidden' || navigator.onLine === false) return;
+      setRecoverAttempts(0);
+      setNeedsRecover(true);
+    };
+    const timer = window.setInterval(recover, 30_000);
+    window.addEventListener('online', recover);
+    window.addEventListener('focus', recover);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('online', recover);
+      window.removeEventListener('focus', recover);
+    };
+  }, [visible, activeSrc, error, hasRemoteCandidate, recoverAttempts, maxRecoverAttempts]);
 
   // Build src with cache-buster on retries
   const remoteSrc = retryCount === 0
     ? activeSrc
     : `${activeSrc}${activeSrc.includes('?') ? '&' : '?'}retry=${retryCount}`;
   const imgSrc = useCoverCache
-    ? (coverResource?.source === activeSrc ? coverResource.url : cachedCover(activeSrc))
+    ? (coverResource?.source === activeSrc && coverResource.attempt === retryCount
+      ? coverResource.url : cachedCover(activeSrc))
     : remoteSrc;
 
   return (

@@ -1202,7 +1202,7 @@ def _normalize_title_key(value: Any) -> str:
     return title
 
 
-def _fetch_rating_aggregates(db: Any, slugs: list[str]) -> dict[str, tuple[float, int]]:
+def _fetch_rating_aggregates(db: Any, slugs: list[str], alias_groups=None) -> dict[str, tuple[float, int]]:
     if not slugs:
         return {}
 
@@ -1218,6 +1218,10 @@ def _fetch_rating_aggregates(db: Any, slugs: list[str]) -> dict[str, tuple[float
             missing.append(slug)
 
     if missing:
+        from fastapi_app.services.qq_statistics import cached_aliases
+        from fastapi_app.routers.ratings import _aggregate_rows_by_user
+        groups = cached_aliases(missing) if alias_groups is None else alias_groups
+        query_slugs = list(dict.fromkeys(alias for slug in missing for alias in groups.get(slug, [slug])))
         # Evict oldest entries if cache is too large
         if len(_rating_cache) > _MAX_RATING_CACHE:
             now_t = time.time()
@@ -1233,8 +1237,8 @@ def _fetch_rating_aggregates(db: Any, slugs: list[str]) -> dict[str, tuple[float
         try:
             rows = (
                 db.table("ratings")
-                .select("manga_slug,score")
-                .in_("manga_slug", missing)
+                .select("user_id,manga_slug,score,updated_at")
+                .in_("manga_slug", query_slugs)
                 .execute()
                 .data
                 or []
@@ -1242,28 +1246,18 @@ def _fetch_rating_aggregates(db: Any, slugs: list[str]) -> dict[str, tuple[float
         except Exception:
             rows = []
 
-        bucket: dict[str, tuple[float, int]] = {}
+        bucket: dict[str, list] = {}
         for row in rows:
             slug = str(row.get("manga_slug") or "").strip()
             if not slug:
                 continue
-            score = _safe_float(row.get("score"))
-            cur_sum, cur_count = bucket.get(slug, (0.0, 0))
-            bucket[slug] = (cur_sum + score, cur_count + 1)
-
-        found: set[str] = set()
-        for slug, (total, count) in bucket.items():
-            avg = round(total / count, 1) if count > 0 else 0.0
-            result[slug] = (avg, count)
-            _rating_cache[slug] = (avg, count, now + RATING_CACHE_TTL_SECONDS)
-            found.add(slug)
+            bucket.setdefault(slug, []).append(row)
 
         for slug in missing:
-            if slug in found:
-                continue
-            result[slug] = (0.0, 0)
-            _rating_cache[slug] = (0.0, 0, now + RATING_CACHE_TTL_SECONDS)
-
+            combined = [row for alias in groups.get(slug, [slug]) for row in bucket.get(alias, [])]
+            avg, count = _aggregate_rows_by_user(combined)
+            result[slug] = (avg, count)
+            _rating_cache[slug] = (avg, count, now + RATING_CACHE_TTL_SECONDS)
     return result
 
 
@@ -1281,12 +1275,14 @@ def _attach_ratings_to_items(payload: Any, db: Any, user: dict | None = None) ->
         return
 
     item_lookup_keys: dict[str, list[str]] = {}
+    from fastapi_app.services.qq_statistics import cached_aliases
+    qq_aliases = cached_aliases([str(item.get("slug") or "") for item in items])
     slugs: list[str] = []
     for item in items:
         slug = str((item or {}).get("slug") or "").strip()
         if not slug:
             continue
-        lookup_keys = [slug]
+        lookup_keys = qq_aliases.get(slug, [slug])[:]
         manga_id = _extract_mangadex_id(slug)
         if manga_id:
             lookup_keys.extend([manga_id, f"mdx-{manga_id}"])
@@ -1297,14 +1293,14 @@ def _attach_ratings_to_items(payload: Any, db: Any, user: dict | None = None) ->
     if not slugs:
         return
 
-    agg = _fetch_rating_aggregates(db, slugs)
+    agg = _fetch_rating_aggregates(db, slugs, qq_aliases)
 
-    my_scores: dict[str, int] = {}
+    my_scores: dict[str, tuple[int, str]] = {}
     if user and user.get("id"):
         try:
             my_rows = (
                 db.table("ratings")
-                .select("manga_slug,score")
+                .select("manga_slug,score,updated_at")
                 .eq("user_id", user.get("id"))
                 .in_("manga_slug", slugs)
                 .execute()
@@ -1312,7 +1308,7 @@ def _attach_ratings_to_items(payload: Any, db: Any, user: dict | None = None) ->
                 or []
             )
             my_scores = {
-                str(r.get("manga_slug") or "").strip(): _safe_int(r.get("score"))
+                str(r.get("manga_slug") or "").strip(): (_safe_int(r.get("score")), str(r.get("updated_at") or ""))
                 for r in my_rows
                 if str(r.get("manga_slug") or "").strip()
             }
@@ -1337,10 +1333,9 @@ def _attach_ratings_to_items(payload: Any, db: Any, user: dict | None = None) ->
         item["rating_average"] = avg
         item["rating_count"] = count
         if user:
-            item["my_rating"] = next(
-                (my_scores.get(lookup_key) for lookup_key in lookup_keys if lookup_key in my_scores),
-                None,
-            )
+            latest = max((my_scores[key] for key in lookup_keys if key in my_scores),
+                         key=lambda score: score[1], default=None)
+            item["my_rating"] = latest[0] if latest else None
 
 
 async def _async_attach_ratings_to_items(payload: Any, db: Any, user: dict | None = None) -> None:
@@ -2475,7 +2470,11 @@ def _otruyen_apply_local_views(item: dict[str, Any], views_lookup: dict[str, int
     if not isinstance(item, dict):
         return
     candidates = _hidden_slug_candidates(item.get("slug") or item.get("_id") or item.get("id"))
-    local_views = max((_safe_int(views_lookup.get(candidate)) for candidate in candidates), default=0)
+    from fastapi_app.services.qq_statistics import item_slugs
+    qq_aliases = item_slugs(item)
+    local_views = (sum(_safe_int(views_lookup.get(candidate)) for candidate in qq_aliases)
+                   if len(qq_aliases) > 1 else
+                   max((_safe_int(views_lookup.get(candidate)) for candidate in candidates), default=0))
     item["local_view_count"] = local_views
     item["view_count"] = local_views
     item["views"] = local_views
@@ -5519,10 +5518,14 @@ async def manga_detail(slug: str, db=Depends(get_supabase_public)):
 
     loop = asyncio.get_running_loop()
 
+    from fastapi_app.services.qq_statistics import item_slugs
+    view_slugs = item_slugs(item) or [normalized_slug]
     views_future = loop.run_in_executor(
         None,
         lambda: _safe_query(
-            lambda: db.table("manga_views").select("views").eq("manga_slug", normalized_slug).maybe_single().execute()
+            lambda: (db.table("manga_views").select("manga_slug,views").in_("manga_slug", view_slugs).execute()
+                     if len(view_slugs) > 1 else
+                     db.table("manga_views").select("views").eq("manga_slug", normalized_slug).maybe_single().execute())
         ),
     )
     first_seen_future = loop.run_in_executor(
@@ -5544,7 +5547,8 @@ async def manga_detail(slug: str, db=Depends(get_supabase_public)):
 
     local_count = 0
     if views_result and hasattr(views_result, "data"):
-        local_count = (views_result.data or {}).get("views", 0)
+        local_count = (sum(_safe_int(row.get("views")) for row in views_result.data)
+                       if isinstance(views_result.data, list) else (views_result.data or {}).get("views", 0))
 
     item["view_count"] = int(local_count or 0)
     item["local_view_count"] = item["view_count"]

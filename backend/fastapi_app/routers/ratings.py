@@ -20,6 +20,7 @@ from fastapi_app.dependencies import (
 )
 from fastapi_app.services import mangadex_service, truyenqq_service
 from fastapi_app.services.cache_service import cache
+from fastapi_app.services.qq_statistics import cached_aliases
 from fastapi_app.utils.anti_spam import enforce_user_action_limit
 
 logger = logging.getLogger(__name__)
@@ -51,11 +52,11 @@ def _normalize_manga_slug(value: str) -> str:
     return _extract_mangadex_id(normalized) or normalized
 
 
-def _slug_candidates(value: str) -> list[str]:
+def _slug_candidates(value: str, qq_aliases=None) -> list[str]:
     normalized = _normalize_manga_slug(value)
     if not normalized:
         return []
-    candidates = [normalized]
+    candidates = list(dict.fromkeys([normalized, *(qq_aliases or {}).get(normalized, [])]))
     if _MANGADEX_ID_RE.fullmatch(normalized):
         candidates.extend([f"mdx-{normalized}", f"mangadex-{normalized}", f"mangadex:{normalized}"])
     return candidates
@@ -453,7 +454,8 @@ class BatchRatingsRequest(BaseModel):
 async def get_manga_rating(manga_slug: str, db=Depends(get_supabase_public)):
     """Get average rating and count for a manga (supports mdx-UUID / UUID aliases)."""
     normalized_slug = _normalize_manga_slug(manga_slug)
-    candidates = _slug_candidates(normalized_slug)
+    aliases = await asyncio.to_thread(cached_aliases, [normalized_slug])
+    candidates = _slug_candidates(normalized_slug, aliases)
     if not candidates:
         return {"manga_slug": manga_slug, "average": 0, "count": 0}
 
@@ -484,7 +486,8 @@ async def get_my_rating(
 ):
     """Get current user's rating for a manga."""
     normalized_slug = _normalize_manga_slug(manga_slug)
-    candidates = _slug_candidates(normalized_slug)
+    aliases = await asyncio.to_thread(cached_aliases, [normalized_slug])
+    candidates = _slug_candidates(normalized_slug, aliases)
     if not candidates:
         return {"manga_slug": manga_slug, "score": None}
 
@@ -526,9 +529,11 @@ async def get_my_rated_manga(
     except Exception:
         rating_rows = []
 
+    qq_aliases = await asyncio.to_thread(cached_aliases, [row.get("manga_slug") for row in rating_rows])
     latest_by_slug: dict[str, dict[str, str | int]] = {}
     for row in rating_rows:
         normalized_slug = _normalize_manga_slug(row.get("manga_slug"))
+        normalized_slug = qq_aliases.get(normalized_slug, [normalized_slug])[0]
         if not normalized_slug:
             continue
 
@@ -978,10 +983,12 @@ async def get_top_rated_manga(
         logger.exception("Top-rated query failed; returning an empty ranking")
         rows = []
 
+    qq_aliases = await asyncio.to_thread(cached_aliases, [row.get("manga_slug") for row in rows])
     per_slug_users: dict[str, dict[str, tuple[float, str]]] = {}
     anon_seq = 0
     for row in rows:
         slug = _normalize_manga_slug(row.get("manga_slug"))
+        slug = qq_aliases.get(slug, [slug])[0]
         if not slug:
             continue
 
@@ -1075,8 +1082,9 @@ async def rate_manga(
     if not normalized_slug:
         raise HTTPException(status_code=400, detail="manga_slug không hợp lệ")
 
-    candidates = _slug_candidates(normalized_slug)
-    if len(candidates) > 1:
+    aliases = await asyncio.to_thread(cached_aliases, [normalized_slug])
+    candidates = _slug_candidates(normalized_slug, aliases)
+    if len(candidates) > 1 and _MANGADEX_ID_RE.fullmatch(normalized_slug):
         try:
             db.table("ratings").delete().eq("user_id", user["id"]).in_(
                 "manga_slug", candidates
@@ -1093,6 +1101,9 @@ async def rate_manga(
         },
         on_conflict="user_id,manga_slug",
     ).execute()
+    from fastapi_app.routers.manga import _rating_cache
+    for candidate in candidates:
+        _rating_cache.pop(candidate, None)
     return {"message": "Đã đánh giá", "score": data.score, "manga_slug": normalized_slug}
 
 
@@ -1120,8 +1131,9 @@ async def get_batch_ratings(
     alias_to_requested: dict[str, list[str]] = {}
     query_slugs: list[str] = []
     query_seen: set[str] = set()
+    qq_aliases = await asyncio.to_thread(cached_aliases, requested)
     for requested_slug in requested:
-        candidates = _slug_candidates(requested_slug)
+        candidates = _slug_candidates(requested_slug, qq_aliases)
         for candidate in candidates:
             if not candidate:
                 continue
@@ -1225,11 +1237,15 @@ async def remove_rating(
         detail="Đánh giá quá nhanh",
     )
     normalized_slug = _normalize_manga_slug(manga_slug)
-    candidates = _slug_candidates(normalized_slug)
+    aliases = await asyncio.to_thread(cached_aliases, [normalized_slug])
+    candidates = _slug_candidates(normalized_slug, aliases)
     if not candidates:
         raise HTTPException(status_code=400, detail="manga_slug không hợp lệ")
 
     db.table("ratings").delete().eq("user_id", user["id"]).in_(
         "manga_slug", candidates
     ).execute()
+    from fastapi_app.routers.manga import _rating_cache
+    for candidate in candidates:
+        _rating_cache.pop(candidate, None)
     return {"message": "Đã xóa đánh giá"}

@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearCoverCache } from '@/lib/coverCache';
 
 import OptimizedImage from '@/components/ui/OptimizedImage';
 import { ImageFailureContext } from './ImageFailureContext';
@@ -77,5 +78,76 @@ describe('OptimizedImage slow cover recovery', () => {
 
     act(() => vi.advanceTimersByTime(12_000));
     expect(image.getAttribute('src')).toMatch(/\/no-cover(?:-dark)?\.svg$/);
+  });
+});
+
+describe('managed MangaDex cover recovery', () => {
+  const api = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  const source = `${api}/api/manga/mangadex-cover/recovery-test`;
+  const response = () => new Response(new Blob(['image'], { type: 'image/jpeg' }),
+    { headers: { 'content-type': 'image/jpeg' } });
+  beforeEach(() => {
+    vi.useFakeTimers();
+    let sequence = 0;
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = vi.fn(() => `blob:cover-${++sequence}`);
+      static revokeObjectURL = vi.fn();
+    });
+    vi.stubGlobal('fetch', vi.fn());
+  });
+  afterEach(async () => {
+    cleanup();
+    clearCoverCache();
+    await Promise.resolve();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('lets a slow recovery download finish instead of rotating sources and aborting it', async () => {
+    let complete!: (value: Response) => void;
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('Temporary CDN error'))
+      .mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    render(<OptimizedImage src={source} alt="Recovering" priority />);
+    await act(async () => {});
+    fireEvent.load(screen.getByRole('img'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(fetch).mock.calls[1][1]?.signal?.aborted).toBe(false);
+    await act(async () => { complete(response()); });
+    expect(screen.getByRole('img')).toHaveAttribute('src', 'blob:cover-1');
+    fireEvent.load(screen.getByRole('img'));
+    expect(document.querySelector('.animate-pulse')).toBeNull();
+  });
+
+  it('does not render an old revoked blob when retrying a decode failure', async () => {
+    vi.mocked(fetch).mockImplementation(async () => response());
+    render(<OptimizedImage src={source} alt="Decode" priority />);
+    await act(async () => {});
+    fireEvent.error(screen.getByRole('img'));
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:cover-1');
+    fireEvent.load(screen.getByRole('img'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('img')).toHaveAttribute('src', 'blob:cover-2');
+  });
+
+  it('recovers an exhausted placeholder after the CDN returns without navigating away', async () => {
+    vi.mocked(fetch).mockRejectedValue(new Error('CDN outage'));
+    render(<OptimizedImage src={source} maxRetries={0} alt="Outage recovery" priority />);
+    await act(async () => {});
+    fireEvent.load(screen.getByRole('img'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+    fireEvent.load(screen.getByRole('img'));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    vi.mocked(fetch).mockImplementation(async () => response());
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole('img')).toHaveAttribute('src', 'blob:cover-1');
+    fireEvent.load(screen.getByRole('img'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 });
