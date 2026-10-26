@@ -69,7 +69,7 @@ it('uses QQ for the banner and every home section when MangaDex fails, including
   for (const title of ['Mới cập nhật', 'Phổ biến nhất', 'Đánh giá cao', 'Mới thêm gần đây']) {
     await waitFor(() => expect(within(section(title)).getAllByText(qq.name).length).toBeGreaterThan(0));
   }
-  expect(screen.queryByText(mdx.name)).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByText(mdx.name)).not.toBeInTheDocument());
   expect(screen.queryByText(/Chưa tải được truyện/)).not.toBeInTheDocument();
   expect(mangaApi.getOTruyenFiltered).not.toHaveBeenCalled();
   expect(screen.getByRole('link', { name: 'Chi tiết' })).toHaveAttribute('href', '/manga/qq-readable');

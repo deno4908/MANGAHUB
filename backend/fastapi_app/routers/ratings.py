@@ -8,6 +8,8 @@ import json
 import logging
 import re
 import unicodedata
+import time
+from collections import OrderedDict
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -21,6 +23,7 @@ from fastapi_app.dependencies import (
 from fastapi_app.services import mangadex_service, truyenqq_service
 from fastapi_app.services.cache_service import cache
 from fastapi_app.services.qq_statistics import cached_aliases
+from fastapi_app.services.request_coalescing import coalesce_reads
 from fastapi_app.utils.anti_spam import enforce_user_action_limit
 
 logger = logging.getLogger(__name__)
@@ -30,6 +33,24 @@ TOP_RATED_PRIOR_AVERAGE = 3.5
 TOP_RATED_PRIOR_COUNT = 5
 RATING_WRITE_LIMIT_PER_MINUTE = 20
 RATING_WRITE_LIMIT_PER_HOUR = 120
+_aggregate_cache = OrderedDict()
+_aggregate_epoch = 0
+
+
+def _remember_aggregate(db, candidates, average, count, epoch):
+    if epoch != _aggregate_epoch:
+        return  # A rating changed while this database read was in flight.
+    key = (id(db), tuple(sorted(candidates)))
+    _aggregate_cache[key] = (time.monotonic() + 10, average, count, db)
+    _aggregate_cache.move_to_end(key)
+    while len(_aggregate_cache) > 1024:
+        _aggregate_cache.popitem(last=False)
+
+
+def _invalidate_aggregates():
+    global _aggregate_epoch
+    _aggregate_epoch += 1
+    _aggregate_cache.clear()
 
 _MANGADEX_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -451,6 +472,7 @@ class BatchRatingsRequest(BaseModel):
 
 
 @router.get("/manga/{manga_slug}")
+@coalesce_reads(revision=lambda: _aggregate_epoch)
 async def get_manga_rating(manga_slug: str, db=Depends(get_supabase_public)):
     """Get average rating and count for a manga (supports mdx-UUID / UUID aliases)."""
     normalized_slug = _normalize_manga_slug(manga_slug)
@@ -459,6 +481,12 @@ async def get_manga_rating(manga_slug: str, db=Depends(get_supabase_public)):
     if not candidates:
         return {"manga_slug": manga_slug, "average": 0, "count": 0}
 
+    epoch = _aggregate_epoch
+    cached = _aggregate_cache.get((id(db), tuple(sorted(candidates))))
+    if cached and cached[0] > time.monotonic() and cached[3] is db:
+        return {"manga_slug": normalized_slug, "average": cached[1], "count": cached[2]}
+
+    succeeded = True
     try:
         rows = (
             (await asyncio.to_thread(lambda: (db.table("ratings")
@@ -470,8 +498,11 @@ async def get_manga_rating(manga_slug: str, db=Depends(get_supabase_public)):
         )
     except Exception:
         rows = []
+        succeeded = False
 
     average, total = _aggregate_rows_by_user(rows)
+    if succeeded:
+        _remember_aggregate(db, candidates, average, total, epoch)
 
     return {
         "manga_slug": normalized_slug or manga_slug,
@@ -1101,6 +1132,7 @@ async def rate_manga(
         },
         on_conflict="user_id,manga_slug",
     ).execute()
+    _invalidate_aggregates()
     from fastapi_app.routers.manga import _rating_cache
     for candidate in candidates:
         _rating_cache.pop(candidate, None)
@@ -1132,8 +1164,10 @@ async def get_batch_ratings(
     query_slugs: list[str] = []
     query_seen: set[str] = set()
     qq_aliases = await asyncio.to_thread(cached_aliases, requested)
+    candidate_groups = {}
     for requested_slug in requested:
         candidates = _slug_candidates(requested_slug, qq_aliases)
+        candidate_groups[requested_slug] = candidates
         for candidate in candidates:
             if not candidate:
                 continue
@@ -1142,6 +1176,8 @@ async def get_batch_ratings(
                 query_seen.add(candidate)
                 query_slugs.append(candidate)
 
+    epoch = _aggregate_epoch
+    succeeded = True
     try:
         rows = (
             (await asyncio.to_thread(lambda: (db.table("ratings")
@@ -1153,6 +1189,7 @@ async def get_batch_ratings(
         )
     except Exception:
         rows = []
+        succeeded = False
 
     per_slug_users: dict[str, dict[str, tuple[float, str]]] = {
         slug: {} for slug in requested
@@ -1181,6 +1218,8 @@ async def get_batch_ratings(
         count = len(users)
         avg = round(total / count, 1) if count > 0 else 0.0
         ratings[slug] = {"average": avg, "count": int(count)}
+        if succeeded:
+            _remember_aggregate(db, candidate_groups[slug], avg, count, epoch)
 
     my_scores: dict[str, int] = {}
     if user and query_slugs:
@@ -1245,6 +1284,7 @@ async def remove_rating(
     db.table("ratings").delete().eq("user_id", user["id"]).in_(
         "manga_slug", candidates
     ).execute()
+    _invalidate_aggregates()
     from fastapi_app.routers.manga import _rating_cache
     for candidate in candidates:
         _rating_cache.pop(candidate, None)

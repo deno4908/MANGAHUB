@@ -28,6 +28,7 @@ import {
 import { MANGADEX_ID_RE, normalizeMangaDexId } from "@/lib/mangaLinks";
 import { loadMangaDexChapterPages } from "@/lib/mangaDexImages";
 import { invalidateMangaRealtimeQueries } from "@/lib/querySync";
+import { mangaDetailQueryKey } from "@/lib/mangaDetailQuery";
 import type { Manga } from "@/types/manga";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -241,21 +242,12 @@ export function useMangaDetail(
 ) {
   const mangadexMangaId = slug ? normalizeMangaDexId(slug) : null;
   const detailQuerySlug = mangadexMangaId || slug;
-  const source = mangadexMangaId ? "mangadex" : "truyenqq";
   const maxMangaDexChapters = options.maxMangaDexChapters ?? "all";
   const mangaDexLanguage = String(options.mangaDexLanguage || "vi").trim().toLowerCase() || "vi";
   const mangaDexScanlationGroupId = String(options.mangaDexScanlationGroupId || "").trim();
   const enabled = (options.enabled ?? true) && !!slug;
   return useQuery({
-    queryKey: [
-      "manga",
-      "detail",
-      detailQuerySlug,
-      source,
-      mangadexMangaId ? maxMangaDexChapters : "truyenqq",
-      mangadexMangaId ? mangaDexLanguage : "truyenqq",
-      mangadexMangaId ? mangaDexScanlationGroupId || "all-groups" : "truyenqq",
-    ],
+    queryKey: mangaDetailQueryKey(detailQuerySlug, maxMangaDexChapters, mangaDexLanguage, mangaDexScanlationGroupId),
     queryFn: async ({ signal }) => {
       if (!slug) throw new Error("No slug");
       if (mangadexMangaId) {

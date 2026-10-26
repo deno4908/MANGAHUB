@@ -35,6 +35,26 @@ function show(url: string) {
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[url]}><BrowseManga /></MemoryRouter></QueryClientProvider>);
 }
 
+it('warms only the next QQ page with identical filters and reuses it after clicking', async () => {
+  vi.mocked(mangaApi.getOTruyenFiltered).mockImplementation(async options => ({ data: {
+    items: [{ slug: `ready-${options.page}`, name: `Page ${options.page}`, source: 'truyenqq',
+      local_view_count: 0, thumb_url: '/no-cover.svg' }], params: { pagination: {
+        currentPage: options.page, totalItemsPerPage: 42, totalItems: 126, totalPages: 3,
+      } },
+  } }));
+  show('/manga?source=truyenqq&sort=popular');
+  await waitFor(() => expect(screen.getByTestId('ranked-cards')).toHaveTextContent('Page 1'));
+  await waitFor(() => expect(vi.mocked(mangaApi.getOTruyenFiltered).mock.calls.some(([arg]) => arg.page === 2)).toBe(true), { timeout: 5000 });
+  const calls = vi.mocked(mangaApi.getOTruyenFiltered).mock.calls.map(([arg]) => arg);
+  const first = calls.find(arg => arg.page === 1)!;
+  expect(calls.filter(arg => arg.page === 2)).toHaveLength(1);
+  expect(calls.find(arg => arg.page === 2)).toMatchObject({ ...first, page: 2, signal: expect.any(AbortSignal) });
+  expect(calls.some(arg => arg.page === 3)).toBe(false);
+  fireEvent.click(screen.getAllByRole('button', { name: 'Trang 2', exact: true })[0]);
+  await waitFor(() => expect(screen.getByTestId('ranked-cards')).toHaveTextContent('Page 2'));
+  expect(vi.mocked(mangaApi.getOTruyenFiltered).mock.calls.filter(([arg]) => arg.page === 2)).toHaveLength(1);
+});
+
 it('sorts QQ popularity by the displayed local views rather than the source page order', async () => {
   vi.mocked(mangaApi.getOTruyenFiltered).mockResolvedValue(page([
     { slug: 'low-1', name: 'Low views', source: 'truyenqq', local_view_count: 2, view_count: 2, thumb_url: '/api/manga/truyenqq/cover/low-1' },

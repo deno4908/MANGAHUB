@@ -6,6 +6,7 @@ import { Manga } from '@/types/manga';
 import { mangaApi } from '@/lib/api';
 import { adaptMangaDetail } from '@/lib/adapters';
 import { resolveSavedMangaCover } from '@/lib/savedManga';
+import { mangaDetailQueryKey } from '@/lib/mangaDetailQuery';
 import { getMangaDetailPath, getMangaSource } from '@/lib/mangaLinks';
 import OptimizedImage from '@/components/ui/OptimizedImage';
 import { useCallback } from 'react';
@@ -228,12 +229,12 @@ const MangaCard = ({ manga: originalManga, index = 0, variant = 'default' }: Man
   const prefetchDetail = useCallback(() => {
     if (manga.externalUrl || isMangaDexItem) return;
     const detailLookupId = manga.slug || manga.id;
-    const prefetchKey = ['manga', 'detail', detailLookupId, 'truyenqq', 'truyenqq'] as const;
+    const prefetchKey = mangaDetailQueryKey(detailLookupId);
     if (queryClient.getQueryData(prefetchKey)) return;
     queryClient.prefetchQuery({
       queryKey: prefetchKey,
-      queryFn: async () => {
-        const data = await mangaApi.getDetail(detailLookupId);
+      queryFn: async ({ signal }) => {
+        const data = await mangaApi.getDetail(detailLookupId, signal);
         return adaptMangaDetail(data);
       },
       staleTime: 2 * 60 * 1000,
@@ -270,7 +271,7 @@ const MangaCard = ({ manga: originalManga, index = 0, variant = 'default' }: Man
     }
     return (
       <motion.div initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.3, delay: index * 0.04 }}>
-        <Link to={detailPath} state={detailLinkState} className="group flex gap-3.5 p-3 rounded-lg hover:bg-muted/60 transition-all border border-transparent hover:border-border" onMouseEnter={prefetchDetail}>
+        <Link to={detailPath} state={detailLinkState} className="group flex gap-3.5 p-3 rounded-lg hover:bg-muted/60 transition-all border border-transparent hover:border-border" onMouseEnter={prefetchDetail} onFocus={prefetchDetail} onTouchStart={prefetchDetail}>
           <OptimizedImage src={coverSrc} fallbackSrc={coverFallbackSrc} fallbackDelayMs={coverFallbackDelayMs} maxRetries={coverMaxRetries} alt={manga.title} className="w-14 h-[78px] object-cover rounded shrink-0 border border-border" priority={coverPriority} rootMargin="320px" />
           <div className="flex-1 min-w-0 py-0.5">
             <h3 className="text-sm font-semibold line-clamp-2 group-hover:text-primary transition-colors">{manga.title}</h3>
@@ -320,7 +321,7 @@ const MangaCard = ({ manga: originalManga, index = 0, variant = 'default' }: Man
     }
     return (
       <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, delay: index * 0.03 }}>
-        <Link to={detailPath} state={detailLinkState} className="group flex items-center gap-3 py-2 px-2 rounded-lg hover:bg-muted/60 transition-all" onMouseEnter={prefetchDetail}>
+        <Link to={detailPath} state={detailLinkState} className="group flex items-center gap-3 py-2 px-2 rounded-lg hover:bg-muted/60 transition-all" onMouseEnter={prefetchDetail} onFocus={prefetchDetail} onTouchStart={prefetchDetail}>
           <OptimizedImage src={coverSrc} fallbackSrc={coverFallbackSrc} fallbackDelayMs={coverFallbackDelayMs} maxRetries={coverMaxRetries} alt={manga.title} className="w-10 h-14 object-cover rounded shrink-0 border border-border" priority={coverPriority} rootMargin="320px" />
           <div className="flex-1 min-w-0">
             <h3 className="text-xs font-semibold line-clamp-1 group-hover:text-primary transition-colors">{manga.title}</h3>
@@ -383,7 +384,7 @@ const MangaCard = ({ manga: originalManga, index = 0, variant = 'default' }: Man
           </div>
         </a>
       ) : (
-      <Link to={detailPath} state={detailLinkState} className="group block h-full" onMouseEnter={prefetchDetail}>
+      <Link to={detailPath} state={detailLinkState} className="group block h-full" onMouseEnter={prefetchDetail} onFocus={prefetchDetail} onTouchStart={prefetchDetail}>
         <div className="ed-card h-full flex flex-col">
           <div className="relative aspect-[2/3] overflow-hidden">
             <OptimizedImage src={coverSrc} fallbackSrc={coverFallbackSrc} fallbackDelayMs={coverFallbackDelayMs} maxRetries={coverMaxRetries} alt={manga.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" priority={coverPriority} rootMargin="320px" />

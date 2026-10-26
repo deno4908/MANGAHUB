@@ -114,6 +114,27 @@ def client(): return TestClient(main.app, base_url="https://api.mangahub.art")
 def bearer(token): return {"Authorization": "Bearer " + token}
 
 
+def test_each_read_checks_every_revocation_guard_with_one_atomic_session_read(environment, monkeypatch):
+    _, token = environment
+    c = client(); headers = bearer(token())
+    assert c.get('/api/site-access', headers=headers).status_code == 200
+    saved = c.cookies.get(tickets.cookie_name())
+    original = tickets._client.mget
+    calls = []
+    def read(keys, *args):
+        calls.append(list(keys))
+        return original(keys, *args)
+    monkeypatch.setattr(tickets._client, 'mget', read)
+    assert c.get('/api/_ticket/read', headers=headers).status_code == 200
+    assert len(calls) == 1 and len(calls[0]) == 9
+    calls.clear()
+    assert tickets.decode(saved)['role'] == 'reader'
+    assert len(calls) == 1 and len(calls[0]) == 9
+    who = tickets.identity(jwt.decode(token(), options={'verify_signature': False}))
+    tickets.revoke_sessions(who)
+    with pytest.raises(tickets.Rejected): tickets.decode(saved)
+
+
 def test_first_check_issues_a_host_only_http_only_ticket_and_next_reads_do_not_query_supabase(environment):
     db, token = environment
     c = client(); headers = bearer(token())

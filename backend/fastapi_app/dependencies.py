@@ -9,10 +9,12 @@ import logging
 from datetime import datetime, timezone
 from time import time, sleep
 from types import SimpleNamespace
+from threading import Lock
 
 from config import config
 from fastapi import Depends, Header, HTTPException
-from supabase import Client, create_client
+from supabase import Client
+from fastapi_app.services.supabase_client import create_client
 from gotrue.errors import AuthApiError, AuthRetryableError
 from postgrest.exceptions import APIError
 import httpx
@@ -23,6 +25,7 @@ from fastapi_app.services.auth_claims import verified_access_claims
 # Lazy-initialized Supabase clients
 _supabase_admin: Client | None = None
 _supabase_anon: Client | None = None
+_clients_lock = Lock()
 logger = logging.getLogger(__name__)
 _AUTH_CACHE_TTL = 3.0
 _auth_cache: dict[str, tuple[float, dict]] = {}
@@ -125,12 +128,19 @@ def _init_clients():
             status_code=503,
             detail="Supabase chưa được cấu hình. Vui lòng cập nhật file .env",
         )
-    if _supabase_admin is None:
-        _supabase_admin = create_client(
-            config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY
-        )
-    if _supabase_anon is None:
-        _supabase_anon = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
+    if _supabase_admin is not None and _supabase_anon is not None:
+        return
+    # Several detail/sidebar requests arrive together on a cold function.
+    # Construct each connection pool once, including the lazy REST client.
+    with _clients_lock:
+        if _supabase_admin is None:
+            client = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
+            client.postgrest
+            _supabase_admin = client
+        if _supabase_anon is None:
+            client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
+            client.postgrest
+            _supabase_anon = client
 
 
 def get_supabase() -> Client:

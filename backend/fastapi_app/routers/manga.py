@@ -5388,16 +5388,10 @@ async def manga_detail(slug: str, db=Depends(get_supabase_public)):
         raise HTTPException(status_code=404, detail="Manga not found")
 
     # ── Block hidden manga ──────────────────────────────────────
-    hidden = await _get_hidden_slugs(db)
-    hidden_reason = _hidden_reason_for_slug(hidden, normalized_slug) or _hidden_reason_for_slug(hidden, raw_identifier)
-    if hidden_reason:
-        raise HTTPException(
-            status_code=451,
-            detail={"hidden": True, "reason": hidden_reason},
-        )
+    hidden_task = _get_hidden_slugs(db)
 
     # ── Check user-uploaded manga (manga_uploads table) ─────────
-    uploaded_manga = await asyncio.to_thread(
+    hidden, uploaded_manga = await asyncio.gather(hidden_task, asyncio.to_thread(
         lambda: _safe_query(
             lambda: db.table("manga_uploads")
             .select("*")
@@ -5406,7 +5400,10 @@ async def manga_detail(slug: str, db=Depends(get_supabase_public)):
             .maybe_single()
             .execute()
         )
-    )
+    ))
+    hidden_reason = _hidden_reason_for_slug(hidden, normalized_slug) or _hidden_reason_for_slug(hidden, raw_identifier)
+    if hidden_reason:
+        raise HTTPException(status_code=451, detail={"hidden": True, "reason": hidden_reason})
     if uploaded_manga and hasattr(uploaded_manga, "data") and uploaded_manga.data:
         um = uploaded_manga.data
         # Fetch published chapters for this manga
@@ -5512,10 +5509,6 @@ async def manga_detail(slug: str, db=Depends(get_supabase_public)):
                             or _hidden_reason_for_slug(hidden, source_slug.rsplit("-", 1)[0]))
     if source_hidden_reason:
         raise HTTPException(status_code=451, detail={"hidden": True, "reason": source_hidden_reason})
-    override_rows = await _fetch_override_rows_by_slugs(db, [detail_slug, normalized_slug, source_slug])
-    _apply_override_fields(item, _resolve_override_row(override_rows, detail_slug)
-                           or _resolve_override_row(override_rows, source_slug))
-
     loop = asyncio.get_running_loop()
 
     from fastapi_app.services.qq_statistics import item_slugs
@@ -5541,9 +5534,12 @@ async def manga_detail(slug: str, db=Depends(get_supabase_public)):
         ),
     )
 
-    views_result, first_seen_result, uploads_result = await asyncio.gather(
-        views_future, first_seen_future, uploads_future
+    views_result, first_seen_result, uploads_result, override_rows = await asyncio.gather(
+        views_future, first_seen_future, uploads_future,
+        _fetch_override_rows_by_slugs(db, [detail_slug, normalized_slug, source_slug]),
     )
+    _apply_override_fields(item, _resolve_override_row(override_rows, detail_slug)
+                           or _resolve_override_row(override_rows, source_slug))
 
     local_count = 0
     if views_result and hasattr(views_result, "data"):

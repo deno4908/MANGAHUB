@@ -414,6 +414,8 @@ async def resolve_slug_from_id(manga_id):
 
 def _cached_detail_identifier(slug):
     """Reuse a QQ reference learned by cards instead of crawling every sitemap."""
+    if re.fullmatch(r"[a-zA-Z0-9]+(?:-+[a-zA-Z0-9]+)*-\d+", slug):
+        return slug  # Native source IDs already identify the exact comic.
     from fastapi_app.services.card_metadata import cached_metadata
     metadata = cached_metadata(slug) or {}
     canonical = str(metadata.get("slug") or "")

@@ -4456,6 +4456,23 @@ const BrowseManga = () => {
       ? categoryQuery.isSuccess
       : listQuery.isSuccess;
   const currentPage = hasResolvedTotalPages ? Math.min(page, totalPages) : page;
+  const warmedNextQQPage = useRef('');
+  useEffect(() => {
+    if ((!useOTruyenFilteredServerMode && !(useQQListMode && !isClientPaginationMode))
+        || !canQueryQQSelection || isFetching || isLoading
+        || !hasResolvedTotalPages || page >= totalPages) return;
+    const nextKey = JSON.stringify((useOTruyenFilteredServerMode ? qqPageOptions(page + 1) : listPageOptions(page + 1)).queryKey);
+    if (warmedNextQQPage.current === nextKey) return;
+    // Warm just one adjacent page after the current list has settled. Use the
+    // existing filters, access checks, save-data guard and foreground cache key.
+    const timer = window.setTimeout(() => {
+      if (document.visibilityState === 'hidden' || pagePrefetchBusy.current) return;
+      warmedNextQQPage.current = nextKey;
+      prefetchBrowsePage(page + 1);
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [useOTruyenFilteredServerMode, useQQListMode, isClientPaginationMode, canQueryQQSelection, isFetching, isLoading,
+    hasResolvedTotalPages, page, totalPages, qqPageOptions, listPageOptions, prefetchBrowsePage]);
   const canExpandMangaDexDemand = canExpandMangaDexCatalog;
   const isAtMangaDexLoadedLimit =
     canExpandMangaDexDemand &&

@@ -79,7 +79,10 @@ def _guards(uid, sid):
 
 
 def _read_guards(client, who):
-    values = client.mget(_guards(who["uid"], who["sid"]))
+    return _check_guards(client.mget(_guards(who["uid"], who["sid"])), who)
+
+
+def _check_guards(values, who):
     if any(values[3:5]):
         raise Unavailable("Quyền truy cập đang được cập nhật. Vui lòng thử lại.")
     if values[5]:
@@ -110,8 +113,10 @@ def _payload(record):
 def _signer_for(client):
     # A dedicated key, generated server-side and shared by Vercel instances.
     # It is independent of the Flask/application secrets and never sent out.
-    client.set(PREFIX + "signing-key", secrets.token_urlsafe(48), nx=True)
     key = client.get(PREFIX + "signing-key")
+    if not key:
+        client.set(PREFIX + "signing-key", secrets.token_urlsafe(48), nx=True)
+        key = client.get(PREFIX + "signing-key")
     if not key:
         raise Unavailable("Không thể cấp phiên truy cập. Vui lòng thử lại.")
     return URLSafeSerializer(key,
@@ -123,23 +128,33 @@ def _signer():
     return _signer_for(_db())
 
 
+def _registered_session(client, who, *, ticket=False):
+    # Read the session and every revocation guard in one atomic Redis MGET.
+    # There is still a fresh revocation check on EVERY request.
+    values = client.mget([_session_key(who["uid"], who["sid"]), *_guards(who["uid"], who["sid"])])
+    raw = values[0]
+    if ticket and not raw:
+        raise Rejected("Unregistered access ticket")
+    record = json.loads(raw) if raw else None
+    if record and ticket:
+        who = {**who, "iat": record["auth_iat"], "started": record.get("started", False)}
+    epochs = _check_guards(values[1:], who)
+    if not record:
+        return None
+    if record["uid"] != who["uid"] or record["sid"] != who["sid"]:
+        raise Rejected("Session identity mismatch")
+    if record["exp"] <= time.time():
+        return None
+    if tuple(record["epochs"]) != epochs:
+        raise Changed("Permissions changed")
+    return record
+
+
 def read_session(who):
     """Read a registered session using an already verified Supabase identity."""
     try:
         client = _db()
-        # Check guards even on a miss: a revoked login may not mint a new ticket.
-        epochs = _read_guards(client, who)
-        raw = client.get(_session_key(who["uid"], who["sid"]))
-        if not raw:
-            return None
-        record = json.loads(raw)
-        if record["uid"] != who["uid"] or record["sid"] != who["sid"]:
-            raise Rejected("Session identity mismatch")
-        if record["exp"] <= time.time():
-            return None
-        if tuple(record["epochs"]) != epochs:
-            raise Changed("Permissions changed")
-        return record
+        return _registered_session(client, who)
     except redis.RedisError as error:
         raise Unavailable("Không thể kiểm tra phiên truy cập. Vui lòng thử lại.") from error
 
@@ -165,13 +180,7 @@ def decode(value):
         who = {"uid": str(UUID(payload["uid"])), "sid": str(UUID(payload["sid"])), "iat": float("inf")}
         # The registered record supplies the original verified issuance time;
         # never accept an iat, role or revocation exception from the cookie.
-        raw = _db().get(_session_key(who["uid"], who["sid"]))
-        if not raw:
-            raise Rejected("Unregistered access ticket")
-        saved = json.loads(raw)
-        who["iat"] = saved["auth_iat"]
-        who["started"] = saved.get("started", False)
-        record = read_session(who)
+        record = _registered_session(_db(), who, ticket=True)
         if not record or not hmac.compare_digest(str(record["jti"]), str(payload["jti"])) or _payload(record) != payload:
             raise Rejected("Expired, changed or revoked access ticket")
         return record
