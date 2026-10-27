@@ -72,3 +72,37 @@ it('keeps local publications visible without asking either source', () => {
   expect(chapters).not.toHaveBeenCalled();
   client.clear();
 });
+
+it('keeps a lower-number new release even when an older highest chapter is cached', () => {
+  const client = new QueryClient();
+  const id = '66666666-6666-4666-8666-666666666666';
+  client.setQueryData(['manga', 'card-chapter', id], { pending: false, chapter: {
+    id: '77777777-7777-4777-8777-777777777777', chapter_name: '99', source: 'mangadex',
+    slug: id, publish_at: '2020-01-01T00:00:00Z',
+  } });
+  const request = vi.spyOn(mangaApi, 'getLatestCardChapters');
+  const release = { id: '88888888-8888-4888-8888-888888888888', mangaId: id,
+    number: 2, title: 'Release chapter 2', pages: [], uploadDate: new Date().toISOString(), scanlationGroup: '' };
+  const ready = { ...manga, id, source: 'mangadex', title: 'Release test',
+    releaseChapter: release, chapters: [release] } as Manga;
+  render(<QueryClientProvider client={client}><MemoryRouter><MangaCard manga={ready} /></MemoryRouter></QueryClientProvider>);
+  expect(screen.getByText(/2 -/)).toBeInTheDocument();
+  expect(screen.queryByText(/99/)).not.toBeInTheDocument();
+  expect(request).not.toHaveBeenCalled();
+  client.clear();
+});
+
+it('shows the date of an unnumbered release without requesting a highest chapter', () => {
+  const client = new QueryClient();
+  const id = '66666666-6666-4666-8666-666666666666';
+  const request = vi.spyOn(mangaApi, 'getLatestCardChapters');
+  const release = { id: '88888888-8888-4888-8888-888888888888', mangaId: id,
+    number: -1, title: 'One shot', pages: [], uploadDate: new Date().toISOString(),
+    translationSource: 'mangadex', scanlationGroup: '' } as const;
+  const ready = { ...manga, id, source: 'mangadex', title: 'Release test',
+    releaseChapter: release, chapters: [release] } as unknown as Manga;
+  render(<QueryClientProvider client={client}><MemoryRouter><MangaCard manga={ready} /></MemoryRouter></QueryClientProvider>);
+  expect(screen.getByText(/One shot -/)).toBeInTheDocument();
+  expect(request).not.toHaveBeenCalled();
+  client.clear();
+});

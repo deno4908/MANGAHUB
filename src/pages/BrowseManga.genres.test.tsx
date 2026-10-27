@@ -25,6 +25,7 @@ beforeEach(() => {
   vi.spyOn(mangaApi, 'getCategoryManga').mockResolvedValue(emptyPage);
   vi.spyOn(mangaApi, 'getOTruyenFiltered').mockResolvedValue(emptyPage);
   vi.spyOn(mangaApi, 'searchMangaDex').mockResolvedValue(emptyPage);
+  vi.spyOn(mangaApi, 'getMangaDexLatestFeed').mockResolvedValue(emptyPage);
   vi.spyOn(mangaApi, 'getMangaDexViCatalog').mockResolvedValue({ mangas: [] });
 });
 afterEach(() => { cleanup(); client.clear(); vi.restoreAllMocks(); });
@@ -43,8 +44,8 @@ it('offers a quiet unsupported-genre state without issuing an invalid QQ request
   expect(mangaApi.getList).not.toHaveBeenCalled();
   expect(mangaApi.getOTruyenFiltered).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Tìm trên MangaDex' }));
-  await waitFor(() => expect(mangaApi.searchMangaDex).toHaveBeenCalledWith(expect.objectContaining({
-    genreSlugs: ['action', 'villainess'], status: 'ongoing', sort: 'latest',
+  await waitFor(() => expect(mangaApi.getMangaDexLatestFeed).toHaveBeenCalledWith(expect.objectContaining({
+    genreSlugs: ['action', 'villainess'], status: 'ongoing', translatedLanguage: 'vi',
   })));
   expect(screen.getByTestId('location')).toHaveTextContent('source=mangadex');
   expect(screen.queryByRole('heading', { name: 'Thể loại này chưa có trên TruyenQQ' })).not.toBeInTheDocument();

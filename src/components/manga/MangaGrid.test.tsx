@@ -75,6 +75,15 @@ it('filters before the six-card limit and preserves MangaDex and local publicati
   client.clear();
 });
 
+it('preserves genuine Japanese-only MangaDex titles in the release list', () => {
+  const client = new QueryClient();
+  const item = card('f340eb91-fab8-41d6-ae3f-71f3f0a89a46', { source: 'mangadex',
+    title: '\u30d8\u30c3\u30ba', chapters: [{ id: '22222222-2222-4222-8222-222222222222', number: 4 } as any] });
+  show([item], client);
+  expect(screen.getByText(item.title)).toBeInTheDocument();
+  client.clear();
+});
+
 it('hides placeholder titles even with an old cover URL and never hides a previously verified match on a refresh failure', async () => {
   const client = new QueryClient();
   client.setQueryData(['manga', 'card-metadata', 'old-verified'], {

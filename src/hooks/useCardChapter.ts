@@ -5,7 +5,7 @@ import { applyCardChapter, needsCardChapter, requestCardChapter } from '@/lib/ca
 
 export function useCardChapter(manga: Manga): Manga {
   const id = normalizeMangaDexId(manga.id) || manga.slug || manga.id;
-  const needed = needsCardChapter(manga);
+  const needed = !manga.releaseChapter && needsCardChapter(manga);
   const query = useQuery({
     queryKey: ['manga', 'card-chapter', id],
     queryFn: () => requestCardChapter(id),
@@ -17,6 +17,7 @@ export function useCardChapter(manga: Manga): Manga {
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
   });
+  if (manga.releaseChapter) return manga;
   if (query.data?.chapter) return applyCardChapter(manga, query.data.chapter);
   const state = query.data?.state;
   if (needed && (state === 'empty' || state === 'unavailable')) return { ...manga, chapterAvailability: state };

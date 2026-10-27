@@ -82,7 +82,7 @@ const hasSyntheticRouteCover = (value: unknown): boolean => {
 const isGenericPlaceholderTitle = (value: unknown): boolean => {
   const normalized = normalizeCardText(value);
   return (
-    !normalized ||
+    !/[\p{L}\p{N}]/u.test(String(value || '')) ||
     normalized === 'chua co tieu de' ||
     normalized === 'dang cap nhat' ||
     normalized === 'mangadex' ||

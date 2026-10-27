@@ -6276,6 +6276,11 @@ async def mangadex_latest_feed(
     limit: int = Query(32, ge=1, le=100),
     show_mature: bool = Query(False),
     filter_hidden: bool = Query(True),
+    genre_slugs: str = Query(""),
+    translated_language: str = Query("vi"),
+    status: str = Query(""),
+    keyword: str = Query(""),
+    feed_snapshot: str = Query(""),
     db=Depends(get_supabase_public),
 ):
     content_ratings = (
@@ -6297,21 +6302,16 @@ async def mangadex_latest_feed(
             limit=limit,
             content_ratings=content_ratings,
             excluded_manga_ids=excluded_manga_ids,
+            translated_language=translated_language,
+            included_tag_slugs=[value.strip().lower() for value in genre_slugs.split(",") if value.strip()],
+            statuses=[value.strip().lower() for value in status.split(",") if value.strip()],
+            keyword=keyword,
+            feed_snapshot=feed_snapshot,
         )
     except RuntimeError as error:
-        logger.warning("MangaDex latest-feed fallback to /manga search after feed error: %s", error)
-        try:
-            data = await mangadex_service.search_manga(
-                keyword="",
-                page=page,
-                limit=limit,
-                translated_language="vi",
-                attach_latest=True,
-                sort="latest",
-                content_ratings=content_ratings,
-            )
-        except RuntimeError as fallback_error:
-            raise _mangadex_upstream_http_exception(fallback_error) from fallback_error
+        # A manga metadata search orders updates in ANY language. Returning it
+        # here silently changes the requested chapter ordering and filters.
+        raise _mangadex_upstream_http_exception(error) from error
 
     if filter_hidden:
         items = ((data.get("data") or {}).get("items") or [])

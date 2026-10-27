@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mangaApi, ratingApi } from '@/lib/api';
 import { useMangaStore } from '@/store/mangaStore';
@@ -32,8 +32,9 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); client.clear(); vi.restoreAllMocks(); });
 function show(url: string) {
-  render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[url]}><BrowseManga /></MemoryRouter></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[url]}><BrowseManga /><Location /></MemoryRouter></QueryClientProvider>);
 }
+function Location() { return <span data-testid="location">{useLocation().search}</span>; }
 
 it('warms only the next QQ page with identical filters and reuses it after clicking', async () => {
   vi.mocked(mangaApi.getOTruyenFiltered).mockImplementation(async options => ({ data: {
@@ -135,17 +136,49 @@ it('uses the Vietnamese chapter feed for latest browsing without narrow filters'
   expect(mangaApi.searchMangaDex).not.toHaveBeenCalled();
 });
 
-it('reorders latest results when hydrated chapter dates change, using the displayed chapter date', async () => {
+it('uses release order with status and genre filters without highest-chapter hydration', async () => {
   const second = '77777777-7777-4777-8777-777777777777';
-  vi.mocked(mangaApi.searchMangaDex).mockResolvedValue(page([
-    { id: mdx, slug: mdx, name: 'One day old', source: 'mangadex',
-      chaptersLatest: [{ chapter_name: '1', publish_at: '2026-10-21T12:00:00Z' }] },
-    { id: second, slug: second, name: 'Just published', source: 'mangadex',
-      chaptersLatest: [{ chapter_name: '1', publish_at: '2026-10-20T12:00:00Z' }] },
+  vi.mocked(mangaApi.getMangaDexLatestFeed).mockResolvedValue(page([
+    { id: second, slug: second, name: 'Just published', source: 'mangadex', status: 'ongoing',
+      chaptersLatest: [{ chapter_api_data: '22222222-2222-4222-8222-222222222222', chapter_name: '2', publish_at: '2026-10-22T12:00:00Z' }] },
+    { id: mdx, slug: mdx, name: 'One day old', source: 'mangadex', status: 'ongoing',
+      chaptersLatest: [{ chapter_api_data: '11111111-1111-4111-8111-111111111111', chapter_name: '9', publish_at: '2026-10-21T12:00:00Z' }] },
   ]));
   vi.mocked(mangaApi.getMangaDexLatestChapters).mockResolvedValue({ items: {
     [second]: { id: '22222222-2222-4222-8222-222222222222', chapter_name: '2', publish_at: '2026-10-22T12:00:00Z' },
   } });
-  show('/manga?source=mangadex&sort=latest&status=ongoing');
+  show('/manga?source=mangadex&sort=latest&status=ongoing&genre=action');
   await waitFor(() => expect(screen.getByTestId('ranked-cards')).toHaveTextContent('Just published:0|One day old:0|'));
+  expect(mangaApi.getMangaDexLatestFeed).toHaveBeenCalledWith(expect.objectContaining({
+    genreSlugs: ['action'], status: 'ongoing', translatedLanguage: 'vi',
+  }));
+  expect(mangaApi.searchMangaDex).not.toHaveBeenCalled();
+  expect(mangaApi.getMangaDexLatestChapters).not.toHaveBeenCalled();
+});
+
+it('keeps release filters, ordering and snapshot on next pages and after remounting', async () => {
+  vi.mocked(mangaApi.getMangaDexLatestFeed).mockImplementation(async options => ({ data: {
+    items: [{ id: mdx, slug: mdx, name: `Release page ${options.page}`, source: 'mangadex', status: 'ongoing',
+      chaptersLatest: [{ chapter_api_data: '22222222-2222-4222-8222-222222222222', chapter_name: '2', publish_at: '2026-10-22T12:00:00Z' }] }],
+    feed_snapshot: '12345', params: { pagination: { currentPage: options.page, totalItemsPerPage: 24, totalItems: 96 } },
+  } }));
+  const filters = '/manga?source=mangadex&sort=latest&status=ongoing&genre=action,romance&lang=en';
+  show(filters);
+  await screen.findByText('Release page 1:0|');
+  fireEvent.click(screen.getAllByRole('button', { name: 'Trang 2', exact: true })[0]);
+  await screen.findByText('Release page 2:0|');
+  const second = vi.mocked(mangaApi.getMangaDexLatestFeed).mock.calls.find(([options]) => options.page === 2)![0];
+  expect(second).toMatchObject({ genreSlugs: ['action', 'romance'], status: 'ongoing', translatedLanguage: 'en', feedSnapshot: '12345' });
+  const url = new URLSearchParams(screen.getByTestId('location').textContent!);
+  expect(url.get('sort')).toBe('latest');
+  expect(url.get('status')).toBe('ongoing');
+  expect(url.get('genre')).toBe('action,romance');
+  expect(url.get('lang')).toBe('en');
+  expect(url.get('page')).toBe('2');
+  cleanup();
+  show(filters + '&page=3');
+  await screen.findByText('Release page 3:0|');
+  expect(vi.mocked(mangaApi.getMangaDexLatestFeed).mock.calls.find(([options]) => options.page === 3)![0])
+    .toMatchObject({ ...second, page: 3, signal: expect.any(AbortSignal) });
+  expect(mangaApi.searchMangaDex).not.toHaveBeenCalled();
 });

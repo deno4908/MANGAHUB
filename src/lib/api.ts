@@ -1080,6 +1080,11 @@ export const mangaApi = {
       limit?: number;
       showMature?: boolean;
       filterHidden?: boolean;
+      genreSlugs?: string[];
+      translatedLanguage?: string;
+      status?: string;
+      keyword?: string;
+      feedSnapshot?: string;
       timeoutMs?: number;
       signal?: AbortSignal;
     } = {},
@@ -1089,6 +1094,11 @@ export const mangaApi = {
       limit: String(Math.max(1, Math.min(24, Math.floor(Number(options.limit || 24))))),
       show_mature: String(options.showMature ?? false),
       filter_hidden: String(options.filterHidden ?? true),
+      genre_slugs: (options.genreSlugs || []).join(','),
+      translated_language: options.translatedLanguage || 'vi',
+      status: options.status || '',
+      keyword: options.keyword || '',
+      feed_snapshot: options.feedSnapshot || '',
     });
     return publicApi<any>(`/api/manga/mangadex/latest-feed?${query.toString()}`, {
       timeoutMs: options.timeoutMs ?? 18_000,

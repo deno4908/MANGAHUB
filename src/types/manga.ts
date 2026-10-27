@@ -27,6 +27,8 @@ export interface Manga {
   mangadexPopularityScore?: number;
   year: number;
   chapters: Chapter[];
+  /** Chapter that placed this card in a frozen, globally ordered release feed. */
+  releaseChapter?: Chapter;
   chapterAvailability?: 'empty' | 'unavailable';
   lastUpdated: string;
   availableTranslatedLanguages?: string[];

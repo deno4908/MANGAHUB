@@ -469,7 +469,7 @@ const isUnresolvedPublicManga = (item: Manga): boolean => {
   const cover = String(item.cover || '').trim();
   const coverProxy = String(item.coverProxy || '').trim();
   const genericTitle =
-    !normalizedTitle ||
+    !/[\p{L}\p{N}]/u.test(item.title || '') ||
     normalizedTitle === 'chua co tieu de' ||
     normalizedTitle === 'dang cap nhat' ||
     normalizedTitle === 'mangadex' ||
@@ -1834,7 +1834,7 @@ const BrowseManga = () => {
       Boolean(filters.status)
     );
   const useMangaDexLatestFeedMode = isMangaDexSourceTab && filters.sort === 'latest'
-    && mangaDexTranslatedLanguage === 'vi' && !mangaDexHasNarrowClientFilters;
+    && mangaDexTranslatedLanguage !== 'non_vi' && !hasLocalClientFilters;
   const mangaDexHasServerQueryableFilters =
     hasSearch ||
     filters.genres.length > 0 ||
@@ -2139,30 +2139,61 @@ const BrowseManga = () => {
     enabled: browseUrlReady && useMangaDexServerSearchMode,
   });
 
+  const latestFeedSnapshots = useRef<Record<string, string>>({});
+  const latestFeedSelection = JSON.stringify([showMatureContent, mangaDexTranslatedLanguage,
+    mangaDexServerSearchGenreSlugs, filters.status || '', normalizedSearch]);
   const getMangaDexLatestFeedQueryKey = useCallback(
     (targetPage: number) => [
       'manga',
       'mangadex',
       'latest-feed',
+      'readable-v6',
       targetPage,
       showMatureContent,
+      mangaDexTranslatedLanguage,
+      mangaDexServerSearchGenreSlugs,
+      filters.status || '',
+      normalizedSearch,
     ] as const,
-    [showMatureContent],
+    [showMatureContent, mangaDexTranslatedLanguage, mangaDexServerSearchGenreSlugs, filters.status, normalizedSearch],
   );
 
   const fetchMangaDexLatestFeedPage = useCallback(
     async (targetPage: number, signal?: AbortSignal) => {
+      const matchesSelection = (key: readonly unknown[]) => key[2] === 'latest-feed'
+        && key[3] === 'readable-v6' && JSON.stringify(key.slice(5)) === latestFeedSelection;
+      // Returning from a detail page remounts BrowseManga. Recover the window
+      // from its cached pages so the next page still belongs to the same feed.
+      const cachedWindow = queryClient.getQueryCache().findAll({
+        predicate: query => matchesSelection(query.queryKey),
+      }).sort((a, b) => b.state.dataUpdatedAt - a.state.dataUpdatedAt)
+        .map(query => (query.state.data as { feedSnapshot?: string } | undefined)?.feedSnapshot).find(Boolean);
+      const previous = latestFeedSnapshots.current[latestFeedSelection] || cachedWindow;
       const payload = await mangaApi.getMangaDexLatestFeed({
         page: targetPage,
         limit: MANGADEX_LATEST_FEED_LIMIT,
         showMature: showMatureContent,
         filterHidden: true,
+        genreSlugs: mangaDexServerSearchGenreSlugs,
+        translatedLanguage: mangaDexTranslatedLanguage,
+        status: filters.status || '',
+        keyword: normalizedSearch,
+        feedSnapshot: previous,
         timeoutMs: 12_000,
         signal,
       });
-      return adaptListData(payload);
+      const next = String(payload?.data?.feed_snapshot || '');
+      if (next) latestFeedSnapshots.current[latestFeedSelection] = next;
+      if (previous && next && previous !== next) {
+        queryClient.removeQueries({ predicate: query => matchesSelection(query.queryKey)
+          && query.queryKey[4] !== targetPage });
+      }
+      const data = adaptListData(payload);
+      return { ...data, feedSnapshot: next, items: data.items.map(item => ({ ...item,
+        releaseChapter: normalizeMangaDexId(item.chapters[0]?.id) ? item.chapters[0] : undefined })) };
     },
-    [showMatureContent],
+    [showMatureContent, mangaDexServerSearchGenreSlugs, mangaDexTranslatedLanguage, filters.status,
+      normalizedSearch, latestFeedSelection, queryClient],
   );
 
   const mangaDexLatestFeedQuery = useQuery({
@@ -4872,7 +4903,7 @@ const BrowseManga = () => {
 
       return result;
     },
-    enabled: browseUrlReady && Boolean(mangaDexLatestChapterLanguage) && visibleMangaDexIds.length > 0,
+    enabled: browseUrlReady && !useMangaDexLatestFeedMode && Boolean(mangaDexLatestChapterLanguage) && visibleMangaDexIds.length > 0,
     staleTime: 5 * 60 * 1000,
     retry: 0,
     placeholderData: () => ({
@@ -5081,7 +5112,7 @@ const BrowseManga = () => {
         mangaDexLatestChapterMap[`mdx-${detailId}`];
       const next = { ...item };
 
-      if (latestMeta?.latestChapter && hasReadableChapter(latestMeta.latestChapter)) {
+      if (!item.releaseChapter && latestMeta?.latestChapter && hasReadableChapter(latestMeta.latestChapter)) {
         const currentLatest = pickLatestReadableChapter(next.chapters || []);
         const currentChapterNumber = toNumber(currentLatest?.number);
         const syncedChapterNumber = toNumber(latestMeta.latestChapter.number);
@@ -5127,7 +5158,7 @@ const BrowseManga = () => {
         next.coverProxy = meta.coverProxy;
       }
 
-      if (meta.latestChapter && hasReadableChapter(meta.latestChapter)) {
+      if (!item.releaseChapter && meta.latestChapter && hasReadableChapter(meta.latestChapter)) {
         const currentLatest = pickLatestReadableChapter(next.chapters || []);
         const currentChapterNumber = toNumber(currentLatest?.number);
         const syncedChapterNumber = toNumber(meta.latestChapter.number);
@@ -5240,7 +5271,7 @@ const BrowseManga = () => {
     const safeItems = ratingModeItems.filter((item) => !isUnresolvedPublicManga(item));
     // Hydration can change the chapter date after the server page was sorted.
     // Keep the order consistent with the dates actually rendered on the cards.
-    if (filters.sort === 'latest') {
+    if (filters.sort === 'latest' && !useMangaDexLatestFeedMode) {
       safeItems.sort((a, b) => getLatestSortTimestamp(b) - getLatestSortTimestamp(a));
     }
     if (showMatureContent) return safeItems;
@@ -5255,6 +5286,7 @@ const BrowseManga = () => {
     shouldEnrichVisibleMangaDex,
     showMatureContent,
     filters.sort,
+    useMangaDexLatestFeedMode,
     canUseUserRatings,
     myRatedScoreMap,
   ]);

@@ -465,19 +465,22 @@ export function adaptMangaItem(item: any): Manga {
   const chaptersLatest = item.chaptersLatest || item.chapters_latest || [];
   if (Array.isArray(chaptersLatest) && chaptersLatest.length > 0) {
     chaptersLatest.forEach((ch: any) => {
-      if (ch.chapter_name) {
-        const chapterApiData = String(ch.chapter_api_data || "").trim();
-        const chapterIdFromApi = chapterApiData ? chapterApiData.split("/").pop() : "";
+      const chapterApiData = String(ch.chapter_api_data || "").trim();
+      const chapterIdFromApi = chapterApiData ? chapterApiData.split("/").pop() : "";
+      if (ch.chapter_name || (isMangaDexSource && normalizeMangaDexId(chapterIdFromApi))) {
         const chapterName = repairMojibakeText(ch.chapter_name).trim();
         const chapterTitle = repairMojibakeText(ch.chapter_title).trim();
+        const chapterNumber = parseFloat(chapterName);
         latestChapters.push({
           id: chapterIdFromApi || (isMangaDexSource ? `mdx-ch-${slug}-${chapterName}` : `ch-${chapterName}`),
           mangaId: slug,
-          number: parseFloat(chapterName) || 0,
+          number: Number.isFinite(chapterNumber) ? chapterNumber : -1,
           title: chapterTitle || `Chương ${chapterName}`,
           pages: [],
           uploadDate: pickChapterTime(ch, item),
           scanlationGroup: "",
+          translationSource: isMangaDexSource ? "mangadex" : undefined,
+          translatedLanguage: ch.translated_language || undefined,
         });
       }
     });

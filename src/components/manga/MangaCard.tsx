@@ -168,7 +168,7 @@ function pickLatestChapter(chapters: Manga['chapters']): Manga['chapters'][numbe
 
 const MangaCard = ({ manga: originalManga, index = 0, variant = 'default' }: MangaCardProps) => {
   const manga = useCardChapter(useCardMetadata(originalManga));
-  const lastChapter = pickLatestChapter(manga.chapters);
+  const lastChapter = manga.releaseChapter || pickLatestChapter(manga.chapters);
   const chapterTime = manga.chapterAvailability ? '' : chapterTimeLabel(lastChapter);
   const queryClient = useQueryClient();
   const isMangaDexItem = getMangaSource(manga.id, manga.source) === 'mangadex';
