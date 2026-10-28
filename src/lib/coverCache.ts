@@ -26,7 +26,7 @@ export function canCacheCover(value: string): boolean {
     const url = new URL(value, window.location.origin);
     return url.origin === new URL(API_BASE).origin && (
       url.pathname === '/api/images/img' ||
-      /^\/api\/manga\/(?:mangadex-cover|truyenqq\/cover)\//.test(url.pathname)
+      /^\/api\/manga\/(?:mangadex-cover|truyenqq\/cover|moetruyen\/cover)\//.test(url.pathname)
     );
   } catch { return false; }
 }

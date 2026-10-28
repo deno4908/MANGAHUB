@@ -1,4 +1,9 @@
-export type MangaSource = "truyenqq" | "mangadex";
+export type MangaSource = "truyenqq" | "mangadex" | "moetruyen";
+
+export function normalizeMoeId(value?: string | null): string | null {
+  const match = String(value || '').trim().match(/^moe-([0-9]+)(?:-[a-z0-9_-]+)?$/i);
+  return match ? `moe-${match[1]}` : null;
+}
 
 export const MANGADEX_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -102,7 +107,7 @@ export function normalizeMangaDexId(value?: string | null): string | null {
 function normalizeSource(value?: string | null): MangaSource | null {
   const normalized = cleanRouteToken(value).toLowerCase();
   if (normalized === "otruyen") return "truyenqq";
-  if (normalized === "truyenqq" || normalized === "mangadex") {
+  if (normalized === "truyenqq" || normalized === "mangadex" || normalized === "moetruyen") {
     return normalized;
   }
   return null;
@@ -114,6 +119,7 @@ export function getMangaSource(
 ): MangaSource {
   const explicitSource = normalizeSource(source);
   if (explicitSource) return explicitSource;
+  if (normalizeMoeId(identifier)) return "moetruyen";
   if (normalizeOTruyenObjectId(identifier)) return "truyenqq";
   return normalizeMangaDexId(identifier) ? "mangadex" : "truyenqq";
 }
@@ -129,6 +135,7 @@ export function getMangaDetailPath(
   const routeIdentifier =
     resolvedSource === "mangadex"
       ? normalizeMangaDexId(rawIdentifier) || rawIdentifier
+      : resolvedSource === "moetruyen" ? normalizeMoeId(rawIdentifier) || rawIdentifier
       : toOTruyenRouteId(rawIdentifier) || rawIdentifier;
 
   return `/manga/${encodeURIComponent(routeIdentifier)}`;
@@ -146,6 +153,7 @@ export function resolveMangaRoute(
   const identifier =
     source === "mangadex"
       ? normalizeMangaDexId(rawIdentifier) || rawIdentifier
+      : source === "moetruyen" ? normalizeMoeId(rawIdentifier) || rawIdentifier
       : normalizeOTruyenObjectId(rawIdentifier) || rawIdentifier;
   const canonicalPath = getMangaDetailPath(identifier, source);
   const currentPath = rawIdentifier

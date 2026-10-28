@@ -1,0 +1,17 @@
+FROM python:3.12-slim-bookworm
+ENV PYTHONUNBUFFERED=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    MOE_IMGX_BROWSER_CHANNEL=chromium \
+    MOE_IMGX_PRESTART=false
+WORKDIR /app
+COPY requirements-moe-reader.txt ./
+RUN pip install --no-cache-dir -r requirements-moe-reader.txt \
+    && python -m playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+COPY moetruyen_api ./moetruyen_api
+COPY moe_reader_server.py ./
+RUN useradd --create-home --uid 10001 moe
+ENV HOME=/home/moe
+USER moe
+EXPOSE 8001
+CMD ["sh", "-c", "uvicorn moe_reader_server:app --host 0.0.0.0 --port ${PORT:-8001} --workers 1"]

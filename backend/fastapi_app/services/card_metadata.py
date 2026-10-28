@@ -75,18 +75,24 @@ def cached_metadata(identifier, values=None):
 
 @coalesce_reads
 async def _qq_metadata(identifier, title=None, *, source_timeout=None):
-    existing = await asyncio.to_thread(cached_metadata, identifier)
-    if existing:
-        return existing
+    from fastapi_app.services import moetruyen_service as moe
     from fastapi_app.services.catalog_visibility import unmatched
     from truyenapi.truyenapi.service import normalized
-    valid_title = bool(title and normalized(title) == normalized(identifier))
-    if not valid_title and identifier in await asyncio.to_thread(unmatched, [identifier]):
-        return None
-    if re.fullmatch(r"[0-9a-f]{24}", identifier):
-        return None  # An old OTruyen ObjectId does not identify a QQ book.
+    deadline = asyncio.get_running_loop().time() + source_timeout if source_timeout else None
     async def fetch():
+        if moe.is_identifier(identifier):
+            return moe.metadata(await moe.get_basic(identifier))
+        existing = await asyncio.to_thread(cached_metadata, identifier)
+        if existing:
+            return existing
+        valid_title = bool(title and normalized(title) == normalized(identifier))
+        if not valid_title and identifier in await asyncio.to_thread(unmatched, [identifier]):
+            return None
+        if re.fullmatch(r"[0-9a-f]{24}", identifier):
+            return None  # An old OTruyen ObjectId does not identify a QQ book.
         async with _qq_slots:
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                raise asyncio.TimeoutError
             try:
                 value = (await qq.run_live("saved_metadata", identifier, title)
                          if valid_title
@@ -98,7 +104,7 @@ async def _qq_metadata(identifier, title=None, *, source_timeout=None):
                 if error.status_code == 404:
                     return None
                 raise
-    # Include time queued for the source semaphore in an interactive deadline.
+    # Cache lookups and queued source reads share the same interactive budget.
     return await asyncio.wait_for(fetch(), source_timeout) if source_timeout else await fetch()
 
 

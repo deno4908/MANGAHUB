@@ -1,8 +1,8 @@
 import type { QueryClient, QueryKey } from '@tanstack/react-query';
-import { normalizeMangaDexId } from '@/lib/mangaLinks';
+import { getMangaSource, normalizeMangaDexId } from '@/lib/mangaLinks';
 
 export type CatalogUpdate = {
-  source: 'mangadex' | 'truyenqq';
+  source: 'mangadex' | 'truyenqq' | 'moetruyen';
   revision: string;
   snapshot?: boolean;
   changes: Array<{ slug: string; chapter_id: string; chapter_name: string }>;
@@ -14,13 +14,15 @@ function belongsToUpdate(key: QueryKey, event: CatalogUpdate): boolean {
   const section = String(key[1]);
   if (section === 'detail' || section === 'card-metadata' || section === 'card-chapter') {
     const id = normalizeMangaDexId(String(key[2])) || String(key[2]);
-    if (event.snapshot) return Boolean(normalizeMangaDexId(id)) === (event.source === 'mangadex');
+    if (event.snapshot) return getMangaSource(id) === event.source;
     return event.changes.some(change => change.slug === id ||
       (event.source === 'truyenqq' && change.slug.replace(/-\d+$/, '') === id));
   }
   if (section === 'chapter') return event.changes.some(change => change.chapter_id === key[2]);
   if (section === 'mangadex' || section === 'mangadex-catalog') return event.source === 'mangadex';
-  if (section === 'list' || section === 'category' || section === 'otruyen-filtered' || section === 'homepage') {
+  if (section === 'moetruyen') return event.source === 'moetruyen';
+  if (section === 'homepage') return true;
+  if (section === 'list' || section === 'category' || section === 'otruyen-filtered') {
     return event.source === 'truyenqq';
   }
   if (section === 'home' && key.includes('mangadex')) return event.source === 'mangadex';
@@ -48,7 +50,7 @@ export function watchCatalogUpdates(client: QueryClient) {
   let stopped = false;
 
   const receive = (event: CatalogUpdate) => {
-    if (!event || !['mangadex', 'truyenqq'].includes(event.source) || !event.revision || !Array.isArray(event.changes)) return;
+    if (!event || !['mangadex', 'truyenqq', 'moetruyen'].includes(event.source) || !event.revision || !Array.isArray(event.changes)) return;
     const previous = revisions.get(event.source);
     if (previous === event.revision) return;
     revisions.set(event.source, event.revision);

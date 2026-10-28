@@ -266,6 +266,7 @@ function getReaderChapterSourceLabel(chapter: ReaderChapter): string {
   if (source === 'mangadex') return 'MangaDex';
   if (source === 'local') return 'Bản dịch web';
   if (source === 'truyenqq') return 'TruyenQQ';
+  if (source === 'moetruyen') return 'Mòe Truyện';
   return source;
 }
 

@@ -915,7 +915,7 @@ const MangaDetail = () => {
             )}
 
             <div className="flex flex-wrap gap-1.5 mt-4">
-              {manga.genres.map((g, i) => <TagBadge key={g} tag={g} onClick={() => navigate(`/manga?genre=${encodeURIComponent(manga.tags[i] || g)}`)} />)}
+              {manga.genres.map((g, i) => <TagBadge key={g} tag={g} onClick={() => navigate(`/manga?${manga.source === 'moetruyen' ? 'source=moetruyen&' : ''}genre=${encodeURIComponent(manga.tags[i] || g)}`)} />)}
             </div>
 
             <div className="flex flex-wrap gap-3 mt-6">

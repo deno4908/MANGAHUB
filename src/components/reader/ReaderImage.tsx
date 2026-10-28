@@ -77,6 +77,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
   const fallbackSource = fallbackSrc || getMangaDexImageFallback(src);
   const hasExplicitFallback = Boolean(fallbackSrc);
   const isTruyenQQProxy = /\/api\/manga\/truyenqq\/image\//.test(src);
+  const isMoeProxy = /\/api\/manga\/moetruyen\/image\//.test(src);
   const activeSrc = useFallbackSource && fallbackSource ? fallbackSource : src;
   const imgSrc = retryCount > 0 ? `${activeSrc}${activeSrc.includes('?') ? '&' : '?'}retry=${retryCount}` : activeSrc;
 
@@ -95,7 +96,9 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
       setError(true);
     // The QQ proxy may try another CDN before responding. Give that request
     // time to finish instead of aborting it with a new URL every five seconds.
-    }, isTruyenQQProxy
+    }, isMoeProxy
+      ? 75_000
+      : isTruyenQQProxy
       ? 25_000
       : useFallbackSource
       ? 18_000
@@ -107,7 +110,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
             ? 6_500
             : 8_000);
     return () => window.clearTimeout(timeout);
-  }, [inView, visible, loaded, error, useFallbackSource, fallbackSource, retryCount, priority, hasExplicitFallback, isTruyenQQProxy]);
+  }, [inView, visible, loaded, error, useFallbackSource, fallbackSource, retryCount, priority, hasExplicitFallback, isTruyenQQProxy, isMoeProxy]);
 
   const placeholderStyle: React.CSSProperties = naturalSize
     ? { aspectRatio: `${naturalSize.w}/${naturalSize.h}` }

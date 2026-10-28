@@ -51,7 +51,7 @@ it('warms only the next QQ page with identical filters and reuses it after click
   expect(calls.filter(arg => arg.page === 2)).toHaveLength(1);
   expect(calls.find(arg => arg.page === 2)).toMatchObject({ ...first, page: 2, signal: expect.any(AbortSignal) });
   expect(calls.some(arg => arg.page === 3)).toBe(false);
-  fireEvent.click(screen.getAllByRole('button', { name: 'Trang 2', exact: true })[0]);
+  fireEvent.click(screen.getAllByRole('button', { name: 'Trang 2' })[0]);
   await waitFor(() => expect(screen.getByTestId('ranked-cards')).toHaveTextContent('Page 2'));
   expect(vi.mocked(mangaApi.getOTruyenFiltered).mock.calls.filter(([arg]) => arg.page === 2)).toHaveLength(1);
 });
@@ -165,7 +165,7 @@ it('keeps release filters, ordering and snapshot on next pages and after remount
   const filters = '/manga?source=mangadex&sort=latest&status=ongoing&genre=action,romance&lang=en';
   show(filters);
   await screen.findByText('Release page 1:0|');
-  fireEvent.click(screen.getAllByRole('button', { name: 'Trang 2', exact: true })[0]);
+  fireEvent.click(screen.getAllByRole('button', { name: 'Trang 2' })[0]);
   await screen.findByText('Release page 2:0|');
   const second = vi.mocked(mangaApi.getMangaDexLatestFeed).mock.calls.find(([options]) => options.page === 2)![0];
   expect(second).toMatchObject({ genreSlugs: ['action', 'romance'], status: 'ongoing', translatedLanguage: 'en', feedSnapshot: '12345' });

@@ -436,6 +436,9 @@ def _cached_detail_identifier(slug):
 
 @coalesce_reads
 async def get_manga_detail(slug):
+    from fastapi_app.services import moetruyen_service as moe
+    if moe.is_identifier(slug):
+        return await moe.get_manga_detail(slug)
     cached = await asyncio.to_thread(_json_cached, f"truyenqq:detail:{slug}")
     item = ((cached or {}).get("data") or {}).get("item") if isinstance(cached, dict) else None
     if isinstance(item, dict) and item.get("source") == "truyenqq" and "chapters" in item:
@@ -494,6 +497,9 @@ async def get_chapter_image(slug, number, index):
 
 
 async def get_chapter(chapter_id):
+    if str(chapter_id).startswith("moe--"):
+        from fastapi_app.services import moetruyen_service as moe
+        return await moe.get_chapter(chapter_id)
     slug, number = parse_chapter_token(chapter_id)
     value = await get_chapter_manifest(slug, number)
     images = [{"image_page": img["index"], "image_file":

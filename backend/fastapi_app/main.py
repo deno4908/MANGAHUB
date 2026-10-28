@@ -28,6 +28,7 @@ from maintenance import (
 from fastapi_app.routers import (
     manga,
     truyenqq,
+    moetruyen,
     users,
     bookmarks,
     history,
@@ -264,6 +265,8 @@ async def lifespan(app: FastAPI):
             yield
         finally:
             await truyenqq_service.close()
+            from fastapi_app.services import moetruyen_service
+            await moetruyen_service.close()
         return
     images.schedule_image_cache_prune(force=True)
     core_warmup_task = asyncio.create_task(_warmup_cache_core())
@@ -300,6 +303,9 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     await truyenqq_service.close()
+
+    from fastapi_app.services import moetruyen_service
+    await moetruyen_service.close()
 
 
 app = FastAPI(
@@ -559,6 +565,7 @@ app.include_router(manga.router, prefix="/api/manga", tags=["Manga"])
 app.include_router(site_access_router.router, prefix="/api", tags=["Site access"])
 app.include_router(catalog_updates_router.router, prefix="/api/manga", tags=["Catalog Updates"])
 app.include_router(truyenqq.router, prefix="/api/manga", tags=["TruyenQQ"])
+app.include_router(moetruyen.router, prefix="/api/manga", tags=["Mòe Truyện"])
 app.include_router(users.router, prefix="/api/users", tags=["Users"])
 app.include_router(bookmarks.router, prefix="/api/bookmarks", tags=["Bookmarks & Follows"])
 app.include_router(history.router, prefix="/api/history", tags=["Reading History"])

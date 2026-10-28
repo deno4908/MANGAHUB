@@ -63,7 +63,7 @@ export function resolveSavedMangaCover(identifier: string, cover?: string, store
   try {
     const url = new URL(primary, API_BASE);
     // Rebase stored backend URLs and let an outdated MDX filename recover by manga ID.
-    if (/^\/api\/manga\/(?:mangadex-cover|truyenqq\/cover)\//.test(url.pathname)) primary = current;
+    if (/^\/api\/manga\/(?:mangadex-cover|truyenqq\/cover|moetruyen\/cover)\//.test(url.pathname)) primary = current;
     else if (url.pathname === '/api/images/img') {
       const target = url.searchParams.get('url') || '';
       primary = /^https?:\/\//i.test(target) && /^(?:uploads\.mangadex\.org|.+\.mangadex\.network)$/i.test(new URL(target).hostname)

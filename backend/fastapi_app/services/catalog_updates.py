@@ -20,7 +20,11 @@ try:
     POLL_SECONDS = max(5, int(os.getenv("CATALOG_POLL_SECONDS", "8")))
 except ValueError:
     POLL_SECONDS = 8
-SOURCES = ("truyenqq", "mangadex")
+SOURCES = ("truyenqq", "mangadex", "moetruyen")
+try:
+    MOE_POLL_SECONDS = max(POLL_SECONDS, int(os.getenv("MOE_CATALOG_POLL_SECONDS", "60")))
+except ValueError:
+    MOE_POLL_SECONDS = max(60, POLL_SECONDS)
 STATE_PREFIX = "catalog:revision:v1:"
 
 
@@ -39,8 +43,9 @@ class CatalogUpdates:
         token = uuid.uuid4().hex
         if not client.set(f"catalog:probe-active:{source}", token, nx=True, ex=120):
             return False
-        bucket = int(time.time() // POLL_SECONDS)
-        if client.set(f"catalog:probe-lock:{source}:{bucket}", "1", nx=True, ex=max(60, POLL_SECONDS * 3)):
+        interval = MOE_POLL_SECONDS if source == "moetruyen" else POLL_SECONDS
+        bucket = int(time.time() // interval)
+        if client.set(f"catalog:probe-lock:{source}:{bucket}", "1", nx=True, ex=max(60, interval * 3)):
             return token
         self._release(source, token)
         return False
@@ -54,6 +59,18 @@ class CatalogUpdates:
                         1, f"catalog:probe-active:{source}", token)
 
     async def probe(self, source):
+        if source == "moetruyen":
+            from fastapi_app.services import moetruyen_service as moe
+            from moetruyen_api.config import Filters
+            value = await moe.run(lambda source: source.listing(Filters(perPage=24)))
+            if not value.get("items"):
+                raise ValueError("Empty Moe update probe")
+            await moe._remember_cards(value["items"])
+            cards = [moe.item(row) for row in value["items"]]
+            return {row["id"]: {"slug": row["id"],
+                "chapter_id": (row["chaptersLatest"] or [{}])[0].get("chapter_api_data", ""),
+                "chapter_name": (row["chaptersLatest"] or [{}])[0].get("chapter_name", "")}
+                for row in cards}
         if source == "truyenqq":
             value = await qq.run_live("collection", "latest", 1, refresh=True)
             if not value.get("items"):
@@ -100,7 +117,7 @@ class CatalogUpdates:
         slugs = [change["slug"] for change in changes]
         if source == "truyenqq":
             qq.invalidate_live_catalog(slugs, preserve_latest=preserve_latest)
-        else:
+        elif source == "mangadex":
             mdx._vi_catalog_lookup_index.clear()
             mdx._vi_catalog_lookup_index_at = 0
         # These snapshots are small, source-dependent display caches.
@@ -110,6 +127,9 @@ class CatalogUpdates:
             if source == "truyenqq":
                 patterns += ["truyenqq:live-list:*", "truyenqq:list:*", "truyenqq:home", "manga:truyenqq-filtered:*"]
                 patterns += [f"truyenqq:detail:{slug}*" for slug in slugs]
+            elif source == "moetruyen":
+                patterns += ["moetruyen:list:*"]
+                patterns += [f"moetruyen:detail:*:{slug}*" for slug in slugs]
             else:
                 patterns += ["mangadex:latest-vi-feed:*", "mangadex:search:*", "mangadex:vi-catalog:public:*",
                              "manga:mangadex-popular*"]
@@ -188,7 +208,8 @@ class CatalogUpdates:
                         await asyncio.to_thread(self._release, source, claim)
                     except Exception:
                         logger.debug("Catalog probe lease will expire for %s", source)
-            delay = min(60, POLL_SECONDS * (2 ** failures))
+            interval = MOE_POLL_SECONDS if source == "moetruyen" else POLL_SECONDS
+            delay = min(max(60, interval), interval * (2 ** failures))
             await asyncio.sleep(max(1, delay - (time.monotonic() - started)))
 
     async def refresh_once(self):

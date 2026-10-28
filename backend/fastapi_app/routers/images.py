@@ -66,10 +66,13 @@ MAX_IMAGE_REDIRECTS = 3
 HOST_VALIDATION_TTL_SECONDS = 300.0
 IMAGE_FETCH_CHUNK_SIZE = 256 * 1024
 ALLOWED_IMAGE_HOSTS = {
+    "truyen.moe",
+    "u.truyen.moe",
     "img.otruyenapi.com",
     "uploads.mangadex.org",
 }
 ALLOWED_IMAGE_HOST_SUFFIXES = (
+    ".ibyteimg.com",
     ".otruyencdn.com",
     ".mangadex.network",
 )
@@ -667,6 +670,8 @@ def _request_headers_for_url(url: str) -> dict[str, str]:
         if match:
             headers["Referer"] = f"https://mangadex.org/title/{match.group(1)}"
         return headers
+    if host in {"truyen.moe", "u.truyen.moe"} or host.endswith(".ibyteimg.com"):
+        return {**base_headers, "Referer": "https://truyen.moe/"}
     return {
         **base_headers,
         "Referer": "https://otruyenapi.com/",

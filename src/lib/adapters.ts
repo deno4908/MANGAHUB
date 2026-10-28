@@ -292,6 +292,7 @@ export function thumbUrl(thumb: string, slug: string): string {
   if (raw.startsWith("/api/")) return `${API_BASE}${raw}`;
   if (!raw) {
     if (!slug) return "/no-cover.svg";
+    if (/^moe-[0-9]+(?:-|$)/.test(slug)) return `${API_BASE}/api/manga/moetruyen/cover/${encodeURIComponent(slug)}`;
     const mangaDexId = normalizeMangaDexId(slug);
     return mangaDexId
       ? `${API_BASE}/api/manga/mangadex-cover/${mangaDexId}`
@@ -479,7 +480,7 @@ export function adaptMangaItem(item: any): Manga {
           pages: [],
           uploadDate: pickChapterTime(ch, item),
           scanlationGroup: "",
-          translationSource: isMangaDexSource ? "mangadex" : undefined,
+          translationSource: isMangaDexSource ? "mangadex" : item.source === "moetruyen" ? "moetruyen" : undefined,
           translatedLanguage: ch.translated_language || undefined,
         });
       }
@@ -567,12 +568,12 @@ export function adaptMangaItem(item: any): Manga {
       item.local_last_published_at,
       item.updatedAt,
       item.createdAt,
-    ) || new Date().toISOString();
+    ) || (item.source === 'moetruyen' ? '' : new Date().toISOString());
 
   return {
     id: sourceId || slug,
     slug,
-    source: isUserUpload ? "uploaded" : (isMangaDexSource ? "mangadex" : "truyenqq"),
+    source: isUserUpload ? "uploaded" : (isMangaDexSource ? "mangadex" : item.source === "moetruyen" ? "moetruyen" : "truyenqq"),
     title: displayTitle,
     altTitle: altTitleCandidate && altTitleCandidate !== displayTitle
       ? altTitleCandidate
@@ -683,11 +684,13 @@ export function adaptMangaDetail(data: any): Manga {
     id: ch.chapter_api_data?.split("/").pop() || repairMojibakeText(ch.chapter_name) || `ch-${idx}`,
     mangaId: slug,
     number: Number.isFinite(parseFloat(repairMojibakeText(ch.chapter_name)))
-      ? parseFloat(repairMojibakeText(ch.chapter_name)) : idx + 1,
+      ? parseFloat(repairMojibakeText(ch.chapter_name)) : item.source === 'moetruyen' ? 0 : idx + 1,
     title: repairMojibakeText(ch.chapter_title) || `Chương ${repairMojibakeText(ch.chapter_name)}`,
     pages: [], // loaded on chapter open
     uploadDate: pickChapterTime(ch, item),
-    scanlationGroup: "",
+    scanlationGroup: ch.scanlation_group || "",
+    translationSource: item.source === "moetruyen" ? "moetruyen" : "truyenqq",
+    translationSourceLabel: item.source === "moetruyen" ? "Mòe Truyện" : "TruyenQQ",
   }));
 
   // Reverse so newest first for display, oldest first for reading
@@ -733,7 +736,7 @@ export function adaptMangaDetail(data: any): Manga {
   return {
     id: sourceId || slug,
     slug,
-    source: isUserUpload ? "uploaded" : "truyenqq",
+    source: isUserUpload ? "uploaded" : item.source === "moetruyen" ? "moetruyen" : "truyenqq",
     title: displayTitle,
     altTitle: altTitleCandidate && altTitleCandidate !== displayTitle
       ? altTitleCandidate

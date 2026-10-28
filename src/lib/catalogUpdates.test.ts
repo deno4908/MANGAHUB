@@ -9,6 +9,18 @@ const event: CatalogUpdate = { source: 'truyenqq', revision: 'new', changes: [
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('live catalog updates', () => {
+  it('refreshes the combined homepage for every source without treating Moe as QQ', async () => {
+    const client = new QueryClient();
+    const home = ['manga', 'homepage', 'combined-v3'];
+    const moe = ['manga', 'detail', 'moe-1048'];
+    const qq = ['manga', 'detail', 'book-123'];
+    for (const key of [home, moe, qq]) client.setQueryData(key, 'old');
+    await applyCatalogUpdates(client, [{ source: 'moetruyen', revision: 'moe-new', snapshot: true, changes: [] }]);
+    expect(client.getQueryState(home)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(moe)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(qq)?.isInvalidated).toBe(false);
+    client.clear();
+  });
   it('refreshes active books and lists while preserving account and unrelated detail caches', async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
     const keys = [ ['manga', 'homepage', 'combined-v2'], ['manga', 'detail', 'book-123', 'truyenqq'],

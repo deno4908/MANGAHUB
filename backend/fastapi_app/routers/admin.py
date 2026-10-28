@@ -1815,8 +1815,11 @@ async def admin_manga_list(
     source_total_pages = None
 
     # ── TruyenQQ ──────────────────────────────────────────────
-    if source == "truyenqq":
-        if search:
+    if source in {"truyenqq", "moetruyen"}:
+        if source == "moetruyen":
+            from fastapi_app.services import moetruyen_service
+            resp = await moetruyen_service.get_filtered(page=page, limit=limit, keyword=search or "", show_mature=True)
+        elif search:
             resp = await truyenqq_service.search_manga(search, page)
         else:
             resp = await truyenqq_service.get_list("truyen-moi", page)
@@ -1837,7 +1840,7 @@ async def admin_manga_list(
                     "title": str(it.get("name") or it.get("title") or slug),
                     "cover_url": truyenqq_service.get_image_url(str(it.get("thumb_url") or "")),
                     "views": _coerce_views(it.get("views"), it.get("view_count"), it.get("view")),
-                    "source": "truyenqq",
+                    "source": source,
                     "upload_status": None,
                 })
 
@@ -2082,7 +2085,7 @@ async def admin_manga_list(
 
     # External sources often do not provide reliable views.
     # Merge in local tracked views to avoid showing all-zero rows.
-    if source in {"truyenqq", "mangadex"} and raw_items:
+    if source in {"truyenqq", "mangadex", "moetruyen"} and raw_items:
         source_slugs = [str(item.get("slug") or "") for item in raw_items if str(item.get("slug") or "")]
         if source_slugs:
             try:

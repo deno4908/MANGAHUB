@@ -2,7 +2,7 @@ export interface Manga {
   id: string;
   /** Source-native human slug. OTruyen detail APIs still resolve by slug. */
   slug?: string;
-  source?: 'truyenqq' | 'mangadex' | 'uploaded';
+  source?: 'truyenqq' | 'mangadex' | 'moetruyen' | 'uploaded';
   title: string;
   altTitle?: string;
   author: string;
@@ -41,7 +41,7 @@ export interface Manga {
   externalUrl?: string;
 }
 
-export type ChapterTranslationSource = 'mangadex' | 'local' | 'truyenqq';
+export type ChapterTranslationSource = 'mangadex' | 'local' | 'truyenqq' | 'moetruyen';
 
 export interface Chapter {
   id: string;

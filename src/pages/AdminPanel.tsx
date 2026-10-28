@@ -3229,7 +3229,7 @@ const MangaSection = ({
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [bulkHideLoading, setBulkHideLoading] = useState(false);
-  const [source, setSource] = useState<"db" | "truyenqq" | "mangadex" | "uploaded">("db");
+  const [source, setSource] = useState<"db" | "truyenqq" | "mangadex" | "moetruyen" | "uploaded">("db");
   const [filterHidden, setFilterHidden] = useState<"" | "hidden" | "visible">("");
   const [sortBy, setSortBy] = useState<"default" | "title" | "views">("default");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
@@ -3328,8 +3328,8 @@ const MangaSection = ({
     }
   }, []);
 
-  const sourceLabel = source === "mangadex" ? "MangaDex" : source === "truyenqq" ? "TruyenQQ" : source;
-  const canBulkHideBySource = canManageManga && (source === "mangadex" || source === "truyenqq");
+  const sourceLabel = source === "mangadex" ? "MangaDex" : source === "truyenqq" ? "TruyenQQ" : source === "moetruyen" ? "Mòe Truyện" : source;
+  const canBulkHideBySource = canManageManga && (source === "mangadex" || source === "truyenqq" || source === "moetruyen");
   const bulkHideCandidates = useMemo(
     () => mangaList.filter((m) => m.source === source && !m.is_hidden),
     [mangaList, source]
@@ -3569,6 +3569,7 @@ const MangaSection = ({
           { key: "db",       label: "Đã xem",   color: "text-purple-400" },
           { key: "truyenqq",  label: "TruyenQQ",  color: "text-orange-400" },
           { key: "mangadex", label: "MangaDex", color: "text-blue-400" },
+          { key: "moetruyen", label: "Mòe Truyện", color: "text-pink-400" },
           { key: "uploaded", label: "Upload",   color: "text-emerald-400" },
         ] as const).map(s => (
           <button
@@ -3595,7 +3596,8 @@ const MangaSection = ({
             onChange={e => { setSearch(e.target.value); }}
             placeholder={
               source === "mangadex" ? "Tìm truyện MangaDex (mặc định: tất cả có bản VI)..." :
-              source === "truyenqq"  ? "Tìm trên OTruyen..." :
+              source === "truyenqq"  ? "Tìm trên TruyenQQ..." :
+              source === "moetruyen" ? "Tìm trên Mòe Truyện..." :
               source === "uploaded" ? "Tìm theo tên / slug upload..." :
               "Tìm theo slug / tên truyện đã đọc..."
             }
@@ -3714,7 +3716,7 @@ const MangaSection = ({
                     }`}>
                       {m.source === "uploaded" ? "Upload" :
                        m.source === "truyenqq"  ? "TruyenQQ" :
-                       m.source === "mangadex" ? "MangaDex" : "External"}
+                       m.source === "mangadex" ? "MangaDex" : m.source === "moetruyen" ? "Mòe Truyện" : "External"}
                     </span>
                   </td>
                   {/* Views */}

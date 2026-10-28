@@ -3,7 +3,7 @@ import { mangaApi } from '@/lib/api';
 import { normalizeMangaDexId } from '@/lib/mangaLinks';
 
 export type CardChapter = { id: string; chapter_name: string; chapter_title?: string; publish_at?: string;
-  source: 'mangadex' | 'truyenqq'; slug: string };
+  source: 'mangadex' | 'truyenqq' | 'moetruyen'; slug: string };
 export type CardChapterResult = { chapter: CardChapter | null; pending: boolean;
   state?: 'empty' | 'unavailable' | 'retry'; retry_after?: number };
 
@@ -11,7 +11,7 @@ function nativeChapter(manga: Manga, chapter: Chapter): boolean {
   if (chapter.translationSource === 'local' || chapter.isUserUpload) return true;
   const mdx = normalizeMangaDexId(manga.id);
   return mdx ? Boolean(normalizeMangaDexId(chapter.id)) && chapter.id !== mdx
-    : /^qq--.+--[^/]+$/.test(chapter.id);
+    : /^(?:qq--.+|moe--[0-9]+)--[^/]+$/.test(chapter.id);
 }
 
 function canHydrateChapter(manga: Manga): boolean {
