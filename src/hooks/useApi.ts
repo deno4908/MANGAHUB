@@ -162,8 +162,19 @@ async function readHomepageSource<T>(load: (signal: AbortSignal) => Promise<T>, 
   }
 }
 
-/** Publish QQ and MangaDex together, including after a background refresh. */
+type HomepageSource = 'truyenqq' | 'mangadex';
+type HomepageSnapshot = {
+  latest: ReturnType<typeof adaptListData>;
+  ongoing: ReturnType<typeof adaptListData>;
+  mangadex: ReturnType<typeof adaptListData>;
+  unavailableSources: HomepageSource[];
+  recoveryAttempts: number;
+};
+
+/** Publish one initial snapshot; recover missing sources without blocking it. */
 export function useHomepageCombined(maxChapters = 120, showMature = false) {
+  const client = useQueryClient();
+  const queryKey = ["manga", "homepage", "synchronized-v2", maxChapters, showMature];
   const featuredQuery = useQuery({
     queryKey: ["manga", "featured", 12],
     queryFn: async () => adaptListData(await mangaApi.getFeatured(12)),
@@ -173,8 +184,12 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
     refetchOnWindowFocus: false,
   });
   const homeQuery = useQuery({
-    queryKey: ["manga", "homepage", "synchronized-v1", maxChapters, showMature],
+    queryKey,
     queryFn: async ({ signal }) => {
+      const previous = client.getQueryData<HomepageSnapshot>(queryKey);
+      const recovering = !!previous?.unavailableSources.length;
+      const needsQQ = !recovering || previous.unavailableSources.includes('truyenqq');
+      const needsMangaDex = !recovering || previous.unavailableSources.includes('mangadex');
       const qq = async (sourceSignal: AbortSignal) => {
         try {
           // Index already hydrates aggregate/personal ratings in one deferred batch.
@@ -201,31 +216,54 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
       if (signal.aborted) cancel();
       let graceTimer: ReturnType<typeof setTimeout> | undefined;
       const ready = <T,>(value: T, usable = true): T => {
-        if (usable) graceTimer ??= setTimeout(cancel, 1_500);
+        // Recovery has its own full budget. Reapplying the initial grace period
+        // would keep starving a source that normally takes two or three seconds.
+        if (!recovering && usable) graceTimer ??= setTimeout(cancel, 1_500);
         return value;
       };
       const results = await Promise.allSettled([
-        readHomepageSource(qq, sources.signal).then(value => ready(value)),
-        readHomepageSource(sourceSignal => mangaApi.getMangaDexHomeBanner({ limit: 24,
+        needsQQ ? readHomepageSource(qq, sources.signal).then(value => ready(value)) : Promise.resolve(undefined),
+        needsMangaDex ? readHomepageSource(sourceSignal => mangaApi.getMangaDexHomeBanner({ limit: 24,
           showMature, filterHidden: true, attachRatings: false, timeoutMs: 6_000, signal: sourceSignal }), sources.signal)
-          .then(value => ready(value, adaptListData(value).items.length > 0)),
+          .then(value => ready(value, adaptListData(value).items.length > 0)) : Promise.resolve(undefined),
       ]).finally(() => {
         clearTimeout(graceTimer);
         signal.removeEventListener('abort', cancel);
       });
       if (signal.aborted) throw new DOMException('Homepage request cancelled', 'AbortError');
-      if (results.every(result => result.status === 'rejected')) throw new Error('Home data unavailable');
+      if (!previous && results.every(result => result.status === 'rejected')) throw new Error('Home data unavailable');
       const qqData = results[0].status === 'fulfilled' ? results[0].value : undefined;
       const mdxData = results[1].status === 'fulfilled' ? results[1].value : undefined;
-      return { latest: adaptListData(qqData?.latest || {}), ongoing: adaptListData(qqData?.ongoing || {}),
-        mangadex: adaptListData(mdxData || {}),
-        unavailableSources: (['truyenqq', 'mangadex'] as const).filter((_, index) => results[index].status === 'rejected') };
+      const failedQQSections: string[] = Array.isArray(qqData?.meta?.unavailable_sections)
+        ? qqData.meta.unavailable_sections : [];
+      const qqLatest = qqData ? adaptListData(qqData.latest || {}) : previous?.latest || adaptListData({});
+      const qqOngoing = qqData ? adaptListData(qqData.ongoing || {}) : previous?.ongoing || adaptListData({});
+      const unavailableSources = (['truyenqq', 'mangadex'] as const)
+        .filter((_, index) => results[index].status === 'rejected' || (index === 0 && failedQQSections.length > 0));
+      return {
+        // /homepage can return HTTP 200 with only one QQ section available.
+        // Keep its last good section (or the other usable QQ list on first
+        // load) while recovering it, rather than replacing it with nothing.
+        latest: failedQQSections.includes('latest') ? (previous?.latest.items.length ? previous.latest : qqOngoing) : qqLatest,
+        ongoing: failedQQSections.includes('ongoing') ? (previous?.ongoing.items.length ? previous.ongoing : qqLatest) : qqOngoing,
+        mangadex: mdxData ? adaptListData(mdxData) : previous?.mangadex || adaptListData({}),
+        unavailableSources,
+        recoveryAttempts: unavailableSources.length ? (recovering ? previous.recoveryAttempts + 1 : 0) : 0,
+      } satisfies HomepageSnapshot;
     },
     staleTime: 30 * 1000,
     gcTime: 15 * 60 * 1000,
     retry: 0,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
+    // Retry only the missing source, quickly once and then with backoff. Queries
+    // pause in hidden tabs and cancellation/access loss cannot repopulate them.
+    refetchInterval: query => {
+      if (!query.state.data?.unavailableSources.length) return false;
+      const attempt = query.state.data.recoveryAttempts;
+      return attempt === 0 ? 300 : Math.min(2_000 * 2 ** Math.min(attempt - 1, 5), 60_000);
+    },
+    refetchIntervalInBackground: false,
   });
   return {
     ...homeQuery,

@@ -98,11 +98,11 @@ it('requests QQ when a cached homepage contains only MangaDex cards', async () =
   expect(result.current.data?.latest.items[0].title).toBe('QQ fallback');
 });
 
-it.each(['truyenqq', 'mangadex'] as const)('skips slow %s 1.5 seconds after the other source succeeds and ignores its late response', async source => {
+it.each(['truyenqq', 'mangadex'] as const)('shows the fast source then automatically recovers slow %s without reloading', async source => {
   vi.useFakeTimers();
-  const pending = deferred();
-  if (source === 'truyenqq') vi.mocked(mangaApi.getHomepage).mockReturnValue(pending.promise);
-  else vi.mocked(mangaApi.getMangaDexHomeBanner).mockReturnValue(pending.promise);
+  const pending = deferred(), recovery = deferred();
+  if (source === 'truyenqq') vi.mocked(mangaApi.getHomepage).mockReturnValueOnce(pending.promise).mockReturnValueOnce(recovery.promise);
+  else vi.mocked(mangaApi.getMangaDexHomeBanner).mockReturnValueOnce(pending.promise).mockReturnValueOnce(recovery.promise);
   const { result } = renderHook(() => useHomepageCombined(), { wrapper });
   await act(async () => { await vi.advanceTimersByTimeAsync(1_499); });
   expect(result.current.data).toBeUndefined();
@@ -118,11 +118,122 @@ it.each(['truyenqq', 'mangadex'] as const)('skips slow %s 1.5 seconds after the 
     expect(snapshot?.mangadex.items).toEqual([]);
     expect(vi.mocked(mangaApi.getMangaDexHomeBanner).mock.calls[0][0]?.signal?.aborted).toBe(true);
   }
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+  const sourceMock = source === 'truyenqq' ? vi.mocked(mangaApi.getHomepage) : vi.mocked(mangaApi.getMangaDexHomeBanner);
+  const healthyMock = source === 'truyenqq' ? mangaApi.getMangaDexHomeBanner : mangaApi.getHomepage;
+  expect(sourceMock).toHaveBeenCalledTimes(2);
+  expect(healthyMock).toHaveBeenCalledTimes(1);
+  expect(sourceMock.mock.calls[1][0]?.signal?.aborted).toBe(false);
+  expect(result.current.data).toEqual(snapshot);
   await act(async () => {
     pending.resolve(source === 'truyenqq' ? home('QQ late') : page('MangaDex late', 'mangadex'));
     await vi.advanceTimersByTimeAsync(20);
   });
   expect(result.current.data).toEqual(snapshot);
+  await act(async () => {
+    recovery.resolve(source === 'truyenqq' ? home('QQ recovered') : page('MangaDex recovered', 'mangadex'));
+    await vi.advanceTimersByTimeAsync(20);
+  });
+  expect(result.current.data?.unavailableSources).toEqual([]);
+  expect(result.current.data?.latest.items[0].title).toBe(source === 'truyenqq' ? 'QQ recovered' : 'QQ old');
+  expect(result.current.data?.mangadex.items[0].title).toBe(source === 'mangadex' ? 'MangaDex recovered' : 'MangaDex old');
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(sourceMock).toHaveBeenCalledTimes(2);
+  expect(healthyMock).toHaveBeenCalledTimes(1);
+});
+
+it.each(['truyenqq', 'mangadex'] as const)('retains the last good %s cards through a failed refresh', async source => {
+  const { result } = renderHook(() => useHomepageCombined(), { wrapper });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  if (source === 'truyenqq') {
+    vi.mocked(mangaApi.getHomepage).mockRejectedValue(new Error('QQ unavailable'));
+    vi.mocked(mangaApi.getOTruyenFiltered).mockRejectedValue(new Error('QQ fallback unavailable'));
+    vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page('MangaDex new', 'mangadex'));
+  } else {
+    vi.mocked(mangaApi.getMangaDexHomeBanner).mockRejectedValue(new Error('MDX unavailable'));
+    vi.mocked(mangaApi.getHomepage).mockResolvedValue(home('QQ new'));
+  }
+  await act(async () => { await result.current.refetch(); });
+  await waitFor(() => expect(source === 'truyenqq' ? result.current.data?.mangadex.items[0].title
+    : result.current.data?.latest.items[0].title).toBe(source === 'truyenqq' ? 'MangaDex new' : 'QQ new'));
+  expect(result.current.data?.latest.items[0].title).toBe(source === 'truyenqq' ? 'QQ old' : 'QQ new');
+  expect(result.current.data?.mangadex.items[0].title).toBe(source === 'mangadex' ? 'MangaDex old' : 'MangaDex new');
+  expect(result.current.data?.unavailableSources).toEqual([source]);
+});
+
+it('backs off failed QQ recovery and cancels recovery when leaving the page', async () => {
+  vi.useFakeTimers();
+  vi.mocked(mangaApi.getHomepage).mockRejectedValue(new Error('QQ unavailable'));
+  vi.mocked(mangaApi.getOTruyenFiltered).mockRejectedValue(new Error('QQ unavailable'));
+  const { result, unmount } = renderHook(() => useHomepageCombined(), { wrapper });
+  await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+  expect(result.current.data?.unavailableSources).toEqual(['truyenqq']);
+  await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+  expect(mangaApi.getHomepage).toHaveBeenCalledTimes(2);
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+  expect(mangaApi.getHomepage).toHaveBeenCalledTimes(3);
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_900); });
+  expect(mangaApi.getHomepage).toHaveBeenCalledTimes(3);
+  const pending = deferred();
+  vi.mocked(mangaApi.getHomepage).mockReturnValue(pending.promise);
+  await act(async () => { await vi.advanceTimersByTimeAsync(120); });
+  expect(mangaApi.getHomepage).toHaveBeenCalledTimes(4);
+  expect(mangaApi.getMangaDexHomeBanner).toHaveBeenCalledTimes(1);
+  const signal = vi.mocked(mangaApi.getHomepage).mock.calls[3][0]?.signal;
+  unmount();
+  client.removeQueries({ queryKey: ['manga', 'homepage'] });
+  expect(signal?.aborted).toBe(true);
+  await act(async () => { pending.resolve(home('QQ obsolete')); await vi.advanceTimersByTimeAsync(60_000); });
+  expect(client.getQueriesData({ queryKey: ['manga', 'homepage'] })).toEqual([]);
+  expect(mangaApi.getHomepage).toHaveBeenCalledTimes(4);
+});
+
+it('cancels old recovery when the mature-content filter changes and ignores its late result', async () => {
+  vi.useFakeTimers();
+  const obsolete = deferred();
+  vi.mocked(mangaApi.getHomepage).mockReturnValueOnce(new Promise(() => {}))
+    .mockReturnValueOnce(obsolete.promise).mockResolvedValue(home('QQ safe'));
+  const { result, rerender } = renderHook(({ mature }) => useHomepageCombined(120, mature), {
+    wrapper, initialProps: { mature: true },
+  });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1_850); });
+  expect(mangaApi.getHomepage).toHaveBeenCalledTimes(2);
+  const oldSignal = vi.mocked(mangaApi.getHomepage).mock.calls[1][0]?.signal;
+  rerender({ mature: false });
+  await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+  expect(oldSignal?.aborted).toBe(true);
+  expect(result.current.data?.latest.items[0].title).toBe('QQ safe');
+  await act(async () => { obsolete.resolve(home('QQ obsolete adult filter')); await vi.advanceTimersByTimeAsync(2_000); });
+  expect(result.current.data?.latest.items[0].title).toBe('QQ safe');
+  expect(result.current.data?.unavailableSources).toEqual([]);
+});
+
+it.each(['latest', 'ongoing'] as const)('recovers an unavailable QQ %s section even when homepage returned HTTP 200', async section => {
+  vi.useFakeTimers();
+  vi.mocked(mangaApi.getHomepage).mockResolvedValueOnce({ ...home('QQ available section'),
+    [section]: { data: { items: [] } }, meta: { unavailable_sections: [section] },
+  }).mockResolvedValue(home('QQ complete'));
+  const { result } = renderHook(() => useHomepageCombined(), { wrapper });
+  await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+  expect(result.current.data?.latest.items[0].title).toBe('QQ available section');
+  expect(result.current.data?.ongoing.items[0].title).toBe('QQ available section');
+  expect(result.current.data?.unavailableSources).toEqual(['truyenqq']);
+  await act(async () => { await vi.advanceTimersByTimeAsync(320); });
+  expect(result.current.data?.latest.items[0].title).toBe('QQ complete');
+  expect(result.current.data?.ongoing.items[0].title).toBe('QQ complete');
+  expect(result.current.data?.unavailableSources).toEqual([]);
+  expect(mangaApi.getMangaDexHomeBanner).toHaveBeenCalledTimes(1);
+});
+
+it('retains the last good latest QQ section through a partial HTTP 200 refresh', async () => {
+  const { result } = renderHook(() => useHomepageCombined(), { wrapper });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  vi.mocked(mangaApi.getHomepage).mockResolvedValue({ latest: { data: { items: [] } },
+    ongoing: page('QQ ongoing new'), meta: { unavailable_sections: ['latest'] } });
+  await act(async () => { await result.current.refetch(); });
+  await waitFor(() => expect(result.current.data?.ongoing.items[0].title).toBe('QQ ongoing new'));
+  expect(result.current.data?.latest.items[0].title).toBe('QQ old');
+  expect(result.current.data?.unavailableSources).toEqual(['truyenqq']);
 });
 
 it('gives both cold sources time to start before beginning the grace period', async () => {

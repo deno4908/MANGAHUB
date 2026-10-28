@@ -165,3 +165,60 @@ it('does not let one failed MangaDex cover erase other MangaDex rankings', async
   await waitFor(() => expect(within(section('Phổ biến nhất')).getByText(mdx.name)).toBeInTheDocument());
   await waitFor(() => expect(within(section('Đánh giá cao')).getByText(mdx.name)).toBeInTheDocument());
 });
+
+it('orders recent sections by chapter time across sources, without promoting pinned MangaDex titles', async () => {
+  const now = Date.now();
+  const recent = (item: typeof qq, minutes: number) => ({ ...item, chaptersLatest: [{
+    chapter_name: '91', chapter_api_data: item.source === 'mangadex' ? '11111111-1111-4111-8111-111111111111' : 'qq--12285--91',
+    publish_at: new Date(now - minutes * 60_000).toISOString(),
+  }] });
+  const newestQQ = recent(row('newest-qq-12285', 'QQ vừa xong'), 1);
+  const nextMDX = recent(row('22222222-2222-4222-8222-222222222222', 'MangaDex mới', { source: 'mangadex' }), 10);
+  const nextQQ = recent(row('next-qq-12345', 'QQ sau đó'), 25);
+  const oldMDX = recent(mdx, 120);
+  vi.mocked(mangaApi.getHomepage).mockResolvedValue({ latest: page([nextQQ, newestQQ]), ongoing: page([newestQQ]) });
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([oldMDX, nextMDX]));
+  vi.mocked(mangaApi.getFeatured).mockResolvedValue(page([oldMDX]));
+  show();
+  for (const title of ['Mới cập nhật', 'Mới thêm gần đây']) {
+    await waitFor(() => expect(within(section(title)).getAllByRole('heading', { level: 3 })
+      .map(heading => heading.textContent)).toEqual(['QQ vừa xong', 'MangaDex mới', 'QQ sau đó', mdx.name]));
+  }
+  const newestCard = within(section('Mới cập nhật')).getAllByRole('heading', { level: 3 })[0].closest('a')!;
+  expect(within(newestCard).getByText('Chương 91 - Vừa xong')).toBeInTheDocument();
+  const columns = section('Mới cập nhật').querySelector('.grid-cols-1.md\\:grid-cols-2')!;
+  expect(columns.children).toHaveLength(2); // Preserve the existing two-column UI.
+});
+
+it('brings slow QQ back into the banner and both recent sections without a reload', async () => {
+  let recover!: (value: any) => void;
+  const recovery = new Promise(resolve => { recover = resolve; });
+  const now = Date.now();
+  const recoveredQQ = row('recovered-qq-12285', 'QQ tự phục hồi', { chaptersLatest: [{
+    chapter_name: '91', chapter_api_data: 'qq--12285--91', publish_at: new Date(now - 60_000).toISOString(),
+  }] });
+  vi.mocked(mangaApi.getHomepage).mockReturnValueOnce(new Promise(() => {})).mockReturnValueOnce(recovery);
+  vi.mocked(mangaApi.getFeatured).mockResolvedValue(page([]));
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([{ ...mdx, is_featured: false,
+    chaptersLatest: [{ chapter_name: '4', chapter_api_data: '11111111-1111-4111-8111-111111111111',
+      publish_at: new Date(now - 120 * 60_000).toISOString() }] }]));
+  show();
+  await waitFor(() => expect(mangaApi.getHomepage).toHaveBeenCalledTimes(2), { timeout: 4_000 });
+  expect(screen.queryByText(recoveredQQ.name)).not.toBeInTheDocument();
+  await act(async () => { recover({ latest: page([recoveredQQ]), ongoing: page([recoveredQQ]) }); });
+  expect(await screen.findByRole('heading', { level: 2, name: recoveredQQ.name })).toBeInTheDocument();
+  for (const title of ['Mới cập nhật', 'Mới thêm gần đây']) {
+    await waitFor(() => expect(within(section(title)).getAllByRole('heading', { level: 3 })[0]).toHaveTextContent(recoveredQQ.name));
+  }
+  expect(mangaApi.getMangaDexHomeBanner).toHaveBeenCalledTimes(1);
+});
+
+it('keeps previously loaded MangaDex home cards visible when its refresh fails', async () => {
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([mdx]));
+  show();
+  await screen.findByRole('heading', { level: 2, name: mdx.name });
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockRejectedValue(new Error('temporary source failure'));
+  await act(async () => { await client.refetchQueries({ queryKey: ['manga', 'homepage'] }); });
+  expect(within(section('Mới cập nhật')).getByRole('heading', { level: 3, name: mdx.name })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { level: 2, name: mdx.name })).toBeInTheDocument();
+});

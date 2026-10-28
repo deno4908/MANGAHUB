@@ -1008,7 +1008,8 @@ const Index = () => {
   } = useHomepageCombined(120, showMatureContent);
   const isHomepageCoreReady = !isInitialMergedLoading;
   const homeBannerData = data?.mangadex;
-  const isHomeBannerError = data?.unavailableSources.includes('mangadex') || (isHomepageError && !data);
+  const isHomeBannerError = (data?.unavailableSources.includes('mangadex') && !homeBannerData?.items.length)
+    || (isHomepageError && !data);
   const isMangaDexUnavailable = isHomeBannerError || hasMangaDexCoverFailure;
   const isHomeSourceAvailable = useCallback((item: Manga) =>
     !isMangaDexUnavailable || (item.source !== 'mangadex' && !normalizeMangaDexId(item.id)),
@@ -1502,11 +1503,10 @@ const Index = () => {
   }, [featuredRated, homeBannerItems, latestMergedRated, ongoingMergedRated, showMatureContent]);
 
   const latestHomeDisplay = useMemo(() => {
-    const heroMangaDexItems = heroBannerItems.slice(0, 5).filter((item) => {
-      return Boolean(toMangaDexDetailId(String(item.id || '')));
-    });
-    return dedupeById([...heroMangaDexItems, ...latestMergedRated]).slice(0, 10);
-  }, [heroBannerItems, latestMergedRated]);
+    // Source and banner pinning must not outrank the actual chapter date.
+    return dedupeById([...latestMergedRated])
+      .sort((a, b) => chapterRecencyTime(b) - chapterRecencyTime(a)).slice(0, 10);
+  }, [latestMergedRated]);
 
   const { data: trendingPayload, isLoading: isTrendingLoading } = useQuery({
     queryKey: ['manga', 'home', 'trending-popular-v3', HOME_POPULAR_TRENDING_FETCH_LIMIT],
