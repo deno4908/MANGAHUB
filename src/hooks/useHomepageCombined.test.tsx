@@ -40,6 +40,7 @@ it.each(['truyenqq', 'mangadex'] as const)('waits for %s before publishing eithe
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
   expect(result.current.data?.latest.items[0].title).toBe('QQ old');
   expect(result.current.data?.mangadex.items[0].title).toBe('MangaDex old');
+  expect(mangaApi.getHomepage).toHaveBeenCalledWith(expect.objectContaining({ attachRatings: false }));
 });
 
 it('publishes both catalogs without waiting for slow featured-title lookups', async () => {

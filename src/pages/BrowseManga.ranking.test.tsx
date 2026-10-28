@@ -56,6 +56,31 @@ it('warms only the next QQ page with identical filters and reuses it after click
   expect(vi.mocked(mangaApi.getOTruyenFiltered).mock.calls.filter(([arg]) => arg.page === 2)).toHaveLength(1);
 });
 
+it.each([
+  { saveData: false, effectiveType: '4g', expectedPages: [1, 2] },
+  { saveData: true, effectiveType: '4g', expectedPages: [1] },
+  { saveData: false, effectiveType: '2g', expectedPages: [1] },
+])('warms the adjacent QQ page within a second while respecting $saveData/$effectiveType', async connection => {
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, 'connection');
+  Object.defineProperty(navigator, 'connection', { configurable: true, value: connection });
+  vi.useFakeTimers();
+  try {
+    vi.mocked(mangaApi.getOTruyenFiltered).mockImplementation(async options => ({ data: {
+      items: [{ slug: `ready-${options.page}`, name: `Page ${options.page}`, source: 'truyenqq' }],
+      params: { pagination: { currentPage: options.page, totalItemsPerPage: 42, totalItems: 126, totalPages: 3 } },
+    } }));
+    show('/manga?source=truyenqq&sort=popular');
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(screen.getByTestId('ranked-cards')).toHaveTextContent('Page 1');
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    expect(vi.mocked(mangaApi.getOTruyenFiltered).mock.calls.map(([options]) => options.page)).toEqual(connection.expectedPages);
+  } finally {
+    if (descriptor) Object.defineProperty(navigator, 'connection', descriptor);
+    else Reflect.deleteProperty(navigator, 'connection');
+    vi.useRealTimers();
+  }
+});
+
 it('sorts QQ popularity by the displayed local views rather than the source page order', async () => {
   vi.mocked(mangaApi.getOTruyenFiltered).mockResolvedValue(page([
     { slug: 'low-1', name: 'Low views', source: 'truyenqq', local_view_count: 2, view_count: 2, thumb_url: '/api/manga/truyenqq/cover/low-1' },

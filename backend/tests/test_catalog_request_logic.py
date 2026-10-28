@@ -71,6 +71,16 @@ def test_home_can_render_latest_when_the_other_section_fails(monkeypatch):
     assert result["meta"]["unavailable_sections"] == ["ongoing"]
 
 
+@pytest.mark.parametrize('attach_ratings', [False, True])
+def test_home_allows_deferred_ratings_without_changing_catalog_or_default_enrichment(monkeypatch, attach_ratings):
+    isolate(monkeypatch)
+    monkeypatch.setattr(manga.truyenqq_service, 'get_list', AsyncMock(return_value=page([{'slug': 'ready-123'}], 1)))
+    result = asyncio.run(manga.homepage(include_featured=False, attach_ratings=attach_ratings, user=None, db=EmptyDB()))
+    assert result['latest']['data']['items'][0]['slug'] == 'ready-123'
+    assert manga._async_attach_ratings_to_items.await_count == int(attach_ratings)
+    manga._attach_overrides_to_otruyen_payload.assert_awaited_once()
+
+
 def test_search_outage_is_not_reported_as_no_matching_books(monkeypatch):
     isolate(monkeypatch)
     monkeypatch.setattr(manga.truyenqq_service, "search_manga", AsyncMock(side_effect=RuntimeError("source offline")))

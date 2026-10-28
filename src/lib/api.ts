@@ -1001,8 +1001,11 @@ export const mangaApi = {
   getLatestCardChapters: (identifiers: string[]) => publicApi<{ items: Record<string, any> }>(
     '/api/manga/chapters/latest/batch', { method: 'POST', body: JSON.stringify({ identifiers }), timeoutMs: 6_000 }),
   getHome: () => publicApi<any>("/api/manga/home"),
-  getHomepage: (options: { includeFeatured?: boolean; timeoutMs?: number; signal?: AbortSignal } = {}) => {
-    const query = options.includeFeatured ? "?include_featured=true" : "";
+  getHomepage: (options: { includeFeatured?: boolean; attachRatings?: boolean; timeoutMs?: number; signal?: AbortSignal } = {}) => {
+    const params = new URLSearchParams();
+    if (options.includeFeatured) params.set('include_featured', 'true');
+    if (options.attachRatings === false) params.set('attach_ratings', 'false');
+    const query = params.size ? `?${params.toString()}` : '';
     return publicApi<any>(`/api/manga/homepage${query}`, { timeoutMs: options.timeoutMs ?? 20_000, signal: options.signal });
   },
   getFeatured: (limit = 12) => publicApi<any>(`/api/manga/featured?limit=${limit}`),

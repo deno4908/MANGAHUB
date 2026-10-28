@@ -10,6 +10,37 @@ from fastapi_app.services import cache_service, card_chapters, mangadex_service 
 from fastapi_app.services.request_coalescing import coalesce_reads
 
 
+def test_qq_browse_overlaps_moderation_and_source_and_enriches_views_only_once(monkeypatch):
+    from fastapi_app.routers import manga
+    source_started, hidden_started = asyncio.Event(), asyncio.Event()
+    payload = {"data": {"items": [{"slug": "visible-1"}, {"slug": "hidden-2"}]}}
+    async def source(**kwargs):
+        source_started.set()
+        await hidden_started.wait()
+        return payload
+    async def hidden(db):
+        hidden_started.set()
+        await source_started.wait()
+        return {"hidden-2": "hidden by admin"}
+    enriched = []
+    async def views(payload, db):
+        enriched.append([item["slug"] for item in payload["data"]["items"]])
+        for item in payload["data"]["items"]:
+            item["views"] = item["view_count"] = item["local_view_count"] = 7
+    monkeypatch.setattr(qq, 'get_filtered', source)
+    monkeypatch.setattr(manga, '_get_hidden_slugs', hidden)
+    monkeypatch.setattr(manga, '_async_attach_local_views_to_otruyen_payload', views)
+    monkeypatch.setattr(manga, '_fetch_override_rows_by_slugs', AsyncMock(return_value={}))
+    async def check():
+        result = await asyncio.wait_for(manga.otruyen_filtered_manga(
+            genre_slugs='', status='', sort='latest', page=2, limit=42, show_mature=True,
+            base_slug='', attach_ratings=False, user=None, db=object(), response=None), 1)
+        assert [item['slug'] for item in result['data']['items']] == ['visible-1']
+        assert result['data']['items'][0]['views'] == 7
+        assert enriched == [['visible-1']]
+    asyncio.run(check())
+
+
 def test_popularity_reuses_stale_catalog_without_attaching_slow_vercel_jobs(monkeypatch):
     import serverless_runtime as runtime
     from fastapi_app.routers import manga

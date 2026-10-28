@@ -177,7 +177,8 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
     queryFn: async ({ signal }) => {
       const qq = async (sourceSignal: AbortSignal) => {
         try {
-          const payload = await mangaApi.getHomepage({ timeoutMs: 4_000, signal: sourceSignal });
+          // Index already hydrates aggregate/personal ratings in one deferred batch.
+          const payload = await mangaApi.getHomepage({ attachRatings: false, timeoutMs: 4_000, signal: sourceSignal });
           const visible = [...adaptListData(payload.latest || {}).items, ...adaptListData(payload.ongoing || {}).items]
             .some(item => item.source !== 'mangadex' && !normalizeMangaDexId(item.id)
               && (showMature || !isMatureManga(item)));

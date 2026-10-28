@@ -2373,7 +2373,8 @@ const BrowseManga = () => {
     void queryClient.prefetchQuery<OTruyenListData>(options).then(() => {
       if (intentGeneration.current !== generation) return;
       const data = queryClient.getQueryData<OTruyenListData>(options.queryKey);
-      prefetchedCovers.current = warmCovers((data?.items || []).slice(0, 4)
+      const coverLimit = useOTruyenFilteredServerMode || useQQListMode ? 6 : 4;
+      prefetchedCovers.current = warmCovers((data?.items || []).slice(0, coverLimit)
         .map(item => [item.cover, item.coverProxy].find(url => !!url && canCacheCover(url)) || '').filter(Boolean));
     }).finally(() => { pagePrefetchBusy.current = false; });
   }, [browseUrlReady, page, useMangaDexServerSearchMode, mangaDexServerSearchQuery.isFetching,
@@ -4500,7 +4501,7 @@ const BrowseManga = () => {
       if (document.visibilityState === 'hidden' || pagePrefetchBusy.current) return;
       warmedNextQQPage.current = nextKey;
       prefetchBrowsePage(page + 1);
-    }, 2000);
+    }, 500);
     return () => window.clearTimeout(timer);
   }, [useOTruyenFilteredServerMode, useQQListMode, isClientPaginationMode, canQueryQQSelection, isFetching, isLoading,
     hasResolvedTotalPages, page, totalPages, qqPageOptions, listPageOptions, prefetchBrowsePage]);

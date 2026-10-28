@@ -1825,6 +1825,7 @@ async def home(
 @router.get("/homepage")
 async def homepage(
     include_featured: bool = Query(False),
+    attach_ratings: bool = Query(True),
     user=Depends(get_optional_user),
     db=Depends(get_supabase_public),
 ):
@@ -1871,10 +1872,10 @@ async def homepage(
         if isinstance(item, dict)
     ]
     home_items_payload = {"data": {"items": home_items}}
-    await asyncio.gather(
-        _attach_overrides_to_otruyen_payload(home_items_payload, db),
-        _async_attach_ratings_to_items(home_items_payload, db, user),
-    )
+    reads = [_attach_overrides_to_otruyen_payload(home_items_payload, db)]
+    if attach_ratings:
+        reads.append(_async_attach_ratings_to_items(home_items_payload, db, user))
+    await asyncio.gather(*reads)
     result = {"latest": latest, "ongoing": ongoing, "meta": {"unavailable_sections": source_errors}}
     if featured_task is not None:
         try:
@@ -2954,18 +2955,22 @@ async def otruyen_filtered_manga(
         return {"status": "success", "data": {"items": [], "params": {"pagination": {
             "currentPage": page, "totalItemsPerPage": limit, "totalItems": 0, "totalPages": 1}}}}
 
-    hidden = await _get_hidden_slugs(db)
     if normalized_sort == "popular":
+        hidden = await _get_hidden_slugs(db)
         from fastapi_app.services.local_popular import qq_popular
         payload = await qq_popular(page=page, limit=limit, genres=genre_values, status=normalized_status,
                                    show_mature=show_mature, hidden=hidden, db=db, http_response=response)
     else:
-        payload = await truyenqq_service.get_filtered(
-            genres=genre_values, page=page,
-            sort={"newest": "created_desc", "oldest": "created_asc"}.get(normalized_sort, "updated_desc"),
-            status=normalized_status if normalized_status in {"ongoing", "completed"} else None,
+        # Source loading and moderation lookup are independent. Filter the
+        # completed source page before enriching it, and read local views once.
+        payload, hidden = await asyncio.gather(
+            truyenqq_service.get_filtered(
+                genres=genre_values, page=page,
+                sort={"newest": "created_desc", "oldest": "created_asc"}.get(normalized_sort, "updated_desc"),
+                status=normalized_status if normalized_status in {"ongoing", "completed"} else None,
+            ),
+            _get_hidden_slugs(db),
         )
-        await _async_attach_local_views_to_otruyen_payload(payload, db)
     items = payload["data"]["items"]
     payload["data"]["items"] = _filter_hidden(items, hidden)
     if not show_mature:
