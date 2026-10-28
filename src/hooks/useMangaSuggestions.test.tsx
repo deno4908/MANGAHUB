@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mangaApi } from '@/lib/api';
 import { useMangaSuggestions } from './useMangaSuggestions';
 
-vi.mock('@/lib/api', () => ({ mangaApi: { search: vi.fn(), searchMangaDex: vi.fn(), getMoeFiltered: vi.fn() } }));
+vi.mock('@/lib/api', () => ({ mangaApi: { search: vi.fn(), searchMangaDex: vi.fn() } }));
 vi.mock('@/lib/adapters', () => ({ adaptMangaItem: (item: any) => ({ ...item, id: item.slug }) }));
 vi.mock('@/lib/contentFilter', () => ({ isMatureManga: (item: any) => item.mature === true }));
 const page = (...items: any[]) => ({ data: { items } });
@@ -17,18 +17,8 @@ function pending<T = any>() {
 async function debounce() { await act(async () => { vi.advanceTimersByTime(200); }); }
 
 describe('independent source suggestions', () => {
-  beforeEach(() => { vi.useFakeTimers(); vi.resetAllMocks(); vi.mocked(mangaApi.getMoeFiltered).mockResolvedValue(page()); });
+  beforeEach(() => { vi.useFakeTimers(); vi.resetAllMocks(); });
   afterEach(() => { cleanup(); vi.useRealTimers(); });
-
-  it('includes Moe suggestions fairly alongside the two existing sources', async () => {
-    vi.mocked(mangaApi.search).mockResolvedValue(page(...Array.from({ length: 8 }, (_, i) => qq(`qq-${i}`))));
-    vi.mocked(mangaApi.searchMangaDex).mockResolvedValue(page(mdx));
-    vi.mocked(mangaApi.getMoeFiltered).mockResolvedValue(page({ slug: 'moe-1048', source: 'moetruyen' }));
-    const { result } = renderHook(() => useMangaSuggestions('book'));
-    await debounce();
-    expect(result.current.items.slice(0, 3).map(item => item.source)).toEqual(['truyenqq', 'mangadex', 'moetruyen']);
-    expect(result.current.loading).toBe(false);
-  });
 
   it('shows MangaDex while QQ is pending, then shows results from both sources', async () => {
     const slow = pending();

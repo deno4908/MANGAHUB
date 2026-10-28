@@ -56,26 +56,6 @@ def cache(monkeypatch):
     return value
 
 
-def test_moe_update_invalidates_only_its_details_and_preserves_mdx(monkeypatch, cache):
-    from fastapi_app.services import moetruyen_service as moe
-    from unittest.mock import AsyncMock
-    row = {'id': '1048', 'slug': '1048-book', 'title': 'Book', 'genres': [],
-           'latest_chapter': {'number': '2'}, 'adult': False}
-    monkeypatch.setattr(moe, 'run', AsyncMock(return_value={'items': [row]}))
-    monkeypatch.setattr(moe, '_remember_cards', AsyncMock())
-    cache.set('moetruyen:detail:v1:moe-1048', 'old')
-    cache.set('moetruyen:list:v1:old', 'old')
-    cache.set('mangadex:metadata:book', 'keep')
-    async def check():
-        publisher = CatalogUpdates()
-        event = await publisher.publish('moetruyen', await publisher.probe('moetruyen'))
-        assert event['changes'][0]['chapter_id'] == 'moe--1048--2'
-    asyncio.run(check())
-    assert cache.get('moetruyen:detail:v1:moe-1048') is None
-    assert cache.get('moetruyen:list:v1:old') is None
-    assert cache.get('mangadex:metadata:book') == 'keep'
-
-
 def test_upstream_change_reaches_detail_feed_other_worker_and_stream(monkeypatch, cache):
     number = 1
     calls = []

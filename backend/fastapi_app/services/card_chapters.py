@@ -10,15 +10,12 @@ from fastapi_app.services import card_metadata, mangadex_service as mdx, truyenq
 from fastapi_app.services.cache_service import cache
 
 _jobs = {}
-_slots = {"mangadex": asyncio.Semaphore(2), "truyenqq": asyncio.Semaphore(2), "moetruyen": asyncio.Semaphore(2)}
+_slots = {"mangadex": asyncio.Semaphore(2), "truyenqq": asyncio.Semaphore(2)}
 MAX_PENDING = 128
 CHAPTER_TTL = 120
 
 
 def _identity(identifier, values=None):
-    from fastapi_app.services.moetruyen_service import is_identifier
-    if is_identifier(identifier):
-        return "moetruyen", identifier
     from fastapi_app.routers.manga import _extract_mangadex_id
     mdx_id = _extract_mangadex_id(identifier)
     if mdx_id:
@@ -84,14 +81,6 @@ async def _load(source, identifier, key):
                 # already exists. Verify the highest VI chapter, just one row.
                 info = await mdx._get_latest_vi_chapter_for_manga(identifier, ignore_cache=True, raise_on_error=True)
                 chapter = _from_mdx(identifier, info)
-            elif source == "moetruyen":
-                from fastapi_app.services import moetruyen_service as moe
-                value = await moe.run(lambda source: source.basic(moe.native_id(identifier)))
-                await moe._remember_cards([value])
-                latest = (moe.item(value).get("chaptersLatest") or [None])[0]
-                chapter = ({"id": latest["chapter_api_data"], "chapter_name": latest["chapter_name"],
-                    "chapter_title": latest["chapter_title"], "publish_at": latest["publish_at"],
-                    "source": "moetruyen", "slug": identifier} if latest else None)
             else:
                 # A search reference may have a title/cover but no chapter. Skip
                 # that incomplete card cache and parse only basic HTML fields.

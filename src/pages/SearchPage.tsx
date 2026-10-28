@@ -141,9 +141,7 @@ const SearchPage = () => {
       const requests = [mangaApi.searchMangaDex({ keyword: trimmedDebouncedQuery, genreSlugs: selectedSlugs,
         page, sort: trimmedDebouncedQuery ? "relevance" : "latest", showMature: showMatureContent })];
       if (!trimmedDebouncedQuery) requests.push(mangaApi.getOTruyenFiltered({ genreSlugs: selectedSlugs, page, sort: "latest", showMature: showMatureContent }));
-      else requests.push(mangaApi.search(trimmedDebouncedQuery, page, { includeMangaDex: false, includeMoe: false, attachRatings: false }));
-      requests.push(mangaApi.getMoeFiltered({ keyword: trimmedDebouncedQuery, genreSlugs: selectedSlugs,
-        page, sort: 'latest', showMature: showMatureContent }));
+      else requests.push(mangaApi.search(trimmedDebouncedQuery, page, { includeMangaDex: false, attachRatings: false }));
       const settled = await Promise.allSettled(requests);
       const pages = settled.filter((item): item is PromiseFulfilledResult<any> => item.status === "fulfilled")
         .map(item => adaptListData(item.value));

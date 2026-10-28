@@ -52,7 +52,7 @@ function application(path = "/") {
           <div>Private reader content</div>
         </SiteAccessGate>
       </MemoryRouter>
-    </QueryClientProvider>
+    </QueryClientProvider>,
   );
 }
 function show(path = "/") { return render(application(path)); }

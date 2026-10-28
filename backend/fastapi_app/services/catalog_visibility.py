@@ -11,9 +11,6 @@ PREFIX = "catalog:qq-sync:v1:"
 
 def legacy_qq_identifier(identifier):
     value = str(identifier or "").strip().lower()
-    from fastapi_app.services.moetruyen_service import is_identifier
-    if is_identifier(value):
-        return False
     from fastapi_app.routers.manga import _extract_mangadex_id
     if _extract_mangadex_id(value):
         return False

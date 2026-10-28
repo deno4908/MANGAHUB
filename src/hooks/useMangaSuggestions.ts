@@ -28,14 +28,14 @@ export function useMangaSuggestions(keyword: string, options: {
     }
     const controller = new AbortController();
     let live = true;
-    let pending = 3, failures = 0;
-    const results: Manga[][] = [[], [], []];
+    let pending = 2, failures = 0;
+    const results: Manga[][] = [[], []];
     setState({ ...empty, loading: true });
 
     const timer = window.setTimeout(() => {
       const publish = () => {
         if (!live) return;
-        // Alternate sources so a full QQ page cannot crowd out the others.
+        // Alternate sources so a full QQ page cannot crowd out MangaDex.
         const merged: Manga[] = [], seen = new Set<string>();
         for (let index = 0; index < Math.max(...results.map(items => items.length)); index++) {
           for (const source of results) {
@@ -61,13 +61,11 @@ export function useMangaSuggestions(keyword: string, options: {
         } catch { failures++; }
         finally { pending--; publish(); }
       };
-      void receive(0, mangaApi.search(query, 1, { includeMangaDex: false, includeMoe: false, attachRatings: false,
+      void receive(0, mangaApi.search(query, 1, { includeMangaDex: false, attachRatings: false,
         timeoutMs: 12_000, signal: controller.signal }));
       void receive(1, mangaApi.searchMangaDex({ keyword: query, page: 1, limit: 6,
         sort: 'relevance', translatedLanguage: 'vi', showMature, attachRatings: false,
         filterHidden: true, timeoutMs: 12_000, signal: controller.signal }));
-      void receive(2, mangaApi.getMoeFiltered({ keyword: query, page: 1, limit: 6,
-        showMature, timeoutMs: 12_000, signal: controller.signal }));
     }, 200);
     return () => { live = false; window.clearTimeout(timer); controller.abort(); };
   }, [keyword, enabled, showMature, viewerKey]);

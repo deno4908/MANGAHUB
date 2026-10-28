@@ -1,8 +1,0 @@
-**
-!requirements-moe-reader.txt
-!moe_reader_server.py
-!moetruyen_api/
-!moetruyen_api/**
-**/.env*
-**/__pycache__/
-**/*.pyc

@@ -44,46 +44,29 @@ async def _source_page(genres, status, number, snapshot_key):
     return await asyncio.to_thread(_frozen, key, value)
 
 
-def _cached_labels(identifiers, source_name="truyenqq"):
+def _cached_labels(identifiers):
     values = card_metadata.cache.get_many(
         [key for identifier in identifiers for key in card_metadata.metadata_keys(identifier)])
     return {identifier: item for identifier in identifiers
-            if (item := card_metadata.cached_metadata(identifier, values)) and item.get("source") == source_name}
+            if (item := card_metadata.cached_metadata(identifier, values)) and item.get("source") == "truyenqq"}
 
 
-@coalesce_reads
-async def _moe_source_page(genres, status, number, snapshot_key, show_mature):
-    from fastapi_app.services import moetruyen_service as moe
-    key = f"{snapshot_key}:source:{number}"
-    previous = await asyncio.to_thread(_frozen, key)
-    if previous is not None:
-        return previous
-    value = await moe.get_filtered(page=number, limit=24, sort="popular", status=status or "",
-                                   genres=genres, show_mature=show_mature)
-    return await asyncio.to_thread(_frozen, key, value)
-
-
-async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, http_response=None, source_name="truyenqq"):
+async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, http_response=None):
     from fastapi_app.routers import manga
-    from fastapi_app.services.moetruyen_service import is_identifier
-
-    def load_labels(identifiers):
-        return _cached_labels(identifiers) if source_name == "truyenqq" else _cached_labels(identifiers, source_name)
 
     lookup = await asyncio.to_thread(manga._fetch_local_views_lookup, db)
     # Reading another chapter must not invalidate every source-page read while
     # a client is waiting for this ranking snapshot to finish.
-    snapshot_key = ("qq:local-popular:v5-source-popular:" if source_name == "truyenqq" else "moe:local-popular:v1:") + hashlib.sha256(json.dumps(
+    snapshot_key = "qq:local-popular:v5-source-popular:" + hashlib.sha256(json.dumps(
         [sorted(genres), status, show_mature, hidden], sort_keys=True).encode()).hexdigest()
     snapshot = await asyncio.to_thread(_frozen, snapshot_key + ":ranking")
     aliases = [slug for slug, views in lookup.items() if views > 0
-               and (is_identifier(slug) if source_name == "moetruyen" else not is_identifier(slug))
                and not manga._extract_mangadex_id(slug) and not manga._is_invalid_manga_slug(slug)
                and not manga._hidden_reason_for_slug(hidden, slug)]
     labels = {}
     if aliases and snapshot is None:
         async def resolve(group):
-            verified = await asyncio.to_thread(load_labels, group)
+            verified = await asyncio.to_thread(_cached_labels, group)
             unknown = [identifier for identifier in group if identifier not in verified]
             if not unknown:
                 return verified
@@ -110,7 +93,7 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
     def build_ranking():
         ranked, excluded = {}, set()
         for alias, label in labels.items():
-            if not label or label.get("source") not in ({"moetruyen"} if source_name == "moetruyen" else {"truyenqq", "uploaded"}):
+            if not label or label.get("source") not in {"truyenqq", "uploaded"}:
                 continue
             slug = label["slug"]
             excluded.add(slug)
@@ -169,12 +152,10 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
     async def source(number):
         # The complete shared read, including its initial Redis lookup, survives
         # the response timeout and continues warming the source page.
-        read = (_source_page(tuple(genres), status, number, snapshot_key) if source_name == "truyenqq"
-                else _moe_source_page(tuple(genres), status, number, snapshot_key, show_mature))
-        return await asyncio.wait_for(read, SOURCE_WAIT_SECONDS)
+        return await asyncio.wait_for(_source_page(tuple(genres), status, number, snapshot_key), SOURCE_WAIT_SECONDS)
 
     source_tasks = {1: create_task(source(1))}
-    if limit == (24 if source_name == "moetruyen" else 42) and page > 1 and len(rows) < offset + limit:
+    if limit == 42 and page > 1 and len(rows) < offset + limit:
         # The UI uses QQ's native 42-item pages. Load the catalog header and
         # requested page together, so two cold reads do not add their latency.
         source_tasks[page] = create_task(source(page))
@@ -197,7 +178,7 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
 
     # One normal listing warms exact QQ slug/stem matches in a batch.
     if snapshot is None:
-        labels.update(await asyncio.to_thread(load_labels, aliases))
+        labels.update(await asyncio.to_thread(_cached_labels, aliases))
         rows, excluded = build_ranking()
         pending = native_pending()
     await freeze_ranking()

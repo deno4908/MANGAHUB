@@ -1190,8 +1190,7 @@ def _trending_source_matches(slug: Any, source: str) -> bool:
         return True
     normalized_slug = _clean_slug(slug)
     is_mangadex = bool(_extract_mangadex_id(normalized_slug))
-    from fastapi_app.services.moetruyen_service import is_identifier
-    return is_mangadex if normalized_source == "mangadex" else not is_mangadex and not is_identifier(normalized_slug)
+    return is_mangadex if normalized_source == "mangadex" else not is_mangadex
 
 
 def _normalize_title_key(value: Any) -> str:

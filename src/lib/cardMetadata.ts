@@ -1,13 +1,13 @@
 import type { QueryClient } from '@tanstack/react-query';
 import type { Manga } from '@/types/manga';
 import { mangaApi } from '@/lib/api';
-import { normalizeMangaDexId, normalizeMoeId } from '@/lib/mangaLinks';
+import { normalizeMangaDexId } from '@/lib/mangaLinks';
 import { repairMojibakeText, thumbUrl } from '@/lib/adapters';
 import { patchMangaInQueryCache } from '@/lib/querySync';
 import { resolveSavedMangaCover } from '@/lib/savedManga';
 
 export type CardMetadata = {
-  id: string; slug: string; source: 'mangadex' | 'truyenqq' | 'moetruyen' | 'uploaded'; title: string;
+  id: string; slug: string; source: 'mangadex' | 'truyenqq' | 'uploaded'; title: string;
   cover_url?: string; genres?: string[]; tags?: string[]; status?: Manga['status']; content_rating?: string;
   chapters_latest?: Array<{ chapter_name?: string; chapter_title?: string; chapter_api_data?: string; updatedAt?: string }>;
 };
@@ -110,6 +110,6 @@ export function requestCardMetadata(id: string, client: QueryClient, title?: str
   });
 }
 export function isLegacyQQIdentifier(identifier: string): boolean {
-  return !normalizeMangaDexId(identifier) && !normalizeMoeId(identifier) && /^[a-z0-9]+(?:-+[a-z0-9]+)*$/i.test(identifier)
+  return !normalizeMangaDexId(identifier) && /^[a-z0-9]+(?:-+[a-z0-9]+)*$/i.test(identifier)
     && !/-\d+$/.test(identifier);
 }

@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { queryOptions, useQueries, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import type { Manga } from '@/types/manga';
-import { normalizeMangaDexId, normalizeMoeId } from '@/lib/mangaLinks';
+import { normalizeMangaDexId } from '@/lib/mangaLinks';
 import { applyCardMetadata, isLegacyQQIdentifier, needsCanonicalTitle, requestCardMetadata } from '@/lib/cardMetadata';
 import { thumbUrl } from '@/lib/adapters';
 import { needsSavedCover, resolveSavedMangaCover, savedMangaId, savedMangaLookupId, savedMangaTitleHint } from '@/lib/savedManga';
@@ -64,7 +64,7 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
       if (retainUnavailable || record.source === 'uploaded' || record.is_user_upload) return true;
       const id = recordId(record);
       const mustMatch = requireQQMatch && enabled &&
-        (isLegacyQQIdentifier(id) || (refreshMetadata && !normalizeMangaDexId(id) && !normalizeMoeId(id)));
+        (isLegacyQQIdentifier(id) || (refreshMetadata && !normalizeMangaDexId(id)));
       return mustMatch ? Boolean(byId.get(savedMangaLookupId(record)))
         : !isLegacyQQIdentifier(id) || byId.get(savedMangaLookupId(record)) !== null;
     }).map(record => {

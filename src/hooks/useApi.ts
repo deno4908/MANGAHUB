@@ -136,44 +136,39 @@ export function useHomepage(enabled = true) {
   });
 }
 
-/** Publish one complete source snapshot: never replace a fast source with late arrivals. */
-export function useHomepageCombined(maxChapters = 120, showMature = false) {
-  return useQuery({
-    queryKey: ["manga", "homepage", "combined-v3", maxChapters, showMature],
-    queryFn: async ({ signal }) => {
-      const qq = async () => {
-        try {
-          const payload = await mangaApi.getHomepage({ timeoutMs: 10_000, signal });
-          if (adaptListData(payload.latest || {}).items.length || adaptListData(payload.ongoing || {}).items.length) return payload;
-        } catch (error) { if (signal.aborted) throw error; }
-        const fallback = await mangaApi.getOTruyenFiltered({ page: 1, limit: 24, sort: 'latest', showMature, attachRatings: false, timeoutMs: 5_000, signal });
-        return { latest: fallback, ongoing: fallback };
-      };
-      const results = await Promise.allSettled([
-        qq(),
-        mangaApi.getMangaDexHomeBanner({ limit: 24, showMature, filterHidden: true, timeoutMs: 15_000, signal }),
-        mangaApi.getMoeFiltered({ page: 1, limit: 24, showMature, timeoutMs: 15_000, signal }),
-        mangaApi.getFeatured(12, { timeoutMs: 12_000, signal }),
-      ]);
-      const value = (index: number) => results[index].status === 'fulfilled'
-        ? (results[index] as PromiseFulfilledResult<any>).value : undefined;
-      if (results.every(result => result.status === 'rejected')) throw new Error('Home data unavailable');
-      const moe = adaptListData(value(2) || {});
-      const latest = adaptListData(value(0)?.latest || {});
-      const ongoing = adaptListData(value(0)?.ongoing || {});
-      return {
-        latest: { ...latest, items: [...latest.items, ...moe.items] },
-        ongoing: { ...ongoing, items: [...ongoing.items, ...moe.items.filter(item => item.status === 'ongoing')] },
-        featured: adaptListData(value(3) || {}), mangadex: adaptListData(value(1) || {}), moetruyen: moe,
-        unavailableSources: ['truyenqq', 'mangadex', 'moetruyen'].filter((_, index) => results[index].status === 'rejected'),
-      };
+/** Homepage + MangaDex catalog in one hook for Index page. */
+export function useHomepageCombined(maxChapters = 120) {
+  const featuredQuery = useQuery({
+    queryKey: ["manga", "featured", 12],
+    queryFn: async () => adaptListData(await mangaApi.getFeatured(12)),
+    staleTime: 60 * 1000,
+    gcTime: 15 * 60 * 1000,
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+  const homeQuery = useQuery({
+    queryKey: ["manga", "homepage", "combined-v2", maxChapters],
+    queryFn: async () => {
+      // Featured titles can require individual upstream lookups. Render the
+      // catalog as soon as it arrives, then fill the banner independently.
+      const payload = await mangaApi.getHomepage();
+      const latest = adaptListData(payload.latest || {});
+      const ongoing = adaptListData(payload.ongoing || {});
+      if (!latest.items.length && !ongoing.items.length) {
+        throw new Error("Home data unavailable");
+      }
+      return { latest, ongoing };
     },
     staleTime: 30 * 1000,
     gcTime: 15 * 60 * 1000,
-    retry: 0,
+    retry: 1,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
+  return {
+    ...homeQuery,
+    data: homeQuery.data ? { ...homeQuery.data, featured: featuredQuery.data } : undefined,
+  };
 }
 
 export function useMangaDexViCatalog(

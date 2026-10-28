@@ -47,7 +47,6 @@ beforeEach(() => {
   vi.spyOn(mangaApi, 'getFeatured').mockResolvedValue(page([mdx]));
   vi.spyOn(mangaApi, 'getMangaDexHomeBanner').mockRejectedValue(new Error('MangaDex maintenance'));
   vi.spyOn(mangaApi, 'getOTruyenFiltered').mockResolvedValue(page([qq]));
-  vi.spyOn(mangaApi, 'getMoeFiltered').mockResolvedValue(page([]));
   vi.spyOn(mangaApi, 'getTrending').mockResolvedValue({ trending: [{ slug: mdxId, title: mdx.name,
     thumb: mdx.thumb_url, views: 100 }] });
   vi.spyOn(ratingApi, 'getTopRatedManga').mockResolvedValue({ items: [{ manga_slug: mdxId, average: 9, count: 1 }] });

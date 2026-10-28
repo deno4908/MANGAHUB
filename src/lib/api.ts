@@ -1001,19 +1001,17 @@ export const mangaApi = {
   getLatestCardChapters: (identifiers: string[]) => publicApi<{ items: Record<string, any> }>(
     '/api/manga/chapters/latest/batch', { method: 'POST', body: JSON.stringify({ identifiers }), timeoutMs: 6_000 }),
   getHome: () => publicApi<any>("/api/manga/home"),
-  getHomepage: (options: { includeFeatured?: boolean; timeoutMs?: number; signal?: AbortSignal } = {}) => {
+  getHomepage: (options: { includeFeatured?: boolean; timeoutMs?: number } = {}) => {
     const query = options.includeFeatured ? "?include_featured=true" : "";
-    return publicApi<any>(`/api/manga/homepage${query}`, { timeoutMs: options.timeoutMs ?? 20_000, signal: options.signal });
+    return publicApi<any>(`/api/manga/homepage${query}`, { timeoutMs: options.timeoutMs ?? 20_000 });
   },
-  getFeatured: (limit = 12, options: { timeoutMs?: number; signal?: AbortSignal } = {}) =>
-    publicApi<any>(`/api/manga/featured?limit=${limit}`, options),
+  getFeatured: (limit = 12) => publicApi<any>(`/api/manga/featured?limit=${limit}`),
   getMangaDexHomeBanner: (
     options: {
       limit?: number;
       showMature?: boolean;
       filterHidden?: boolean;
       timeoutMs?: number;
-      signal?: AbortSignal;
     } = {},
   ) => {
     const query = new URLSearchParams({
@@ -1023,7 +1021,6 @@ export const mangaApi = {
     });
     return publicApi<any>(`/api/manga/mangadex/home-banner?${query.toString()}`, {
       timeoutMs: options.timeoutMs ?? 15_000,
-      signal: options.signal,
     });
   },
   getMangaDexViCatalog: (
@@ -1236,7 +1233,6 @@ export const mangaApi = {
     baseSlug?: string;
     attachRatings?: boolean;
     signal?: AbortSignal;
-    timeoutMs?: number;
   }) => {
     const query = new URLSearchParams({
       page: String(Math.max(1, Math.floor(Number(options.page) || 1))),
@@ -1256,23 +1252,10 @@ export const mangaApi = {
       query.set("base_slug", String(options.baseSlug));
     }
     return publicApi<any>(`/api/manga/truyenqq-filtered?${query.toString()}`, {
-      timeoutMs: options.timeoutMs ?? (options.sort === "popular" ? 35_000 : 20_000),
+      timeoutMs: options.sort === "popular" ? 35_000 : 20_000,
       skipAuth: true,
       signal: options.signal,
     });
-  },
-  getMoeCategories: () => publicApi<any>('/api/manga/moetruyen/categories', { timeoutMs: 12_000 }),
-  getMoeFiltered: (options: {
-    page?: number; limit?: number; sort?: string; status?: string; genreSlugs?: string[];
-    keyword?: string; showMature?: boolean; attachRatings?: boolean; timeoutMs?: number; signal?: AbortSignal;
-  } = {}) => {
-    const query = new URLSearchParams({
-      page: String(options.page || 1), limit: String(options.limit || 24), sort: options.sort || 'latest',
-      status: options.status || '', genre_slugs: (options.genreSlugs || []).join(','),
-      keyword: options.keyword || '', show_mature: options.showMature ? '1' : '0',
-      attach_ratings: options.attachRatings ? '1' : '0',
-    });
-    return publicApi<any>(`/api/manga/moetruyen-filtered?${query}`, { timeoutMs: options.timeoutMs ?? 20_000, signal: options.signal });
   },
   getDetail: (slug: string, signal?: AbortSignal) => publicApi<any>(`/api/manga/detail/${slug}`, { signal }),
   startViewSession: (
@@ -1311,12 +1294,11 @@ export const mangaApi = {
         total_pages: Math.max(0, Math.floor(options?.totalPages || 0)),
       }),
     }),
-  search: async (
+  search: (
     keyword: string,
     page = 1,
     options?: {
       includeMangaDex?: boolean;
-      includeMoe?: boolean;
       attachRatings?: boolean;
       mangaDexLimit?: number;
       mangaDexTimeoutMs?: number;
@@ -1350,27 +1332,11 @@ export const mangaApi = {
     if (typeof options?.mangaDexAttachLatest === 'boolean') {
       query.set("mangadex_attach_latest", options.mangaDexAttachLatest ? "1" : "0");
     }
-    const base = publicApi<any>(`/api/manga/search?${query.toString()}`, {
+    return publicApi<any>(`/api/manga/search?${query.toString()}`, {
       skipAuth: options?.skipAuth ?? true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });
-    if (options?.includeMoe === false) return base;
-    const sources = await Promise.allSettled([base, mangaApi.getMoeFiltered({
-      keyword, page, showMature: true, signal: options?.signal, timeoutMs: options?.timeoutMs ?? 15_000,
-    })]);
-    const ready = sources.filter((result): result is PromiseFulfilledResult<any> => result.status === 'fulfilled');
-    if (!ready.length) throw (sources[0] as PromiseRejectedResult).reason;
-    const payload = ready[0].value;
-    const rows = ready.flatMap(result => result.value?.data?.items || []);
-    return { ...payload, data: { ...payload.data, items: [...new Map(rows.map(row => [row.slug || row.id, row])).values()],
-      params: { pagination: { currentPage: page, totalItemsPerPage: Math.max(rows.length, 24),
-        totalItems: ready.reduce((sum, result) => sum + Number(result.value?.data?.params?.pagination?.totalItems || 0), 0),
-        totalPages: Math.max(1, ...ready.map(result => Number(result.value?.data?.params?.pagination?.totalPages || 1))),
-      } } }, meta: { ...payload.meta, unavailable_sources: [
-        ...(payload.meta?.unavailable_sources || []), ...(sources[0].status === 'rejected' ? ['truyenqq', 'mangadex'] : []),
-        ...(sources[1].status === 'rejected' ? ['moetruyen'] : []),
-      ] } };
   },
   getChapter: (id: string) => publicApi<any>(`/api/manga/chapter/${id}`),
   getRandom: () => publicApi<any>("/api/manga/random"),

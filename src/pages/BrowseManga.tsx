@@ -24,7 +24,6 @@ import { MangaGridSkeleton } from '@/components/manga/Skeletons';
 import { SlidersHorizontal, X, BookOpen, Loader2, Tags, ArrowRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { Manga, SortOption } from '@/types/manga';
-import MoeBrowseManga from './MoeBrowseManga';
 
 const normalizeTag = (value: string) =>
   (value || '')
@@ -484,7 +483,7 @@ const isItemInBrowseSource = (item: Pick<Manga, 'id' | 'source'>, source: Browse
   const slug = String(item.id || '').trim().toLowerCase();
   if (isInvalidPublicMangaSlug(slug)) return false;
   const isMdx = getMangaSource(slug, item.source) === 'mangadex';
-  return source === 'mangadex' ? isMdx : getMangaSource(slug, item.source) === 'truyenqq';
+  return source === 'mangadex' ? isMdx : !isMdx;
 };
 
 const toMangaDexDetailId = (slug: string): string => extractMangaDexDetailId(slug) || '';
@@ -5354,10 +5353,6 @@ const BrowseManga = () => {
         >
           MangaDex
         </button>
-        <button type="button" onClick={() => setSearchParams({ source: 'moetruyen' })}
-          className="px-3 py-1.5 rounded-lg text-sm font-semibold bg-secondary text-muted-foreground hover:text-foreground border border-border/50">
-          Mòe Truyện
-        </button>
       </div>
 
       <div className="flex gap-8">
@@ -5499,7 +5494,4 @@ const BrowseManga = () => {
   );
 };
 
-export default function BrowseMangaPage() {
-  const [params] = useSearchParams();
-  return params.get('source') === 'moetruyen' ? <MoeBrowseManga /> : <BrowseManga />;
-}
+export default BrowseManga;
