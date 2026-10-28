@@ -151,7 +151,7 @@ export function clearCoverCache() {
 }
 
 export function warmCovers(urls: string[]): () => void {
-  const resources = [...new Set(urls)].filter(canCacheCover).slice(0, 4).map(url => acquireCover(url, 'prefetch'));
+  const resources = [...new Set(urls)].filter(canCacheCover).slice(0, 12).map(url => acquireCover(url, 'prefetch'));
   resources.forEach(resource => { void resource.promise.then(resource.release, resource.release); });
   return () => resources.forEach(resource => resource.release());
 }

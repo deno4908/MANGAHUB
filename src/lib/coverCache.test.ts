@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { acquireCover, cachedCover, canCacheCover, clearCoverCache, invalidateCover, retainCachedCover } from './coverCache';
+import { acquireCover, cachedCover, canCacheCover, clearCoverCache, invalidateCover, retainCachedCover, warmCovers } from './coverCache';
 const origin = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const cover = (id: number) => `${origin}/api/manga/truyenqq/cover/book-${id}`;
 const image = () => new Response(new Blob(['bytes'], { type: 'image/jpeg' }), { headers: { 'content-type': 'image/jpeg' } });
@@ -95,6 +95,40 @@ it('leaves download slots available for visible covers while warming another pag
   finish.forEach(done => done());
   await results;
   visible.release();
+});
+
+it('warms all twelve adjacent-page covers while keeping at most four background downloads active', async () => {
+  let active = 0, peak = 0;
+  vi.mocked(fetch).mockImplementation(async () => {
+    active++;
+    peak = Math.max(peak, active);
+    await Promise.resolve();
+    active--;
+    return image();
+  });
+  const urls = Array.from({ length: 42 }, (_, index) => cover(index));
+  const release = warmCovers(urls);
+  expect(fetch).toHaveBeenCalledTimes(4);
+  await vi.waitFor(() => expect(urls.slice(0, 12).every(url => cachedCover(url))).toBe(true));
+  expect(fetch).toHaveBeenCalledTimes(12);
+  expect(peak).toBeLessThanOrEqual(4);
+  expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).toEqual(urls.slice(0, 12));
+  release();
+});
+
+it('cancels unused warmed covers without starting the remaining eight queued downloads', async () => {
+  let aborts = 0;
+  vi.mocked(fetch).mockImplementation((_, options) => new Promise((resolve, reject) => {
+    options?.signal?.addEventListener('abort', () => {
+      aborts++;
+      reject(new DOMException('cancelled', 'AbortError'));
+    });
+  }));
+  const release = warmCovers(Array.from({ length: 42 }, (_, index) => cover(index)));
+  expect(fetch).toHaveBeenCalledTimes(4);
+  release();
+  await vi.waitFor(() => expect(aborts).toBe(4));
+  expect(fetch).toHaveBeenCalledTimes(4);
 });
 
 it('promotes a queued speculative cover when that image becomes visible', async () => {
