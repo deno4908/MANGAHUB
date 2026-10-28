@@ -97,7 +97,7 @@ it('leaves download slots available for visible covers while warming another pag
   visible.release();
 });
 
-it('warms all twelve adjacent-page covers while keeping at most four background downloads active', async () => {
+it('warms all six adjacent-page covers while keeping at most four background downloads active', async () => {
   let active = 0, peak = 0;
   vi.mocked(fetch).mockImplementation(async () => {
     active++;
@@ -109,14 +109,14 @@ it('warms all twelve adjacent-page covers while keeping at most four background 
   const urls = Array.from({ length: 42 }, (_, index) => cover(index));
   const release = warmCovers(urls);
   expect(fetch).toHaveBeenCalledTimes(4);
-  await vi.waitFor(() => expect(urls.slice(0, 12).every(url => cachedCover(url))).toBe(true));
-  expect(fetch).toHaveBeenCalledTimes(12);
+  await vi.waitFor(() => expect(urls.slice(0, 6).every(url => cachedCover(url))).toBe(true));
+  expect(fetch).toHaveBeenCalledTimes(6);
   expect(peak).toBeLessThanOrEqual(4);
-  expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).toEqual(urls.slice(0, 12));
+  expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).toEqual(urls.slice(0, 6));
   release();
 });
 
-it('cancels unused warmed covers without starting the remaining eight queued downloads', async () => {
+it('cancels unused warmed covers without starting the remaining two queued downloads', async () => {
   let aborts = 0;
   vi.mocked(fetch).mockImplementation((_, options) => new Promise((resolve, reject) => {
     options?.signal?.addEventListener('abort', () => {

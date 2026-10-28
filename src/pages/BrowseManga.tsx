@@ -2373,7 +2373,7 @@ const BrowseManga = () => {
     void queryClient.prefetchQuery<OTruyenListData>(options).then(() => {
       if (intentGeneration.current !== generation) return;
       const data = queryClient.getQueryData<OTruyenListData>(options.queryKey);
-      const coverLimit = useOTruyenFilteredServerMode || useQQListMode ? 12 : 4;
+      const coverLimit = useOTruyenFilteredServerMode || useQQListMode ? 6 : 4;
       prefetchedCovers.current = warmCovers((data?.items || []).slice(0, coverLimit)
         .map(item => [item.cover, item.coverProxy].find(url => !!url && canCacheCover(url)) || '').filter(Boolean));
     }).finally(() => { pagePrefetchBusy.current = false; });
