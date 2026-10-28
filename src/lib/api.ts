@@ -1001,9 +1001,9 @@ export const mangaApi = {
   getLatestCardChapters: (identifiers: string[]) => publicApi<{ items: Record<string, any> }>(
     '/api/manga/chapters/latest/batch', { method: 'POST', body: JSON.stringify({ identifiers }), timeoutMs: 6_000 }),
   getHome: () => publicApi<any>("/api/manga/home"),
-  getHomepage: (options: { includeFeatured?: boolean; timeoutMs?: number } = {}) => {
+  getHomepage: (options: { includeFeatured?: boolean; timeoutMs?: number; signal?: AbortSignal } = {}) => {
     const query = options.includeFeatured ? "?include_featured=true" : "";
-    return publicApi<any>(`/api/manga/homepage${query}`, { timeoutMs: options.timeoutMs ?? 20_000 });
+    return publicApi<any>(`/api/manga/homepage${query}`, { timeoutMs: options.timeoutMs ?? 20_000, signal: options.signal });
   },
   getFeatured: (limit = 12) => publicApi<any>(`/api/manga/featured?limit=${limit}`),
   getMangaDexHomeBanner: (
@@ -1012,6 +1012,7 @@ export const mangaApi = {
       showMature?: boolean;
       filterHidden?: boolean;
       timeoutMs?: number;
+      signal?: AbortSignal;
     } = {},
   ) => {
     const query = new URLSearchParams({
@@ -1021,6 +1022,7 @@ export const mangaApi = {
     });
     return publicApi<any>(`/api/manga/mangadex/home-banner?${query.toString()}`, {
       timeoutMs: options.timeoutMs ?? 15_000,
+      signal: options.signal,
     });
   },
   getMangaDexViCatalog: (
@@ -1233,6 +1235,7 @@ export const mangaApi = {
     baseSlug?: string;
     attachRatings?: boolean;
     signal?: AbortSignal;
+    timeoutMs?: number;
   }) => {
     const query = new URLSearchParams({
       page: String(Math.max(1, Math.floor(Number(options.page) || 1))),
@@ -1252,7 +1255,7 @@ export const mangaApi = {
       query.set("base_slug", String(options.baseSlug));
     }
     return publicApi<any>(`/api/manga/truyenqq-filtered?${query.toString()}`, {
-      timeoutMs: options.sort === "popular" ? 35_000 : 20_000,
+      timeoutMs: options.timeoutMs ?? (options.sort === "popular" ? 35_000 : 20_000),
       skipAuth: true,
       signal: options.signal,
     });

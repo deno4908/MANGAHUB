@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -62,6 +62,23 @@ function show() {
   return render(<QueryClientProvider client={client}><MemoryRouter><Index /></MemoryRouter></QueryClientProvider>);
 }
 function section(title: string) { return screen.getByRole('heading', { name: title }).closest('section')!; }
+
+it.each(['truyenqq', 'mangadex'] as const)('does not show an early hero or cards while %s is still loading', async source => {
+  let finish!: (value: any) => void;
+  const pending = new Promise(resolve => { finish = resolve; });
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([mdx]));
+  if (source === 'truyenqq') vi.mocked(mangaApi.getHomepage).mockReturnValue(pending);
+  else vi.mocked(mangaApi.getMangaDexHomeBanner).mockReturnValue(pending);
+  show();
+  await waitFor(() => expect(mangaApi.getFeatured).toHaveBeenCalled());
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.queryByText(mdx.name)).not.toBeInTheDocument();
+  expect(screen.queryByText(qq.name)).not.toBeInTheDocument();
+  expect(mangaApi.getTrending).not.toHaveBeenCalled();
+  await act(async () => finish(source === 'truyenqq' ? { latest: page([qq]), ongoing: page([qq]) } : page([mdx])));
+  await waitFor(() => expect(screen.getAllByText(mdx.name).length).toBeGreaterThan(0));
+  expect(screen.getAllByText(qq.name).length).toBeGreaterThan(0);
+});
 
 it('uses QQ for the banner and every home section when MangaDex fails, including stale pinned/rated/trending titles', async () => {
   show();

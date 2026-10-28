@@ -20,7 +20,7 @@ function form() {
   fireEvent.change(screen.getByPlaceholderText('you@example.com'), { target: { value: 'reader@example.com' } });
   fireEvent.change(screen.getByLabelText('Mật khẩu', { exact: true }), { target: { value: 'violet canoe lunar orchard' } });
   fireEvent.change(screen.getByLabelText('Xác nhận mật khẩu'), { target: { value: 'violet canoe lunar orchard' } });
-  return screen.getByRole('button', { name: 'Đăng ký', exact: true });
+  return screen.getByRole('button', { name: 'Đăng ký' });
 }
 
 it('keeps password checkmarks without a meter or username composition checklist', async () => {

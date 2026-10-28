@@ -9,6 +9,18 @@ const event: CatalogUpdate = { source: 'truyenqq', revision: 'new', changes: [
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('live catalog updates', () => {
+  it('refreshes the synchronized homepage for MangaDex changes without invalidating QQ-only lists', async () => {
+    const client = new QueryClient();
+    const home = ['manga', 'homepage', 'synchronized-v1', 120, false];
+    const qq = ['manga', 'otruyen-filtered', 'latest'];
+    client.setQueryData(home, 'old');
+    client.setQueryData(qq, 'old');
+    await applyCatalogUpdates(client, [{ source: 'mangadex', revision: 'mdx-new', changes: [] }]);
+    expect(client.getQueryState(home)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(qq)?.isInvalidated).toBe(false);
+    client.clear();
+  });
+
   it('refreshes active books and lists while preserving account and unrelated detail caches', async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
     const keys = [ ['manga', 'homepage', 'combined-v2'], ['manga', 'detail', 'book-123', 'truyenqq'],

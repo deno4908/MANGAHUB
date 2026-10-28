@@ -1005,54 +1005,14 @@ const Index = () => {
     isLoading: isInitialMergedLoading,
     isError: isHomepageError,
     refetch: refetchHomepageCombined,
-  } = useHomepageCombined(120);
+  } = useHomepageCombined(120, showMatureContent);
   const isHomepageCoreReady = !isInitialMergedLoading;
-  const {
-    data: homeBannerData,
-    isLoading: isHomeBannerLoading,
-    isError: isHomeBannerError,
-    refetch: refetchHomeBanner,
-  } = useQuery({
-    queryKey: ['manga', 'home', 'feed-v2', 'mangadex', showMatureContent],
-    queryFn: async () => {
-      const payload = await mangaApi.getMangaDexHomeBanner({
-        limit: 24,
-        showMature: showMatureContent,
-        filterHidden: true,
-        timeoutMs: 18_000,
-      });
-      return adaptListData(payload);
-    },
-    staleTime: 30 * 1000,
-    gcTime: 15 * 60 * 1000,
-    retry: 0,
-    refetchOnWindowFocus: false,
-    placeholderData: (previousData) => previousData,
-  });
+  const homeBannerData = data?.mangadex;
+  const isHomeBannerError = data?.unavailableSources.includes('mangadex') || (isHomepageError && !data);
   const isMangaDexUnavailable = isHomeBannerError || hasMangaDexCoverFailure;
   const isHomeSourceAvailable = useCallback((item: Manga) =>
     !isMangaDexUnavailable || (item.source !== 'mangadex' && !normalizeMangaDexId(item.id)),
   [isMangaDexUnavailable]);
-  const hasQQHomeItems = [data?.latest, data?.ongoing]
-    .some(section => section?.items?.some(item => item.source !== 'mangadex' && !normalizeMangaDexId(item.id)
-      && (showMatureContent || !isMatureManga(item))));
-  const needsQQFallback = !hasQQHomeItems && (isHomepageError || isMangaDexUnavailable);
-  const { data: qqFallbackData, isLoading: isQQFallbackLoading, refetch: refetchQQFallback } = useQuery({
-    queryKey: ['manga', 'home', 'qq-fallback', showMatureContent],
-    queryFn: async ({ signal }) => {
-      const payload = await mangaApi.getOTruyenFiltered({
-        page: 1, limit: 24, sort: 'latest', showMature: showMatureContent, attachRatings: false, signal,
-      });
-      const result = adaptListData(payload);
-      if (!result.items.length) throw new Error('QQ home data unavailable');
-      return result;
-    },
-    enabled: needsQQFallback,
-    staleTime: 60_000,
-    gcTime: 15 * 60_000,
-    retry: 0,
-    refetchOnWindowFocus: false,
-  });
   const { data: announcementData } = useQuery({
     queryKey: ['site-announcements', 'active-home-popup'],
     queryFn: () => announcementApi.getActive(3),
@@ -1075,12 +1035,10 @@ const Index = () => {
   }, [refetchHomepageCombined]);
 
   const featured = data?.featured?.items || [];
-  const latest = [...(data?.latest?.items || []), ...(qqFallbackData?.items || [])];
-  const ongoing = [...(data?.ongoing?.items || []), ...(qqFallbackData?.items || [])];
-  const hasOTruyenHomeItems = latest.length > 0 || ongoing.length > 0 || featured.length > 0;
+  const latest = data?.latest?.items || [];
+  const ongoing = data?.ongoing?.items || [];
   const [homeDeferredWorkReady, setHomeDeferredWorkReady] = useState(false);
-  // Render whichever source arrives first; late MangaDex data remains live.
-  const isHomePrimaryReady = Boolean(data || homeBannerData || qqFallbackData);
+  const isHomePrimaryReady = Boolean(data);
   useEffect(() => {
     if (!isHomePrimaryReady) {
       setHomeDeferredWorkReady(false);
@@ -1768,8 +1726,7 @@ const Index = () => {
     return syncMangaDexLatestChapters(candidates, topRatedMangaDexChapterMap as Record<string, MangaDexLatestChapterMeta>);
   }, [topRated, topRatedMangaDexChapterMap, isMangaDexUnavailable, popular]);
 
-  const isHomeSynchronizedLoading = !heroBannerItems.length &&
-    (isInitialMergedLoading || (!isMangaDexUnavailable && isHomeBannerLoading) || (needsQQFallback && isQQFallbackLoading));
+  const isHomeSynchronizedLoading = isInitialMergedLoading;
   const isTopRatedSectionLoading = isHomeSynchronizedLoading;
 
   const isHeroBannerLoading = isHomeSynchronizedLoading;
@@ -1788,7 +1745,7 @@ const Index = () => {
             {isHomepageError && isHomeBannerError ? (
               <div className="text-center space-y-3">
                 <p className="text-muted-foreground font-medium">Chưa tải được truyện. Vui lòng thử lại.</p>
-                <button className="px-4 py-2 rounded-lg bg-primary text-primary-foreground" onClick={() => { void refetchHomepageCombined(); void refetchHomeBanner(); if (needsQQFallback) void refetchQQFallback(); }}>Thử lại</button>
+                <button className="px-4 py-2 rounded-lg bg-primary text-primary-foreground" onClick={() => { void refetchHomepageCombined(); }}>Thử lại</button>
               </div>
             ) : <p className="text-muted-foreground font-medium">Chưa có truyện để hiển thị.</p>}
           </div>

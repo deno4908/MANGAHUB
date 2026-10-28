@@ -30,6 +30,7 @@ import { loadMangaDexChapterPages } from "@/lib/mangaDexImages";
 import { invalidateMangaRealtimeQueries } from "@/lib/querySync";
 import { mangaDetailQueryKey } from "@/lib/mangaDetailQuery";
 import type { Manga } from "@/types/manga";
+import { isMatureManga } from "@/lib/contentFilter";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const LOCAL_COVER_FALLBACK = "/no-cover.svg";
@@ -136,8 +137,33 @@ export function useHomepage(enabled = true) {
   });
 }
 
-/** Homepage + MangaDex catalog in one hook for Index page. */
-export function useHomepageCombined(maxChapters = 120) {
+/** Include authentication/queue time in the source deadline, too. */
+async function readHomepageSource<T>(load: (signal: AbortSignal) => Promise<T>, parent: AbortSignal): Promise<T> {
+  if (parent.aborted) throw new DOMException('Homepage request cancelled', 'AbortError');
+  const controller = new AbortController();
+  let cancel!: () => void;
+  let timer!: ReturnType<typeof setTimeout>;
+  const stopped = new Promise<never>((_, reject) => {
+    cancel = () => {
+      controller.abort();
+      reject(new DOMException('Homepage request cancelled', 'AbortError'));
+    };
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error('Homepage source timed out'));
+    }, 15_000);
+  });
+  parent.addEventListener('abort', cancel, { once: true });
+  try {
+    return await Promise.race([load(controller.signal), stopped]);
+  } finally {
+    clearTimeout(timer);
+    parent.removeEventListener('abort', cancel);
+  }
+}
+
+/** Publish QQ and MangaDex together, including after a background refresh. */
+export function useHomepageCombined(maxChapters = 120, showMature = false) {
   const featuredQuery = useQuery({
     queryKey: ["manga", "featured", 12],
     queryFn: async () => adaptListData(await mangaApi.getFeatured(12)),
@@ -147,21 +173,40 @@ export function useHomepageCombined(maxChapters = 120) {
     refetchOnWindowFocus: false,
   });
   const homeQuery = useQuery({
-    queryKey: ["manga", "homepage", "combined-v2", maxChapters],
-    queryFn: async () => {
-      // Featured titles can require individual upstream lookups. Render the
-      // catalog as soon as it arrives, then fill the banner independently.
-      const payload = await mangaApi.getHomepage();
-      const latest = adaptListData(payload.latest || {});
-      const ongoing = adaptListData(payload.ongoing || {});
-      if (!latest.items.length && !ongoing.items.length) {
-        throw new Error("Home data unavailable");
-      }
-      return { latest, ongoing };
+    queryKey: ["manga", "homepage", "synchronized-v1", maxChapters, showMature],
+    queryFn: async ({ signal }) => {
+      const qq = async (sourceSignal: AbortSignal) => {
+        try {
+          const payload = await mangaApi.getHomepage({ timeoutMs: 10_000, signal: sourceSignal });
+          const visible = [...adaptListData(payload.latest || {}).items, ...adaptListData(payload.ongoing || {}).items]
+            .some(item => item.source !== 'mangadex' && !normalizeMangaDexId(item.id)
+              && (showMature || !isMatureManga(item)));
+          if (visible) return payload;
+        } catch (error) {
+          if (sourceSignal.aborted) throw error;
+        }
+        if (sourceSignal.aborted) throw new DOMException('Homepage request cancelled', 'AbortError');
+        const fallback = await mangaApi.getOTruyenFiltered({ page: 1, limit: 24, sort: 'latest',
+          showMature, attachRatings: false, timeoutMs: 5_000, signal: sourceSignal });
+        if (!adaptListData(fallback).items.length) throw new Error('QQ home data unavailable');
+        return { latest: fallback, ongoing: fallback };
+      };
+      const results = await Promise.allSettled([
+        readHomepageSource(qq, signal),
+        readHomepageSource(sourceSignal => mangaApi.getMangaDexHomeBanner({ limit: 24,
+          showMature, filterHidden: true, timeoutMs: 15_000, signal: sourceSignal }), signal),
+      ]);
+      if (signal.aborted) throw new DOMException('Homepage request cancelled', 'AbortError');
+      if (results.every(result => result.status === 'rejected')) throw new Error('Home data unavailable');
+      const qqData = results[0].status === 'fulfilled' ? results[0].value : undefined;
+      const mdxData = results[1].status === 'fulfilled' ? results[1].value : undefined;
+      return { latest: adaptListData(qqData?.latest || {}), ongoing: adaptListData(qqData?.ongoing || {}),
+        mangadex: adaptListData(mdxData || {}),
+        unavailableSources: (['truyenqq', 'mangadex'] as const).filter((_, index) => results[index].status === 'rejected') };
     },
     staleTime: 30 * 1000,
     gcTime: 15 * 60 * 1000,
-    retry: 1,
+    retry: 0,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });

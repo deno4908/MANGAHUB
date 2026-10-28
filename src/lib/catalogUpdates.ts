@@ -20,7 +20,8 @@ function belongsToUpdate(key: QueryKey, event: CatalogUpdate): boolean {
   }
   if (section === 'chapter') return event.changes.some(change => change.chapter_id === key[2]);
   if (section === 'mangadex' || section === 'mangadex-catalog') return event.source === 'mangadex';
-  if (section === 'list' || section === 'category' || section === 'otruyen-filtered' || section === 'homepage') {
+  if (section === 'homepage') return true;
+  if (section === 'list' || section === 'category' || section === 'otruyen-filtered') {
     return event.source === 'truyenqq';
   }
   if (section === 'home' && key.includes('mangadex')) return event.source === 'mangadex';
