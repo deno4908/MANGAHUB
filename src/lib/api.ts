@@ -1014,6 +1014,7 @@ export const mangaApi = {
       limit?: number;
       showMature?: boolean;
       filterHidden?: boolean;
+      attachRatings?: boolean;
       timeoutMs?: number;
       signal?: AbortSignal;
     } = {},
@@ -1023,6 +1024,7 @@ export const mangaApi = {
       show_mature: String(options.showMature ?? false),
       filter_hidden: String(options.filterHidden ?? true),
     });
+    if (options.attachRatings === false) query.set('attach_ratings', 'false');
     return publicApi<any>(`/api/manga/mangadex/home-banner?${query.toString()}`, {
       timeoutMs: options.timeoutMs ?? 15_000,
       signal: options.signal,

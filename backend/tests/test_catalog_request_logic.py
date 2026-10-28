@@ -81,6 +81,22 @@ def test_home_allows_deferred_ratings_without_changing_catalog_or_default_enrich
     manga._attach_overrides_to_otruyen_payload.assert_awaited_once()
 
 
+@pytest.mark.parametrize('attach_ratings', [False, True])
+def test_home_banner_defers_ratings_but_keeps_hidden_filter_and_local_views(monkeypatch, attach_ratings):
+    isolate(monkeypatch)
+    hidden_id = '11111111-1111-4111-8111-111111111111'
+    monkeypatch.setattr(manga, '_get_hidden_slugs', AsyncMock(return_value={hidden_id: 'hidden'}))
+    source = AsyncMock(return_value=page([{'slug': hidden_id}, {'slug': 'visible'}], 2))
+    monkeypatch.setattr(manga.mangadex_service, 'get_latest_vi_chapter_feed', source)
+    result = asyncio.run(manga.mangadex_home_banner(limit=24, show_mature=False, filter_hidden=True,
+        attach_ratings=attach_ratings, user=None, db=EmptyDB()))
+    assert result['data']['items'] == [{'slug': 'visible'}]
+    assert source.call_args.kwargs['excluded_manga_ids'] == [hidden_id]
+    assert source.call_args.kwargs['content_ratings'] == ['safe', 'suggestive']
+    manga._async_attach_local_views_to_mangadex_payload.assert_awaited_once()
+    assert manga._async_attach_ratings_to_items.await_count == int(attach_ratings)
+
+
 def test_search_outage_is_not_reported_as_no_matching_books(monkeypatch):
     isolate(monkeypatch)
     monkeypatch.setattr(manga.truyenqq_service, "search_manga", AsyncMock(side_effect=RuntimeError("source offline")))

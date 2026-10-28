@@ -6009,6 +6009,7 @@ async def mangadex_home_banner(
     limit: int = Query(8, ge=1, le=24),
     show_mature: bool = Query(False),
     filter_hidden: bool = Query(True),
+    attach_ratings: bool = Query(True),
     user=Depends(get_optional_user),
     db=Depends(get_supabase_public),
 ):
@@ -6044,7 +6045,8 @@ async def mangadex_home_banner(
     payload = {"mangas": ((data.get("data") or {}).get("items") or [])}
     await _async_attach_local_views_to_mangadex_payload(payload, db)
     data.setdefault("data", {})["items"] = payload.get("mangas") or []
-    await _async_attach_ratings_to_items(data, db, user)
+    if attach_ratings:
+        await _async_attach_ratings_to_items(data, db, user)
     return data
 
 

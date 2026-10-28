@@ -192,11 +192,27 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
         if (!adaptListData(fallback).items.length) throw new Error('QQ home data unavailable');
         return { latest: fallback, ongoing: fallback };
       };
+      // Keep one atomic snapshot, but do not hold a usable home screen for an
+      // unresponsive second source. Both still get the full cold-start budget
+      // until the first source succeeds.
+      const sources = new AbortController();
+      const cancel = () => sources.abort();
+      signal.addEventListener('abort', cancel, { once: true });
+      if (signal.aborted) cancel();
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      const ready = <T,>(value: T, usable = true): T => {
+        if (usable) graceTimer ??= setTimeout(cancel, 1_500);
+        return value;
+      };
       const results = await Promise.allSettled([
-        readHomepageSource(qq, signal),
+        readHomepageSource(qq, sources.signal).then(value => ready(value)),
         readHomepageSource(sourceSignal => mangaApi.getMangaDexHomeBanner({ limit: 24,
-          showMature, filterHidden: true, timeoutMs: 6_000, signal: sourceSignal }), signal),
-      ]);
+          showMature, filterHidden: true, attachRatings: false, timeoutMs: 6_000, signal: sourceSignal }), sources.signal)
+          .then(value => ready(value, adaptListData(value).items.length > 0)),
+      ]).finally(() => {
+        clearTimeout(graceTimer);
+        signal.removeEventListener('abort', cancel);
+      });
       if (signal.aborted) throw new DOMException('Homepage request cancelled', 'AbortError');
       if (results.every(result => result.status === 'rejected')) throw new Error('Home data unavailable');
       const qqData = results[0].status === 'fulfilled' ? results[0].value : undefined;

@@ -720,11 +720,15 @@ const AppContent = () => {
   }
   if (!maintenanceChecked) {
     return (
-      <div className="min-h-screen bg-background">
-        <ScrollToTop />
-        <AuthLoader />
-        <PageLoader />
-      </div>
+      <SiteAccessGate>
+        {/* Mount the same gate now so session/access checks overlap maintenance.
+            Only the loader is revealed until maintenance also finishes. */}
+        <div className="min-h-screen bg-background">
+          <ScrollToTop />
+          <AuthLoader />
+          <PageLoader />
+        </div>
+      </SiteAccessGate>
     );
   }
   const isAdmin = user?.role === "admin";

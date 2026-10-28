@@ -41,6 +41,7 @@ it.each(['truyenqq', 'mangadex'] as const)('waits for %s before publishing eithe
   expect(result.current.data?.latest.items[0].title).toBe('QQ old');
   expect(result.current.data?.mangadex.items[0].title).toBe('MangaDex old');
   expect(mangaApi.getHomepage).toHaveBeenCalledWith(expect.objectContaining({ attachRatings: false }));
+  expect(mangaApi.getMangaDexHomeBanner).toHaveBeenCalledWith(expect.objectContaining({ attachRatings: false }));
 });
 
 it('publishes both catalogs without waiting for slow featured-title lookups', async () => {
@@ -97,13 +98,13 @@ it('requests QQ when a cached homepage contains only MangaDex cards', async () =
   expect(result.current.data?.latest.items[0].title).toBe('QQ fallback');
 });
 
-it.each(['truyenqq', 'mangadex'] as const)('skips slow %s after six seconds and ignores its late response', async source => {
+it.each(['truyenqq', 'mangadex'] as const)('skips slow %s 1.5 seconds after the other source succeeds and ignores its late response', async source => {
   vi.useFakeTimers();
   const pending = deferred();
   if (source === 'truyenqq') vi.mocked(mangaApi.getHomepage).mockReturnValue(pending.promise);
   else vi.mocked(mangaApi.getMangaDexHomeBanner).mockReturnValue(pending.promise);
   const { result } = renderHook(() => useHomepageCombined(), { wrapper });
-  await act(async () => { await vi.advanceTimersByTimeAsync(5_999); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1_499); });
   expect(result.current.data).toBeUndefined();
   await act(async () => { await vi.advanceTimersByTimeAsync(20); });
   const snapshot = result.current.data;
@@ -122,6 +123,60 @@ it.each(['truyenqq', 'mangadex'] as const)('skips slow %s after six seconds and 
     await vi.advanceTimersByTimeAsync(20);
   });
   expect(result.current.data).toEqual(snapshot);
+});
+
+it('gives both cold sources time to start before beginning the grace period', async () => {
+  vi.useFakeTimers();
+  const qq = deferred(), mdx = deferred();
+  vi.mocked(mangaApi.getHomepage).mockReturnValue(qq.promise);
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockReturnValue(mdx.promise);
+  const { result } = renderHook(() => useHomepageCombined(), { wrapper });
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
+  expect(result.current.data).toBeUndefined();
+  await act(async () => { qq.resolve(home('QQ cold')); await vi.advanceTimersByTimeAsync(1_400); });
+  expect(result.current.data).toBeUndefined();
+  await act(async () => { mdx.resolve(page('MangaDex cold', 'mangadex')); await vi.advanceTimersByTimeAsync(20); });
+  expect(result.current.data?.latest.items[0].title).toBe('QQ cold');
+  expect(result.current.data?.mangadex.items[0].title).toBe('MangaDex cold');
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(vi.mocked(mangaApi.getHomepage).mock.calls[0][0]?.signal?.aborted).toBe(false);
+});
+
+it('keeps the six-second hard deadline when both sources stall', async () => {
+  vi.useFakeTimers();
+  vi.mocked(mangaApi.getHomepage).mockReturnValue(new Promise(() => {}));
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockReturnValue(new Promise(() => {}));
+  const { result } = renderHook(() => useHomepageCombined(), { wrapper });
+  await act(async () => { await vi.advanceTimersByTimeAsync(5_999); });
+  expect(result.current.isLoading).toBe(true);
+  await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+  expect(result.current.isError).toBe(true);
+  expect(result.current.data).toBeUndefined();
+});
+
+it('does not cut off the remaining source just because an empty catalog returned quickly', async () => {
+  vi.useFakeTimers();
+  const qq = deferred();
+  vi.mocked(mangaApi.getHomepage).mockReturnValue(qq.promise);
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue({ data: { items: [] } });
+  const { result } = renderHook(() => useHomepageCombined(), { wrapper });
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+  expect(result.current.data).toBeUndefined();
+  expect(vi.mocked(mangaApi.getHomepage).mock.calls[0][0]?.signal?.aborted).toBe(false);
+  await act(async () => { qq.resolve(home('QQ ready')); await vi.advanceTimersByTimeAsync(20); });
+  expect(result.current.data?.latest.items[0].title).toBe('QQ ready');
+});
+
+it('does not publish a cancelled request or start a fallback after cancellation', async () => {
+  vi.useFakeTimers();
+  vi.mocked(mangaApi.getHomepage).mockReturnValue(new Promise(() => {}));
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockReturnValue(new Promise(() => {}));
+  const { result } = renderHook(() => useHomepageCombined(), { wrapper });
+  await act(async () => { await client.cancelQueries({ queryKey: ['manga', 'homepage'] }); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(6_100); });
+  expect(result.current.data).toBeUndefined();
+  expect(mangaApi.getOTruyenFiltered).not.toHaveBeenCalled();
+  expect(vi.mocked(mangaApi.getHomepage).mock.calls[0][0]?.signal?.aborted).toBe(true);
 });
 
 it('reports an error when neither source nor the QQ fallback is available', async () => {
