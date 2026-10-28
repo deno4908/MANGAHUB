@@ -151,7 +151,7 @@ async function readHomepageSource<T>(load: (signal: AbortSignal) => Promise<T>, 
     timer = setTimeout(() => {
       controller.abort();
       reject(new Error('Homepage source timed out'));
-    }, 15_000);
+    }, 6_000);
   });
   parent.addEventListener('abort', cancel, { once: true });
   try {
@@ -177,7 +177,7 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
     queryFn: async ({ signal }) => {
       const qq = async (sourceSignal: AbortSignal) => {
         try {
-          const payload = await mangaApi.getHomepage({ timeoutMs: 10_000, signal: sourceSignal });
+          const payload = await mangaApi.getHomepage({ timeoutMs: 4_000, signal: sourceSignal });
           const visible = [...adaptListData(payload.latest || {}).items, ...adaptListData(payload.ongoing || {}).items]
             .some(item => item.source !== 'mangadex' && !normalizeMangaDexId(item.id)
               && (showMature || !isMatureManga(item)));
@@ -187,14 +187,14 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
         }
         if (sourceSignal.aborted) throw new DOMException('Homepage request cancelled', 'AbortError');
         const fallback = await mangaApi.getOTruyenFiltered({ page: 1, limit: 24, sort: 'latest',
-          showMature, attachRatings: false, timeoutMs: 5_000, signal: sourceSignal });
+          showMature, attachRatings: false, timeoutMs: 2_000, signal: sourceSignal });
         if (!adaptListData(fallback).items.length) throw new Error('QQ home data unavailable');
         return { latest: fallback, ongoing: fallback };
       };
       const results = await Promise.allSettled([
         readHomepageSource(qq, signal),
         readHomepageSource(sourceSignal => mangaApi.getMangaDexHomeBanner({ limit: 24,
-          showMature, filterHidden: true, timeoutMs: 15_000, signal: sourceSignal }), signal),
+          showMature, filterHidden: true, timeoutMs: 6_000, signal: sourceSignal }), signal),
       ]);
       if (signal.aborted) throw new DOMException('Homepage request cancelled', 'AbortError');
       if (results.every(result => result.status === 'rejected')) throw new Error('Home data unavailable');
