@@ -1,14 +1,23 @@
+import { accessDecision, privateHeaders } from './access-gate.js';
+
 const MANGADEX_API = "https://api.mangadex.org";
 const QQ_PREFIX = "/api/truyenqq-edge";
 const QQ_SOURCE = "https://truyenqqko.com";
 const SITE_ACCESS_URL = "https://api.mangahub.art/api/site-access";
 
-async function checkSiteAccess(request) {
+async function checkSiteAccess(request, env = {}) {
   let failure = 'network';
   try {
     const authorization = request.headers.get('Authorization');
+    const internalHeaders = {};
+    if (env.CF_ACCESS_CLIENT_ID || env.CF_ACCESS_CLIENT_SECRET) {
+      if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) throw new Error('Incomplete service credentials');
+      internalHeaders['CF-Access-Client-Id'] = env.CF_ACCESS_CLIENT_ID;
+      internalHeaders['CF-Access-Client-Secret'] = env.CF_ACCESS_CLIENT_SECRET;
+    }
     const response = await fetch(SITE_ACCESS_URL, {
-      headers: { Accept: 'application/json', 'User-Agent': 'MangaHub-Access-Relay/1.0', ...(authorization ? { Authorization: authorization } : {}) },
+      headers: { Accept: 'application/json', 'User-Agent': 'MangaHub-Access-Relay/1.0', ...internalHeaders,
+        ...(authorization ? { Authorization: authorization } : {}) },
       redirect: 'manual', signal: AbortSignal.timeout(6000),
     });
     if (response.status === 401 || response.status === 403) {
@@ -140,10 +149,22 @@ function json(payload, status = 200, extraHeaders = {}) {
 }
 
 export default {
-  async fetch(request) {
+  async fetch(request, env = {}) {
+    // Check before reading either cache or source, on every route and method.
+    const decision = await accessDecision(request, env);
+    if (decision.denied) return decision.denied;
+    const response = await handleRequest(request, env);
+    if (!decision.enabled) return response;
+    const secured = new Response(response.body, response);
+    for (const [name, value] of Object.entries(privateHeaders())) secured.headers.set(name, value);
+    return secured;
+  },
+};
+
+async function handleRequest(request, env) {
     const url = new URL(request.url);
     if (request.method !== 'OPTIONS' && (url.pathname.startsWith(QQ_PREFIX + '/') || url.pathname.startsWith('/api/mangadex-edge/chapter/'))) {
-      const denied = await checkSiteAccess(request);
+      const denied = await checkSiteAccess(request, env);
       if (denied) return denied;
     }
     if (url.pathname.startsWith(QQ_PREFIX + "/")) return qqSource(request, url);
@@ -196,5 +217,4 @@ export default {
     await cache.put(cacheKey, response.clone());
     response.headers.set('Cache-Control', 'private, no-store');
     return response;
-  },
-};
+}

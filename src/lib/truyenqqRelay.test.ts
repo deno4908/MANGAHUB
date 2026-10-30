@@ -21,7 +21,7 @@ it('warms the exact blocked QQ source page, then retries the original backend re
   expect(fetcher.mock.calls.map(call => call[0])).toEqual([
     api, 'https://mangahub-mangadex-edge.vinhytb3010.workers.dev/api/truyenqq-edge/tim-kiem-nang-cao/trang-53?sort=4', api,
   ]);
-  expect(fetcher.mock.calls[1][1]).toMatchObject({ credentials: 'omit', method: 'GET' });
+  expect(fetcher.mock.calls[1][1]).toMatchObject({ credentials: 'same-origin', method: 'GET' });
   expect(fetcher.mock.calls[1][1].headers).toBeUndefined();
   expect(fetcher.mock.calls[2][1].headers.Authorization).toBe('private-token');
 });
@@ -37,7 +37,7 @@ it('recovers a missing QQ source in partial combined search results using a publ
   const response = await fetchWithTruyenQQRelay(url, {}, 10_000);
   expect((await response.json()).data.items).toHaveLength(2);
   expect(fetcher.mock.calls[1][1]).toMatchObject({
-    method: 'POST', credentials: 'omit', body: 'search=one+piece&type=0',
+    method: 'POST', credentials: 'same-origin', body: 'search=one+piece&type=0',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
   });
 });
@@ -88,5 +88,5 @@ it('authenticates only the owned relay during whitelist recovery', async () => {
   vi.stubGlobal('fetch', fetcher);
   await fetchWithTruyenQQRelay(api, { headers: { Authorization: 'Bearer allowed-reader' } }, 10_000);
   expect(fetcher.mock.calls[1][0]).toBe('https://mangahub-mangadex-edge.vinhytb3010.workers.dev/api/truyenqq-edge/doc-truyen');
-  expect(fetcher.mock.calls[1][1]).toMatchObject({ headers: { Authorization: 'Bearer allowed-reader' }, credentials: 'omit' });
+  expect(fetcher.mock.calls[1][1]).toMatchObject({ headers: { Authorization: 'Bearer allowed-reader' }, credentials: 'same-origin' });
 });
