@@ -26,8 +26,7 @@ async function warm(value: Source, signal: AbortSignal | null | undefined, timeo
   const job = (async () => {
     try {
       const response = await fetchWithTimeout(EDGE.replace(/\/$/, '') + value.path, {
-        // Same-origin Access cookies work without exposing cookies to workers.dev.
-        method: value.keyword ? 'POST' : 'GET', credentials: 'same-origin', signal,
+        method: value.keyword ? 'POST' : 'GET', credentials: 'omit', signal,
         headers: authorization ? { Authorization: authorization } : undefined,
         ...(value.keyword ? { headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...(authorization ? { Authorization: authorization } : {}) },
           body: new URLSearchParams({ search: value.keyword, type: '0' }).toString() } : {}),

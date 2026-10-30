@@ -4,15 +4,8 @@ compatibility_date = "2026-06-10"
 workers_dev = true
 
 routes = [
-  { pattern = "mangahub.art/api/mangadex-edge/*", zone_name = "mangahub.art" },
-  { pattern = "mangahub.art/api/truyenqq-edge/*", zone_name = "mangahub.art" }
+  { pattern = "mangahub.art/api/mangadex-edge/*", zone_name = "mangahub.art" }
 ]
-
-# Set these in the Worker settings after the Access application is configured.
-# CF_ACCESS_REQUIRED=true, CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD
-# Store CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET as Worker Secrets.
-# After moving all callers to the protected routes, set workers_dev=false
-# and disable preview URLs. Do not disable the existing relay during setup.
 
 # Keep browser and backend fetches on the same local source cache.
 [placement]

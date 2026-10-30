@@ -6,7 +6,6 @@ import os
 from fastapi import FastAPI, HTTPException, Request
 from starlette.middleware.wsgi import WSGIMiddleware
 from serverless_runtime import IS_VERCEL, RequestTasksMiddleware, writable_path
-from cloudflare_access import CloudflareAccessMiddleware
 
 if IS_VERCEL:
     os.environ.setdefault("EASYOCR_MODULE_PATH", str(writable_path("easyocr")))
@@ -45,7 +44,6 @@ def auth_health():
 
 app.add_middleware(AuthGatewayMiddleware, auth_app=auth_app)
 app.add_middleware(RequestTasksMiddleware)
-app.add_middleware(CloudflareAccessMiddleware)
 
 
 @app.get("/internal/maintenance-tasks", include_in_schema=False)

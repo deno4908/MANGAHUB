@@ -35,8 +35,7 @@ class TruyenQQTransport(httpx.BaseTransport):
         # Let curl supply Chrome's UA and compression headers. Preserve the
         # source Referer and encoded form body, including search POST requests.
         headers = {k: v for k, v in request.headers.items()
-                   if k.lower() not in {"user-agent", "accept-encoding", "connection"}
-                   and not k.lower().startswith("cf-access-")}
+                   if k.lower() not in {"user-agent", "accept-encoding", "connection"}}
         timeout = request.extensions.get("timeout", {})
         body = request.read()
         relay_allowed = bool(self._edge_url) and request.url.scheme == "https" and request.url.host == "truyenqqko.com" and (
@@ -54,14 +53,6 @@ class TruyenQQTransport(httpx.BaseTransport):
             # token. It is never added to the QQ origin or image CDN requests.
             if relay and source_authorization.get():
                 outgoing["Authorization"] = source_authorization.get()
-            if relay:
-                client_id = os.getenv("CF_ACCESS_CLIENT_ID", "")
-                client_secret = os.getenv("CF_ACCESS_CLIENT_SECRET", "")
-                if client_id or client_secret:
-                    if not client_id or not client_secret:
-                        raise httpx.ConnectError("Incomplete Access service credentials", request=request)
-                    outgoing["CF-Access-Client-Id"] = client_id
-                    outgoing["CF-Access-Client-Secret"] = client_secret
             return self._session().request(
                 request.method, url, headers=outgoing,
                 data=body, allow_redirects=False,

@@ -46,33 +46,6 @@ def test_browser_transport_preserves_filters_and_search_form(browser):
     browser.close.assert_called_once()
 
 
-def test_access_machine_credentials_only_reach_owned_relay(browser, monkeypatch):
-    monkeypatch.setenv('CF_ACCESS_CLIENT_ID', 'machine-id')
-    monkeypatch.setenv('CF_ACCESS_CLIENT_SECRET', 'machine-secret')
-    monkeypatch.setenv('TRUYENQQ_PREFER_EDGE', '1')
-    relay = transport.TruyenQQTransport(edge_url='https://mangahub.art/api/truyenqq-edge')
-    try:
-        relay.handle_request(httpx.Request('GET', 'https://truyenqqko.com/doc-truyen'))
-        assert browser.request.call_args.args[1] == 'https://mangahub.art/api/truyenqq-edge/doc-truyen'
-        assert browser.request.call_args.kwargs['headers']['CF-Access-Client-Id'] == 'machine-id'
-        assert browser.request.call_args.kwargs['headers']['CF-Access-Client-Secret'] == 'machine-secret'
-        relay.handle_request(httpx.Request('GET', 'https://images.example/page.jpg'))
-        assert browser.request.call_args.args[1] == 'https://images.example/page.jpg'
-        assert not any(key.lower().startswith('cf-access-') for key in browser.request.call_args.kwargs['headers'])
-    finally:
-        relay.close()
-
-
-def test_partial_access_machine_configuration_is_not_sent(browser, monkeypatch):
-    monkeypatch.setenv('CF_ACCESS_CLIENT_ID', 'machine-id')
-    monkeypatch.delenv('CF_ACCESS_CLIENT_SECRET', raising=False)
-    monkeypatch.setenv('TRUYENQQ_PREFER_EDGE', '1')
-    relay = transport.TruyenQQTransport(edge_url='https://mangahub.art/api/truyenqq-edge')
-    with pytest.raises(httpx.ConnectError, match='Incomplete Access'):
-        relay.handle_request(httpx.Request('GET', 'https://truyenqqko.com/doc-truyen'))
-    browser.request.assert_not_called()
-
-
 @pytest.mark.parametrize('status', [403, 429, 503])
 def test_browser_transport_keeps_http_errors_for_source_policy(browser, status):
     browser.request.return_value.status_code = status
