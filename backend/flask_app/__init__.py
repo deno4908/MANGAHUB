@@ -4,6 +4,7 @@ Flask application factory.
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_limiter import Limiter
+from redis.exceptions import RedisError, ResponseError
 from config import config
 from maintenance import get_maintenance_state, is_admin_authorized, maintenance_payload
 from proxy_trust import resolve_client_ip
@@ -43,6 +44,24 @@ def create_app() -> Flask:
 
     # CORS — allow configured frontend origins
     CORS(app, origins=cors_origins, supports_credentials=True)
+
+    @app.errorhandler(RedisError)
+    def security_store_unavailable(error):
+        # Flask-Limiter runs before the auth view. Keep rejecting the request
+        # when its shared security store fails; do not bypass rate limits or
+        # expose Redis messages, connection URLs, or credentials.
+        quota_exceeded = isinstance(error, ResponseError) and "max requests limit exceeded" in str(error).lower()
+        code = "AUTH_REDIS_QUOTA_EXCEEDED" if quota_exceeded else "AUTH_SECURITY_STORE_UNAVAILABLE"
+        app.logger.error("Authentication security store unavailable code=%s", code)
+        response = jsonify({
+            "error": "Dịch vụ xác thực tạm thời không khả dụng. Vui lòng thử lại sau.",
+            "code": code,
+        })
+        response.status_code = 503
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        if not quota_exceeded:
+            response.headers["Retry-After"] = "30"
+        return response
 
     maintenance_auth_bootstrap_paths = {
         "/auth/login",
@@ -90,6 +109,7 @@ def create_app() -> Flask:
                 )
                 safe_payload = {"error": "Dịch vụ xác thực tạm thời không khả dụng. Vui lòng thử lại sau."}
                 if isinstance(payload, dict) and payload.get("code") in {
+                    "AUTH_REDIS_QUOTA_EXCEEDED", "AUTH_SECURITY_STORE_UNAVAILABLE",
                     "AUTH_PROVIDER_CONFIG_MISSING", "AUTH_OAUTH_CLIENT_UNAVAILABLE",
                     "AUTH_OAUTH_LINK_UNAVAILABLE", "AUTH_OAUTH_VERIFIER_UNAVAILABLE",
                     "AUTH_OAUTH_RESPONSE_UNAVAILABLE",
