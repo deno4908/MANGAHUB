@@ -22,8 +22,9 @@ def ensure_security_redis_available() -> None:
             # A main outage must not prevent a cold function serving public
             # content from standby. Security commands still fail closed at use.
             return
-        # A real write detects exhausted command quotas that PING can miss.
-        security_client().set("mh:security:health", "1", ex=30)
+        # Keep the existing single-store startup connectivity check. Runtime
+        # commands and recovery probes detect write/quota failures themselves.
+        security_client().ping()
         security_cutover()
     except Exception as exc:
         raise RuntimeError("Redis is required but unavailable") from exc
