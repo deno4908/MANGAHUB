@@ -139,6 +139,8 @@ def test_combined_backend_keeps_auth_prefix_and_secures_cron(monkeypatch):
     client = TestClient(deployment.app)
     assert client.get("/health").json()["service"] == "fastapi-api"
     assert client.get("/auth/health").json()["service"] == "flask-gateway"
+    monkeypatch.setenv("VERCEL_GIT_COMMIT_SHA", "abcdef012345" + "0" * 28)
+    assert client.get("/auth/health").headers["X-MangaHub-Revision"] == "abcdef012345"
     monkeypatch.delenv("CRON_SECRET", raising=False)
     assert client.get("/internal/maintenance-tasks").status_code == 401
     monkeypatch.setenv("CRON_SECRET", "a-private-cron-secret")

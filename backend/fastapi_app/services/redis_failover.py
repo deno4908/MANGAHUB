@@ -32,6 +32,7 @@ class FailoverCache:
         self._guard = threading.RLock()
         self._next_check = 0.0
         self._primary_suppressed = 0.0
+        self._needs_state_repair = False
         self._bootstrap_lock = threading.Lock()
 
     @property
@@ -135,7 +136,7 @@ class FailoverCache:
         return self._run("flush_patterns", list(patterns))
 
     def recovery_due(self):
-        if not self._initialized or self._mode != "fallback":
+        if not self._initialized or (self._mode != "fallback" and not self._needs_state_repair):
             return False
         with self._guard:
             if time.monotonic() < self._next_check:
@@ -145,17 +146,27 @@ class FailoverCache:
 
     def check_primary(self):
         """Called only after the response (or by the protected maintenance job)."""
-        if not self._initialized or self._standby is None or self._mode != "fallback":
+        if not self._initialized or self._standby is None or (self._mode != "fallback" and not self._needs_state_repair):
             return
         try:
-            state = self._standby.get(self._state_key)
+            try:
+                state = self._standby.get(self._state_key)
+            except redis.RedisError as error:
+                if not availability_error(error):
+                    raise
+                if self._mode == "fallback":
+                    self._recover_without_standby()
+                return
             if not state:
                 return  # Never guess a route after its control state was lost.
             decoded = json.loads(state)
             if decoded.get("mode") == "primary":
                 self._adopt(decoded)
+                self._needs_state_repair = False
                 return
-            self._adopt(decoded)
+            repairing = self._mode == "primary" and self._needs_state_repair
+            if not repairing:
+                self._adopt(decoded)
             if not self._standby.set(self._state_key + ":probe", "1", nx=True,
                                      ex=config.REDIS_RECOVERY_CHECK_SECONDS):
                 return
@@ -165,6 +176,17 @@ class FailoverCache:
             if self._primary.get(probe) != "ok":
                 return
             self._primary.delete(probe)
+            ready = json.dumps({"mode": "primary"})
+            if repairing:
+                changed = self._standby.eval("""
+                    if redis.call('GET', KEYS[1]) == ARGV[1] then
+                        redis.call('SET', KEYS[1], ARGV[2]); return 1
+                    end
+                    return 0
+                """, 1, self._state_key, state, ready)
+                if changed:
+                    self._needs_state_repair = False
+                return
             deadline = time.monotonic() + 3.0
             # Remove only public cache entries. Never SCAN/DELETE security keys.
             for batch in self._batches(self._primary.scan_iter(match=PREFIX + "*", count=200)):
@@ -187,7 +209,6 @@ class FailoverCache:
                 warmed += len(batch)
                 if warmed >= 400 or time.monotonic() >= deadline:
                     break
-            ready = json.dumps({"mode": "primary"})
             changed = self._standby.eval("""
                 if redis.call('GET', KEYS[1]) == ARGV[1] then
                     redis.call('SET', KEYS[1], ARGV[2]); return 1
@@ -197,9 +218,28 @@ class FailoverCache:
             if changed:
                 self._adopt(json.loads(ready))
                 self._primary_suppressed = 0
+                self._needs_state_repair = False
                 logger.info("Content cache main recovered; fallback remains available")
         except (redis.RedisError, ValueError, KeyError):
             logger.warning("Content cache recovery check failed; keeping fallback")
+
+    def _recover_without_standby(self):
+        # Standby can exhaust its quota while the main recovers. Probe the main
+        # after the response instead of staying in local RAM indefinitely.
+        probe = "mh:redis-probe:" + secrets.token_hex(16)
+        self._primary.set(probe, "ok", ex=10)
+        if self._primary.get(probe) != "ok":
+            return
+        self._primary.delete(probe)
+        deadline = time.monotonic() + 3
+        for batch in self._batches(self._primary.scan_iter(match=PREFIX + "*", count=200)):
+            self._primary.delete(*batch)
+            if time.monotonic() >= deadline:
+                return
+        self._adopt({"mode": "primary"})
+        self._primary_suppressed = 0
+        self._needs_state_repair = True
+        logger.info("Content cache main recovered while standby is unavailable")
 
     @staticmethod
     def _batches(iterator, size=200):

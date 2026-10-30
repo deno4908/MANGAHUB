@@ -19,6 +19,7 @@ from gotrue.errors import AuthApiError, AuthRetryableError
 from postgrest.exceptions import APIError
 import httpx
 import access_tickets
+from redis.exceptions import RedisError
 from fastapi_app.services.request_coalescing import coalesce_reads
 from fastapi_app.services.auth_claims import verified_access_claims
 
@@ -302,13 +303,17 @@ async def _live_user_read(authorization, force_live):
 def _ticket_read(authorization):
     if not authorization or not authorization.startswith("Bearer "):
         return None, False
-    from redis_runtime import enforce_security_cutover
-    enforce_security_cutover(authorization[7:])
-    claims = verified_access_claims(authorization[7:])
-    who = access_tickets.identity(claims)
-    if not who:
-        return None, False
     try:
+        from redis_runtime import enforce_security_cutover, security_client
+        enforce_security_cutover(authorization[7:])
+        claims = verified_access_claims(authorization[7:])
+        who = access_tickets.identity(claims)
+        if not who:
+            # Legacy HS256 tokens are verified live by Supabase, but an outage
+            # must not let them skip the shared security-store requirement.
+            if config.SECURITY_REQUIRE_REDIS:
+                security_client().exists("mh:security:store-cutover:v1")
+            return None, False
         return access_tickets.read_session(who), False
     except access_tickets.Changed:
         return None, True
@@ -316,6 +321,9 @@ def _ticket_read(authorization):
         raise HTTPException(401, SESSION_REVOKED_DETAIL) from error
     except access_tickets.Unavailable as error:
         raise HTTPException(503, str(error), headers={"X-MangaHub-Auth-Stage": "access-session"}) from error
+    except RedisError as error:
+        raise HTTPException(503, "Dịch vụ xác thực tạm thời không khả dụng",
+                            headers={"X-MangaHub-Auth-Stage": "access-session"}) from error
 
 
 @coalesce_reads

@@ -40,7 +40,11 @@ if config.IS_VERCEL:
 
 @auth_app.get("/auth/health")
 def auth_health():
-    return {"status": "ok", "service": "flask-gateway"}
+    revision = os.getenv("VERCEL_GIT_COMMIT_SHA", "")
+    headers = {}
+    if len(revision) == 40 and all(char in "0123456789abcdef" for char in revision.lower()):
+        headers["X-MangaHub-Revision"] = revision[:12]
+    return {"status": "ok", "service": "flask-gateway"}, 200, headers
 
 
 app.add_middleware(AuthGatewayMiddleware, auth_app=auth_app)

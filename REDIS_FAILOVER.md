@@ -16,7 +16,11 @@ Không đổi lịch cron Vercel và không cần một dịch vụ ping bên ng
    | `REDIS_SECURITY_URL` | Để không thiết lập; mặc định dùng `REDIS_URL` |
    | `SECURITY_REQUIRE_REDIS` | `true` |
 
-4. Redeploy backend. Hai URL phải trỏ tới hai Redis khác nhau. Đặt cùng cấu hình
+4. Redeploy bản mới nhất của `main` với env Production mới. Nếu deployment chỉ
+   có nhãn Ready/Staged/Preview, dùng Promote hoặc Promote to Production để có
+   nhãn **Current**. Không redeploy lại commit rollback `398d15a` vì bản đó chưa
+   có dự phòng. Header `X-MangaHub-Revision` của `/health` và `/auth/health` phải
+   là commit mới đang chọn. Hai URL phải trỏ tới hai Redis khác nhau. Đặt cùng cấu hình
    cho tất cả backend phục vụ API và auth. Dùng database khác cho preview/test.
 5. Đăng nhập lại một lần sau khi chuyển. Backend khởi tạo mốc chuyển đổi chung
    trong Aiven; phiên đăng nhập trước mốc này không được dùng lại, kể cả refresh.
@@ -54,6 +58,8 @@ rồi mới chuyển function đó về Redis chính. Function khác nhận tr�
 ở lần kiểm tra tiếp theo; cache công khai có thể nhất quán dần theo TTL, không
 phải một giao dịch chuyển đổi toàn hệ thống. Namespace mới cho mỗi đợt lỗi tránh
 lấy lại cache của đợt lỗi trước. Không xóa khóa xác thực hoặc chạy FLUSHDB.
+Nếu Upstash cũng hết quota, probe vẫn có thể khôi phục Aiven rồi sửa lại trạng
+thái chung khi Upstash hoạt động lại; lượt sửa trạng thái không xóa cache Aiven.
 
 Có thể chỉnh `REDIS_RECOVERY_CHECK_SECONDS` (tối thiểu 30),
 `REDIS_CONNECT_TIMEOUT_SECONDS`, `REDIS_SOCKET_TIMEOUT_SECONDS` (0,05–2 giây).

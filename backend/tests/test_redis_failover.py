@@ -131,6 +131,24 @@ def test_both_down_use_only_public_local_cache(stores, monkeypatch):
     assert local.call_count == 1
 
 
+def test_main_can_recover_if_standby_runs_out_of_quota_and_repair_without_flushing(stores, monkeypatch):
+    cache, main, standby, _ = stores
+    original_main, original_standby = main.execute_command, standby.execute_command
+    monkeypatch.setattr(main, "execute_command", Mock(side_effect=TimeoutError("main down")))
+    cache.set("title", "standby", ttl=120)
+    monkeypatch.setattr(main, "execute_command", original_main)
+    monkeypatch.setattr(standby, "execute_command", Mock(side_effect=ResponseError("max requests limit exceeded")))
+    cache.check_primary()
+    assert cache._mode == "primary"
+    cache.set("title", "main again", ttl=120)
+    assert cache.get("title") == "main again"
+    assert cache._needs_state_repair
+    monkeypatch.setattr(standby, "execute_command", original_standby)
+    cache.check_primary()
+    assert not cache._needs_state_repair
+    assert cache.get("title") == "main again"  # repair must not clear live cache
+
+
 def test_fallback_namespace_invalidation_never_deletes_security(stores, monkeypatch):
     cache, main, standby, _ = stores
     monkeypatch.setattr(main, "execute_command", Mock(side_effect=ConnectionError("offline")))
@@ -257,6 +275,25 @@ def test_public_cold_start_with_standby_does_not_require_security_network(monkey
     monkeypatch.setattr(runtime, "security_client", network)
     ensure_security_redis_available()
     network.assert_not_called()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_authenticated_requests_fail_closed_when_security_store_is_down(monkeypatch, legacy):
+    from fastapi_app import dependencies
+    monkeypatch.setattr(config, "SECURITY_REQUIRE_REDIS", True)
+    monkeypatch.setattr(config, "REDIS_FALLBACK_URL", "rediss://standby.invalid/0")
+    monkeypatch.setattr(dependencies, "verified_access_claims", lambda token: None)
+    if legacy:
+        monkeypatch.setattr(runtime, "enforce_security_cutover", lambda token: None)
+        failed = Mock()
+        failed.exists.side_effect = ConnectionError("private-details")
+        monkeypatch.setattr(runtime, "security_client", lambda: failed)
+    else:
+        monkeypatch.setattr(runtime, "enforce_security_cutover", Mock(side_effect=ConnectionError("private-details")))
+    with pytest.raises(HTTPException) as rejected:
+        dependencies._ticket_read("Bearer test-token")
+    assert rejected.value.status_code == 503
+    assert "private-details" not in str(rejected.value.detail)
 
 
 def test_security_never_moves_to_standby_and_old_refresh_cannot_cross_cutover(monkeypatch):
