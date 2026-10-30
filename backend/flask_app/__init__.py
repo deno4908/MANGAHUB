@@ -88,11 +88,17 @@ def create_app() -> Flask:
                     response.status_code,
                     payload,
                 )
-                response.set_data(
-                    app.json.dumps(
-                        {"error": "Dịch vụ xác thực tạm thời không khả dụng. Vui lòng thử lại sau."}
-                    )
-                )
+                safe_payload = {"error": "Dịch vụ xác thực tạm thời không khả dụng. Vui lòng thử lại sau."}
+                if isinstance(payload, dict) and payload.get("code") in {
+                    "AUTH_PROVIDER_CONFIG_MISSING", "AUTH_OAUTH_CLIENT_UNAVAILABLE",
+                    "AUTH_OAUTH_LINK_UNAVAILABLE", "AUTH_OAUTH_VERIFIER_UNAVAILABLE",
+                    "AUTH_OAUTH_RESPONSE_UNAVAILABLE",
+                }:
+                    safe_payload["code"] = payload["code"]
+                    if payload.get("category") in {"SupabaseException", "ValueError", "TypeError", "OSError",
+                                                  "AuthApiError", "AuthRetryableError"}:
+                        safe_payload["category"] = payload["category"]
+                response.set_data(app.json.dumps(safe_payload))
                 response.content_type = "application/json"
             response.headers["Cache-Control"] = "no-store, max-age=0"
             response.headers["Pragma"] = "no-cache"

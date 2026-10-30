@@ -1417,15 +1417,17 @@ def refresh_token():
         return _auth_internal_error("Token refresh failed", e)
 
 
-@auth_bp.route("/google", methods=["POST"])
-@limiter.limit("10 per minute")
-def google_login():
-    """Initiate Google OAuth â€” returns the redirect URL."""
+def _start_oauth(provider: str):
+    stage = "AUTH_OAUTH_CLIENT_UNAVAILABLE"
     try:
+        if not config.SUPABASE_URL or not config.SUPABASE_KEY:
+            return jsonify({"error": _AUTH_INTERNAL_ERROR_MESSAGE,
+                            "code": "AUTH_PROVIDER_CONFIG_MISSING"}), 500
         redirect_to = f"{config.FRONTEND_URL}/auth/callback"
         sb = _get_sb()
+        stage = "AUTH_OAUTH_LINK_UNAVAILABLE"
         result = sb.auth.sign_in_with_oauth({
-            "provider": "google",
+            "provider": provider,
             "options": {
                 "redirect_to": redirect_to,
             }
@@ -1433,35 +1435,36 @@ def google_login():
         if result and result.url:
             code_verifier = _get_oauth_code_verifier(sb)
             if not code_verifier:
-                return jsonify({"error": "Không thể tạo phiên OAuth"}), 500
+                return jsonify({"error": _AUTH_INTERNAL_ERROR_MESSAGE,
+                                "code": "AUTH_OAUTH_VERIFIER_UNAVAILABLE"}), 500
+            stage = "AUTH_OAUTH_RESPONSE_UNAVAILABLE"
             return _json({"url": result.url}, 200, oauth_code_verifier=code_verifier)
-        return jsonify({"error": "Không thể tạo link Google"}), 500
+        return jsonify({"error": _AUTH_INTERNAL_ERROR_MESSAGE, "code": stage}), 500
     except Exception as e:
-        return _auth_internal_error("Google login failed", e)
+        _log_auth_exception(f"{provider} OAuth failed at {stage}", e)
+        payload = {"error": _AUTH_INTERNAL_ERROR_MESSAGE, "code": stage}
+        # Only fixed exception categories are public. Never return provider
+        # messages, URLs, credentials, or arbitrary exception class names.
+        category = type(e).__name__
+        if category in {"SupabaseException", "ValueError", "TypeError", "OSError",
+                        "AuthApiError", "AuthRetryableError"}:
+            payload["category"] = category
+        return jsonify(payload), 500
+
+
+@auth_bp.route("/google", methods=["POST"])
+@limiter.limit("10 per minute")
+def google_login():
+    """Initiate Google OAuth with a request-isolated PKCE verifier."""
+    return _start_oauth("google")
 
 
 
 @auth_bp.route("/discord", methods=["POST"])
 @limiter.limit("10 per minute")
 def discord_login():
-    """Initiate Discord OAuth â€” returns the redirect URL."""
-    try:
-        redirect_to = f"{config.FRONTEND_URL}/auth/callback"
-        sb = _get_sb()
-        result = sb.auth.sign_in_with_oauth({
-            "provider": "discord",
-            "options": {
-                "redirect_to": redirect_to,
-            }
-        })
-        if result and result.url:
-            code_verifier = _get_oauth_code_verifier(sb)
-            if not code_verifier:
-                return jsonify({"error": "Không thể tạo phiên OAuth"}), 500
-            return _json({"url": result.url}, 200, oauth_code_verifier=code_verifier)
-        return jsonify({"error": "Không thể tạo link Discord"}), 500
-    except Exception as e:
-        return _auth_internal_error("Discord login failed", e)
+    """Initiate Discord OAuth with a request-isolated PKCE verifier."""
+    return _start_oauth("discord")
 
 
 @auth_bp.route("/oauth/callback", methods=["POST"])
