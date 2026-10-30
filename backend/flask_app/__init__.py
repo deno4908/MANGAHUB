@@ -9,9 +9,10 @@ from config import config
 from maintenance import get_maintenance_state, is_admin_authorized, maintenance_payload
 from proxy_trust import resolve_client_ip
 from security_runtime import ensure_security_redis_available
+from redis_runtime import SecurityRedisStorage  # registers mhredis:// with limits
 
 
-_limiter_storage_uri = "memory://" if config.FLASK_DEBUG else (config.REDIS_URL or "memory://")
+_limiter_storage_uri = "memory://" if config.FLASK_DEBUG else "mhredis://"
 
 
 def _limiter_client_ip() -> str:
@@ -24,6 +25,11 @@ limiter = Limiter(
     default_limits=[],
     in_memory_fallback_enabled=not config.SECURITY_REQUIRE_REDIS,
     swallow_errors=False,
+    storage_options={} if config.FLASK_DEBUG else {
+        "socket_connect_timeout": config.REDIS_CONNECT_TIMEOUT_SECONDS,
+        "socket_timeout": config.REDIS_SOCKET_TIMEOUT_SECONDS,
+        "retry_on_timeout": False,
+    },
 )
 
 
@@ -44,6 +50,13 @@ def create_app() -> Flask:
 
     # CORS — allow configured frontend origins
     CORS(app, origins=cors_origins, supports_credentials=True)
+
+    @app.before_request
+    def initialize_security_store_cutover():
+        if config.REDIS_FALLBACK_URL and request.method != "OPTIONS" and request.path.startswith("/auth/"):
+            if request.path not in {"/auth/health"}:
+                from redis_runtime import security_cutover
+                security_cutover()
 
     @app.errorhandler(RedisError)
     def security_store_unavailable(error):

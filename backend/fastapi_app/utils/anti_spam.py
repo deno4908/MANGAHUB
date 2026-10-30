@@ -32,11 +32,6 @@ _counter_cleanup_every = 500
 _counter_calls = 0
 _recent_lock = Lock()
 _recent_seen: dict[str, float] = {}
-_redis_lock = Lock()
-_redis_client = None
-_redis_disabled_until = 0.0
-_redis_error_count = 0
-_REDIS_DISABLE_SECONDS = 30.0
 
 
 def get_client_ip(request: Request) -> str:
@@ -63,39 +58,16 @@ def _rate_key(key: str) -> str:
 
 
 def _get_redis_client():
-    global _redis_client, _redis_disabled_until
     if redis is None:
         return None
-    if time.monotonic() < _redis_disabled_until:
-        return None
-
-    redis_url = str(getattr(config, "REDIS_URL", "") or "").strip()
+    redis_url = str(getattr(config, "REDIS_SECURITY_URL", "") or config.REDIS_URL).strip()
     if not redis_url or redis_url.startswith("memory://"):
         return None
-
-    if _redis_client is not None:
-        return _redis_client
-
-    with _redis_lock:
-        if _redis_client is not None:
-            return _redis_client
-        try:
-            _redis_client = redis.Redis.from_url(
-                redis_url,
-                socket_connect_timeout=0.2,
-                socket_timeout=0.2,
-                decode_responses=True,
-            )
-            _redis_client.ping()
-        except Exception:
-            _redis_client = None
-            _redis_disabled_until = time.monotonic() + _REDIS_DISABLE_SECONDS
-            return None
-        return _redis_client
+    from redis_runtime import security_client
+    return security_client()
 
 
 def _redis_fixed_window(key: str, limit: int, window_seconds: int) -> tuple[bool, int, int] | None:
-    global _redis_disabled_until, _redis_error_count
     client = _get_redis_client()
     if client is None:
         return None
@@ -103,21 +75,16 @@ def _redis_fixed_window(key: str, limit: int, window_seconds: int) -> tuple[bool
     redis_key = _rate_key(key)
     window = max(1, int(window_seconds))
     try:
-        count = int(client.incr(redis_key))
-        if count == 1:
-            client.expire(redis_key, window)
-            ttl = window
-        else:
-            ttl = int(client.ttl(redis_key))
-            if ttl <= 0:
-                client.expire(redis_key, window)
-                ttl = window
-        _redis_error_count = 0
+        # One round trip and an atomic expiry, including after a connection loss.
+        count, ttl = client.eval("""
+            local n = redis.call('INCR', KEYS[1])
+            local ttl = redis.call('TTL', KEYS[1])
+            if ttl < 0 then redis.call('EXPIRE', KEYS[1], ARGV[1]); ttl = tonumber(ARGV[1]) end
+            return {n, ttl}
+        """, 1, redis_key, window)
+        count, ttl = int(count), int(ttl)
         return count <= limit, count, max(1, ttl)
     except Exception:
-        _redis_error_count += 1
-        if _redis_error_count >= 3:
-            _redis_disabled_until = time.monotonic() + _REDIS_DISABLE_SECONDS
         return None
 
 

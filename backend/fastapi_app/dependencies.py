@@ -203,6 +203,8 @@ def _get_current_user_sync(authorization: str | None, force_live=False):
         raise HTTPException(status_code=401, detail=TOKEN_REQUIRED_DETAIL)
 
     token = authorization[7:]
+    from redis_runtime import enforce_security_cutover
+    enforce_security_cutover(token)
     _init_clients()
     now = time()
 
@@ -300,6 +302,8 @@ async def _live_user_read(authorization, force_live):
 def _ticket_read(authorization):
     if not authorization or not authorization.startswith("Bearer "):
         return None, False
+    from redis_runtime import enforce_security_cutover
+    enforce_security_cutover(authorization[7:])
     claims = verified_access_claims(authorization[7:])
     who = access_tickets.identity(claims)
     if not who:

@@ -34,8 +34,6 @@ logger = logging.getLogger(__name__)
 
 _supabase = None
 _supabase_admin = None
-_refresh_redis_client = None
-_refresh_redis_disabled_until = 0.0
 _refresh_singleflight_guard = Lock()
 _refresh_singleflight_locks: dict[str, Lock] = {}
 _refresh_result_cache: dict[str, tuple[float, dict]] = {}
@@ -264,30 +262,13 @@ def _refresh_token_cache_key(refresh_token: str) -> str:
 
 
 def _get_refresh_redis_client():
-    global _refresh_redis_client, _refresh_redis_disabled_until
     if redis is None:
         return None
-    if time.monotonic() < _refresh_redis_disabled_until:
-        return None
-    redis_url = str(getattr(config, "REDIS_URL", "") or "").strip()
+    redis_url = str(getattr(config, "REDIS_SECURITY_URL", "") or config.REDIS_URL).strip()
     if not redis_url or redis_url.startswith("memory://"):
         return None
-    if _refresh_redis_client is not None:
-        return _refresh_redis_client
-    try:
-        _refresh_redis_client = redis.Redis.from_url(
-            redis_url,
-            decode_responses=True,
-            socket_connect_timeout=0.25,
-            socket_timeout=0.75,
-            health_check_interval=30,
-        )
-        _refresh_redis_client.ping()
-        return _refresh_redis_client
-    except Exception:
-        _refresh_redis_client = None
-        _refresh_redis_disabled_until = time.monotonic() + 30
-        return None
+    from redis_runtime import security_client
+    return security_client()
 
 
 def _prune_refresh_result_cache(now: float | None = None):
@@ -1339,6 +1320,13 @@ def refresh_token():
 
         if refreshed_session:
             refreshed_access_token = str(refreshed_session.get("access_token") or "")
+            from redis_runtime import enforce_security_cutover
+            from fastapi import HTTPException as ApiHTTPException
+            try:
+                enforce_security_cutover(refreshed_access_token)
+            except ApiHTTPException:
+                return _json({"error": "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại."},
+                             401, clear_refresh=True)
             refreshed_payload = _decode_access_token_payload(refreshed_access_token)
             refreshed_user_id = str(
                 refreshed_payload.get("sub") or ""

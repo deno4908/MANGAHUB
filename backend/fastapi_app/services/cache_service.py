@@ -10,17 +10,7 @@ from collections import OrderedDict
 from typing import Optional
 from serverless_runtime import writable_path
 
-try:
-    import redis
-    from config import config
-    _redis_client = redis.from_url(config.REDIS_URL, decode_responses=True,
-                                   socket_connect_timeout=3, socket_timeout=5)
-    # Test connection
-    _redis_client.ping()
-    _use_redis = True
-except Exception:
-    _redis_client = None
-    _use_redis = False
+from config import config
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
     raw = str(os.getenv(name, "")).strip()
@@ -212,24 +202,25 @@ class _InMemoryCache:
 class _RedisCache:
     """Redis-based cache."""
 
-    def __init__(self, client):
+    def __init__(self, client, prefix=""):
         self._client = client
+        self.prefix = prefix
 
     def get(self, key: str) -> Optional[str]:
-        return self._client.get(key)
+        return self._client.get(self.prefix + key)
 
     def set(self, key: str, value: str, ttl: int = 300):
-        self._client.setex(key, ttl, value)
+        self._client.setex(self.prefix + key, ttl, value)
 
     def add(self, key: str, value: str, ttl: int = 300) -> bool:
-        return bool(self._client.set(key, value, ex=ttl, nx=True))
+        return bool(self._client.set(self.prefix + key, value, ex=ttl, nx=True))
 
     def delete(self, key: str):
-        self._client.delete(key)
+        self._client.delete(self.prefix + key)
 
     def get_many(self, keys):
         keys = list(dict.fromkeys(keys))
-        return dict(zip(keys, self._client.mget(keys))) if keys else {}
+        return dict(zip(keys, self._client.mget([self.prefix + key for key in keys]))) if keys else {}
 
     def set_many(self, values, ttl=300):
         if not values:
@@ -237,13 +228,13 @@ class _RedisCache:
         # One network round trip for the whole page, preserving per-key expiry.
         with self._client.pipeline(transaction=False) as pipeline:
             for key, value in values.items():
-                pipeline.setex(key, ttl, value)
+                pipeline.setex(self.prefix + key, ttl, value)
             pipeline.execute()
 
     def flush_pattern(self, pattern: str):
         """Delete keys matching a pattern."""
         batch = []
-        for key in self._client.scan_iter(match=pattern, count=200):
+        for key in self._client.scan_iter(match=self.prefix + pattern, count=200):
             batch.append(key)
             if len(batch) >= 200:
                 self._client.delete(*batch)
@@ -261,8 +252,8 @@ class _RedisCache:
             groups.setdefault(namespace, []).append(pattern)
         for namespace, matchers in groups.items():
             batch = []
-            for key in self._client.scan_iter(match=namespace, count=500):
-                if any(fnmatchcase(key, pattern) for pattern in matchers):
+            for key in self._client.scan_iter(match=self.prefix + namespace, count=500):
+                if any(fnmatchcase(key[len(self.prefix):], pattern) for pattern in matchers):
                     batch.append(key)
                     if len(batch) >= 200:
                         self._client.delete(*batch)
@@ -271,10 +262,6 @@ class _RedisCache:
                 self._client.delete(*batch)
 
 
-# Export single cache instance
-if _use_redis:
-    cache = _RedisCache(_redis_client)
-    print("[Cache] Redis connected")
-else:
-    cache = _InMemoryCache()
-    print("[Cache] Redis not available, using local persistent cache")
+# No import-time network checks: connection pools open on the first real command.
+from fastapi_app.services.redis_failover import FailoverCache
+cache = FailoverCache(_RedisCache, _InMemoryCache)

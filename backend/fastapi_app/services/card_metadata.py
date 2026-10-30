@@ -3,6 +3,7 @@ import asyncio
 from serverless_runtime import create_task
 import json
 import re
+from contextvars import ContextVar
 
 from fastapi import HTTPException
 from fastapi_app.services import mangadex_service as mdx, truyenqq_service as qq
@@ -13,6 +14,7 @@ _qq_slots = asyncio.Semaphore(3)
 _pending_reads = set()
 _pending_identifiers = {}
 _BATCH_WAIT_SECONDS = 3.0
+_interactive_deadline = ContextVar("card_metadata_deadline", default=None)
 
 
 def _retain(task, identifiers=()):
@@ -87,6 +89,9 @@ async def _qq_metadata(identifier, title=None, *, source_timeout=None):
         return None  # An old OTruyen ObjectId does not identify a QQ book.
     async def fetch():
         async with _qq_slots:
+            deadline = _interactive_deadline.get()
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                raise asyncio.TimeoutError()
             try:
                 value = (await qq.run_live("saved_metadata", identifier, title)
                          if valid_title
@@ -99,7 +104,9 @@ async def _qq_metadata(identifier, title=None, *, source_timeout=None):
                     return None
                 raise
     # Include time queued for the source semaphore in an interactive deadline.
-    return await asyncio.wait_for(fetch(), source_timeout) if source_timeout else await fetch()
+    deadline = _interactive_deadline.get()
+    remaining = max(0, deadline - asyncio.get_running_loop().time()) if deadline is not None else source_timeout
+    return await asyncio.wait_for(fetch(), remaining) if remaining is not None else await fetch()
 
 
 def _from_mdx(raw):
@@ -183,8 +190,15 @@ async def get_many(identifiers, titles=None, *, source_timeout=None):
             result[identifier] = await _qq_metadata(identifier, (titles or {}).get(identifier), source_timeout=source_timeout)
         except (HTTPException, RuntimeError, asyncio.TimeoutError):
             pass
-    jobs = ([_retain(create_task(manga_dex()), tuple(missing_mdx))] if missing_mdx else [])
-    jobs.extend(_retain(create_task(truyen_qq(identifier)), (identifier,)) for identifier in missing_qq)
+    # Every queued QQ job shares the batch's deadline. Starting a new relative
+    # timeout after each thread-backed cache lookup can serially extend the wait.
+    context = _interactive_deadline.set(asyncio.get_running_loop().time() + source_timeout
+                                        if source_timeout is not None else None)
+    try:
+        jobs = ([_retain(create_task(manga_dex()), tuple(missing_mdx))] if missing_mdx else [])
+        jobs.extend(_retain(create_task(truyen_qq(identifier)), (identifier,)) for identifier in missing_qq)
+    finally:
+        _interactive_deadline.reset(context)
     if jobs:
         # Return the ready labels without making every card wait for one slow
         # source. Shared reads finish warming the cache for the client's retry.

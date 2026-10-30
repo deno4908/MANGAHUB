@@ -46,6 +46,11 @@ class Config:
 
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    REDIS_FALLBACK_URL: str = os.getenv("REDIS_FALLBACK_URL", "")
+    REDIS_SECURITY_URL: str = os.getenv("REDIS_SECURITY_URL", "")
+    REDIS_CONNECT_TIMEOUT_SECONDS: float = max(0.05, min(2.0, float(os.getenv("REDIS_CONNECT_TIMEOUT_SECONDS", "0.35"))))
+    REDIS_SOCKET_TIMEOUT_SECONDS: float = max(0.05, min(2.0, float(os.getenv("REDIS_SOCKET_TIMEOUT_SECONDS", "0.5"))))
+    REDIS_RECOVERY_CHECK_SECONDS: int = max(30, int(os.getenv("REDIS_RECOVERY_CHECK_SECONDS", "60")))
 
     # CORS
     FRONTEND_URL: str = os.getenv(

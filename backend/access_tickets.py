@@ -43,8 +43,8 @@ class Changed(Rejected):
 def _db():
     global _client
     if _client is None:
-        _client = redis.Redis.from_url(config.REDIS_URL, decode_responses=True,
-                                      socket_connect_timeout=1, socket_timeout=1)
+        from redis_runtime import security_client
+        _client = security_client()
     return _client
 
 
@@ -83,6 +83,10 @@ def _read_guards(client, who):
 
 
 def _check_guards(values, who):
+    from redis_runtime import security_cutover
+    cutoff = security_cutover()
+    if cutoff is not None and (not who.get("started") or who["iat"] <= cutoff):
+        raise Rejected("Login predates security store migration")
     if any(values[3:5]):
         raise Unavailable("Quyền truy cập đang được cập nhật. Vui lòng thử lại.")
     if values[5]:

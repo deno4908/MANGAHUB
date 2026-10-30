@@ -15,6 +15,7 @@ from config import config
 from flask_app import create_app
 from flask_app.auth.credentials import get_private_key
 from fastapi_app.main import app as api_app
+from fastapi_app.services.redis_failover import RedisRecoveryMiddleware
 
 
 class AuthGatewayMiddleware:
@@ -43,6 +44,7 @@ def auth_health():
 
 
 app.add_middleware(AuthGatewayMiddleware, auth_app=auth_app)
+app.add_middleware(RedisRecoveryMiddleware)
 app.add_middleware(RequestTasksMiddleware)
 
 
@@ -56,13 +58,18 @@ async def scheduled_maintenance(request: Request):
     from fastapi_app.main import _run_database_cleanup_once
     from fastapi_app.services.chapter_checker import _check_new_chapters
     from vip_access import revoke_expired_vips
+    from fastapi_app.services.cache_service import cache
 
     async def expire_vips():
         db = get_supabase_admin()
         await asyncio.to_thread(revoke_expired_vips, db, force=True)
 
+    async def check_redis():
+        if cache.recovery_due():
+            await asyncio.to_thread(cache.check_primary)
+
     jobs = [asyncio.create_task(job()) for job in
-            (_run_database_cleanup_once, _check_new_chapters, expire_vips)]
+            (_run_database_cleanup_once, _check_new_chapters, expire_vips, check_redis)]
     done, pending = await asyncio.wait(jobs, timeout=240)
     for job in pending:
         job.cancel()

@@ -31,7 +31,7 @@ def prepare(frontend_url):
         "ALLOW_DEV_SECRET_FALLBACK": "false", "CORS_ALLOW_LOCALHOST": "false",
         "SECURITY_REQUIRE_REDIS": "true",
         "OCR_ENABLED": "false",
-        "REDIS_URL": values.get("REDIS_URL") if str(values.get("REDIS_URL") or "").startswith("rediss://") else "REPLACE_WITH_REDIS_TLS_CONNECTION_URL",
+        "REDIS_URL": values.get("REDIS_URL") if str(values.get("REDIS_URL") or "").startswith(("rediss://", "valkeys://")) else "REPLACE_WITH_REDIS_TLS_CONNECTION_URL",
         "SUPABASE_URL": values.get("SUPABASE_URL") or "REPLACE_WITH_SUPABASE_URL",
         "SUPABASE_KEY": values.get("SUPABASE_KEY") or "REPLACE_WITH_SUPABASE_ANON_KEY",
         "SUPABASE_SERVICE_KEY": values.get("SUPABASE_SERVICE_KEY") or "REPLACE_WITH_SUPABASE_SERVICE_ROLE_KEY",
@@ -41,6 +41,10 @@ def prepare(frontend_url):
         "CRON_SECRET": secrets.token_hex(32),
     }
     for name in ("RECAPTCHA_SECRET_KEY", "RECAPTCHA_REQUIRED", "SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL", "SMTP_USE_SSL", "SMTP_USE_TLS", "OPENROUTER_API_KEY"):
+        if values.get(name):
+            result[name] = values[name]
+    for name in ("REDIS_FALLBACK_URL", "REDIS_SECURITY_URL", "REDIS_CONNECT_TIMEOUT_SECONDS",
+                 "REDIS_SOCKET_TIMEOUT_SECONDS", "REDIS_RECOVERY_CHECK_SECONDS"):
         if values.get(name):
             result[name] = values[name]
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
