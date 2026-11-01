@@ -52,7 +52,7 @@ export function needsSavedCover(value: unknown): boolean {
   return !usable(raw) || legacyCover(raw);
 }
 
-/** Prefer fresh source metadata; recover stale filenames with the current cover endpoint. */
+/** Load MangaDex covers through our image client; recover stale filenames by ID. */
 export function resolveSavedMangaCover(identifier: string, cover?: string, storedFallback?: string): { primary: string; fallback: string } {
   const id = normalizeMangaDexId(identifier) || String(identifier || '').trim();
   const current = id ? thumbUrl('', id) : PLACEHOLDER;
@@ -69,6 +69,12 @@ export function resolveSavedMangaCover(identifier: string, cover?: string, store
       primary = /^https?:\/\//i.test(target) && /^(?:uploads\.mangadex\.org|.+\.mangadex\.network)$/i.test(new URL(target).hostname)
         ? target : `${API_BASE}${url.pathname}${url.search}`;
     } else if (!/^https?:\/\//i.test(primary)) primary = thumbUrl(primary, id);
+    const source = new URL(primary, API_BASE);
+    if (/^https?:$/.test(source.protocol) && /^(?:uploads\.mangadex\.org|.+\.mangadex\.network)$/i.test(source.hostname)) {
+      // A browser can be redirected to an interactive challenge by the CDN.
+      // Use the authenticated proxy immediately, sharing coverCache downloads.
+      primary = `${API_BASE}/api/images/img?url=${encodeURIComponent(source.href)}`;
+    }
   } catch { primary = current; }
   const previous = String(storedFallback || '').trim();
   return { primary, fallback: current !== primary ? current : (usable(previous) && !legacyCover(previous) && previous !== primary ? previous : PLACEHOLDER) };

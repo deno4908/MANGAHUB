@@ -149,7 +149,7 @@ async def _get_mangadex_client() -> httpx.AsyncClient:
             trust_env=False,
             limits=httpx.Limits(max_connections=12, max_keepalive_connections=6),
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "User-Agent": "MangaHub/1.0 (MangaDex API client)",
                 "Accept": "image/*,*/*;q=0.8",
                 "Referer": "https://mangadex.org/",
                 "Origin": "https://mangadex.org",
@@ -662,7 +662,13 @@ def _request_headers_for_url(url: str) -> dict[str, str]:
         "Accept-Language": "en-US,en;q=0.9",
     }
     if _is_mangadex_host(host):
-        headers = {**base_headers, "Referer": "https://mangadex.org/"}
+        # The CDN, like the API, can redirect browser-looking requests to an
+        # interactive challenge. Both HTTPX and curl use this per-request identity.
+        headers = {
+            **base_headers,
+            "User-Agent": "MangaHub/1.0 (MangaDex API client)",
+            "Referer": "https://mangadex.org/",
+        }
         match = re.search(r"/covers/([0-9a-f-]{36})/", parsed.path, flags=re.IGNORECASE)
         if match:
             headers["Referer"] = f"https://mangadex.org/title/{match.group(1)}"

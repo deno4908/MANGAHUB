@@ -35,8 +35,19 @@ it('replaces old CDN filenames, old proxies and placeholders with current source
 it('lets expired MangaDex cover filenames fall back to the current cover by manga ID', () => {
   const url = `https://uploads.mangadex.org/covers/${mdx}/outdated.jpg.256.jpg`;
   const cover = resolveSavedMangaCover(mdx, `https://old-backend.example/api/images/img?url=${encodeURIComponent(url)}`);
-  expect(cover.primary).toBe(url);
+  expect(new URL(cover.primary).pathname).toBe('/api/images/img');
+  expect(new URL(cover.primary).searchParams.get('url')).toBe(url);
   expect(cover.fallback).toContain(`/api/manga/mangadex-cover/${mdx}`);
   expect(resolveSavedMangaCover('local-book', 'https://own.supabase.co/storage/v1/object/public/covers/own.jpg').primary)
     .toContain('https://own.supabase.co/storage/');
+});
+
+it('loads direct MangaDex covers through the proxy immediately and keeps proxy URLs stable', () => {
+  const source = `https://uploads.mangadex.org/covers/${mdx}/current.jpg.512.jpg`;
+  const first = resolveSavedMangaCover(mdx, source);
+  const second = resolveSavedMangaCover(mdx, first.primary, first.fallback);
+  expect(first.primary).toContain('/api/images/img?url=');
+  expect(new URL(first.primary).searchParams.get('url')).toBe(source);
+  expect(second).toEqual(first);
+  expect(first.fallback).toContain(`/api/manga/mangadex-cover/${mdx}`);
 });

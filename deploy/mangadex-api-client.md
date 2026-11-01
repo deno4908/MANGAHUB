@@ -26,3 +26,9 @@ If Vercel is still blocked, inspect the backend source error log (without
 copying cookies or challenge query strings). A successful local API request
 does not prove that Vercel's outbound address is accepted. A persistent upstream
 verification requirement needs an access method supported by MangaDex.
+
+The same identity is used for MangaDex image proxy requests. Catalog cards and
+saved covers route MangaDex CDN URLs through the authenticated image proxy
+immediately, rather than waiting for a direct browser image to fail first.
+The private in-memory cover cache still shares downloads; image host validation,
+payload validation, and access policy checks remain enabled.
