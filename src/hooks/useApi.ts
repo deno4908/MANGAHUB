@@ -2,6 +2,7 @@
  * React Query hooks for all API endpoints.
  */
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { searchPageOptions } from '@/lib/searchQuery';
 import {
   mangaApi,
   bookmarkApi,
@@ -545,33 +546,12 @@ export function useChapter(chapterId: string | undefined) {
 export function useSearch(keyword: string, page = 1, enabled = true, genres: string[] = []) {
   const normalizedKeyword = keyword.trim();
   const showMature = useSettingsStore(s => s.settings.privacy.showMatureContent);
+  const options = searchPageOptions(normalizedKeyword, page, genres, showMature);
   return useQuery({
-    queryKey: ["manga", "search", "paged-v3", normalizedKeyword, page, [...genres].sort(), showMature],
-    queryFn: async ({ signal }) => {
-      if (!normalizedKeyword)
-        return {
-          items: [] as Manga[],
-          totalItems: 0,
-          currentPage: 1,
-          totalPages: 1,
-        };
-      const data = await mangaApi.search(normalizedKeyword, page, {
-        limit: 24, showMature, genreSlugs: genres,
-        skipAuth: true,
-        attachRatings: false,
-        mangaDexAttachLatest: false,
-        mangaDexTimeoutMs: 10_000,
-        timeoutMs: 20_000,
-        signal,
-      });
-      return adaptListData(data);
-    },
+    ...options,
     enabled: enabled && normalizedKeyword.length > 0,
-    staleTime: 5 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
-    placeholderData: (previousData) => previousData,
-    refetchOnWindowFocus: false,
-    retry: 1,
+    placeholderData: (previousData, previousQuery) =>
+      JSON.stringify(previousQuery?.queryKey[3]) === JSON.stringify(options.queryKey[3]) ? previousData : undefined,
   });
 }
 

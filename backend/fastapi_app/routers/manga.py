@@ -5812,6 +5812,34 @@ async def _search_uploads(keyword, db, limit=None):
         "manga_type": row.get("manga_type", "manga")} for row in rows]
 
 
+async def _search_mangadex_window(*, keyword, offset, limit, translated_language,
+                                attach_latest, genres, show_mature):
+    # Stable native blocks share the existing bounded source cache across UI
+    # pages. Page two no longer creates a different upstream query just because
+    # page one contained twenty QQ results and only four MangaDex results.
+    block_size = 96
+    start = offset // block_size * block_size
+    async def load(begin):
+        return await mangadex_service.search_manga(
+            keyword=keyword, page=begin // block_size + 1, limit=block_size, offset_override=begin,
+            translated_language=translated_language, attach_latest=attach_latest,
+            included_tag_slugs=genres,
+            content_ratings=["safe", "suggestive", "erotica", "pornographic"] if show_mature else ["safe", "suggestive"])
+    first = await load(start)
+    pagination = ((first.get("data") or {}).get("params") or {}).get("pagination") or {}
+    total = min(10000, int(pagination.get("totalItems") or 0))
+    rows = _otruyen_payload_items(first)
+    # Do not ask beyond the source's end: native search can redirect that
+    # offset back to its last page, which would repeat titles at the tail.
+    if limit and offset + limit > start + block_size and start + block_size < total:
+        second = await load(start + block_size)
+        rows = [*rows, *_otruyen_payload_items(second)]
+    # Slice before moderation filtering: removing an earlier hidden title must
+    # never shift a later page backward and repeat an already displayed title.
+    selected = rows[offset - start:offset - start + limit] if offset < total else []
+    return _search_payload(selected, total, 1, limit or 1)
+
+
 @router.get("/search")
 async def search(
     keyword: str = Query(..., min_length=1),
@@ -5858,15 +5886,13 @@ async def search(
     mdx_total = 0
     if include_mangadex:
         # Offset the MDX window by the finite prefix so surplus results carry
-        # into page two. Fetch only the missing slots, never discard a page tail.
+        # into page two while adjacent pages reuse the same source blocks.
         mdx_offset = max(0, offset - len(prefix))
         slots = limit - len(items)
         try:
-            task = mangadex_service.search_manga(keyword=keyword, page=page,
-                limit=slots or 1, offset_override=mdx_offset,
+            task = _search_mangadex_window(keyword=keyword, offset=mdx_offset, limit=slots,
                 translated_language=mangadex_translated_language,
-                attach_latest=mangadex_attach_latest, included_tag_slugs=sorted(genres),
-                content_ratings=["safe", "suggestive", "erotica", "pornographic"] if show_mature else ["safe", "suggestive"])
+                attach_latest=mangadex_attach_latest, genres=sorted(genres), show_mature=show_mature)
             mdx = await asyncio.wait_for(task, mangadex_timeout_ms / 1000) if mangadex_timeout_ms > 0 else await task
             pagination = ((mdx.get("data") or {}).get("params") or {}).get("pagination") or {}
             mdx_total = min(10000, int(pagination.get("totalItems") or 0))

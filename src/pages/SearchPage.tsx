@@ -1,6 +1,9 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { searchPageOptions } from '@/lib/searchQuery';
+import { warmCovers } from '@/lib/coverCache';
+import { resolveSavedMangaCover } from '@/lib/savedManga';
 import {
   useSearch,
   useHomepage,
@@ -48,6 +51,7 @@ const dedupeManga = (items: Manga[]): Manga[] => {
 };
 
 const SearchPage = () => {
+  const queryClient = useQueryClient();
   const showMatureContent = useSettingsStore((s) => s.settings.privacy.showMatureContent);
   const [searchParams, setSearchParams] = useSearchParams();
   const urlQuery = searchParams.get("q") || "";
@@ -110,6 +114,42 @@ const SearchPage = () => {
   const isLoading = activeQuery.isLoading;
   const isSearchFetching = activeQuery.isFetching;
   const isSearchPlaceholderData = activeQuery.isPlaceholderData;
+  const genreKey = [...selectedSlugs].sort().join(',');
+  const totalPages = searchData?.totalPages || 1;
+  const canWarmSearch = !!trimmedDebouncedQuery && query.trim() === trimmedDebouncedQuery
+    && !isSearchFetching && !isSearchPlaceholderData && searchData?.currentPage === page
+    && !combinedQuery.data?.unavailableSources.length;
+  const prefetchSearchPage = useCallback((target: number) => {
+    const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
+    if (!canWarmSearch || target === page || target < 1 || target > totalPages
+        || document.visibilityState === 'hidden' || connection?.saveData || /(^|-)2g$/.test(connection?.effectiveType || '')) return;
+    return queryClient.prefetchQuery(searchPageOptions(trimmedDebouncedQuery, target,
+      genreKey ? genreKey.split(',') : [], showMatureContent));
+  }, [canWarmSearch, page, totalPages, queryClient, trimmedDebouncedQuery, genreKey, showMatureContent]);
+  useEffect(() => {
+    if (!canWarmSearch || page >= totalPages) return;
+    let live = true;
+    let releaseCovers = () => {};
+    const options = searchPageOptions(trimmedDebouncedQuery, page + 1,
+      genreKey ? genreKey.split(',') : [], showMatureContent);
+    // Only the adjacent page; this does not recursively crawl later pages.
+    const timer = window.setTimeout(() => {
+      const request = prefetchSearchPage(page + 1);
+      if (!request) return;
+      void request.then(() => {
+        const next = queryClient.getQueryData(options.queryKey);
+        if (!live || !next || next.unavailableSources.length) return;
+        releaseCovers = warmCovers(next.items.slice(0, 6)
+          .map(item => resolveSavedMangaCover(item.id, item.cover, item.coverProxy, 256).primary));
+      });
+    }, 120);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+      // Give newly mounted cards a chance to acquire the same image bytes.
+      queueMicrotask(releaseCovers);
+    };
+  }, [canWarmSearch, page, totalPages, trimmedDebouncedQuery, genreKey, showMatureContent, prefetchSearchPage, queryClient]);
   const toggleGenre = (g: string) => {
     setPage(1);
     setSelectedGenres((prev) =>
@@ -202,6 +242,7 @@ const SearchPage = () => {
                     currentPage={page}
                     totalPages={searchData?.totalPages || 1}
                     onPageChange={setPage}
+                    onPageIntent={prefetchSearchPage}
                   />
                 ) : null}
               </>

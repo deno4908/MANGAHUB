@@ -1,5 +1,7 @@
 import asyncio
 from unittest.mock import AsyncMock
+import math
+import pytest
 
 from fastapi_app.routers import manga
 from test_catalog_request_logic import EmptyDB, isolate, page
@@ -123,3 +125,67 @@ def test_http_contract_reads_the_requested_page_and_validates_suggestion_limits(
         assert suggestions.status_code == 200
         assert len(suggestions.json()['data']['items']) == 6
         assert client.get('/api/manga/suggestions', params={'keyword': 'one', 'source': 'mangadex', 'limit': 7}).status_code == 422
+
+
+@pytest.mark.parametrize('total', [0, 4, 94, 96, 100, 10000])
+def test_cached_block_boundaries_keep_the_exact_result_stream_and_short_last_page(monkeypatch, total):
+    isolate(monkeypatch)
+    qq = [{'slug': f'qq-{n}'} for n in range(20)]
+    monkeypatch.setattr(manga.truyenqq_service, 'search_manga', AsyncMock(return_value=page(qq, 20)))
+    async def source(**kwargs):
+        start, size = kwargs['offset_override'], kwargs['limit']
+        assert start == 0 or start < total, 'Do not trigger native last-page redirection'
+        return page([{'slug': f'mdx-{n}'} for n in range(start, min(total, start + size))], total)
+    monkeypatch.setattr(manga.mangadex_service, 'search_manga', source)
+    async def read():
+        found = []
+        for number in range(1, math.ceil((total + 20) / 24) + 1):
+            kwargs = options()
+            kwargs['page'] = number
+            result = await manga.search(**kwargs)
+            found.extend(row['slug'] for row in result['data']['items'])
+            assert len(result['data']['items']) == min(24, total + 20 - (number - 1) * 24)
+        assert found == [*(row['slug'] for row in qq), *(f'mdx-{n}' for n in range(total))]
+    asyncio.run(read())
+
+
+def test_real_source_cache_serves_four_ui_pages_with_one_upstream_request(monkeypatch):
+    from unittest.mock import Mock
+    from uuid import UUID
+    from fastapi_app.services import mangadex_service as mdx
+    isolate(monkeypatch)
+    values, calls = {}, []
+    store = Mock()
+    store.get.side_effect = values.get
+    store.set.side_effect = lambda key, value, **kwargs: values.__setitem__(key, value)
+    store.set_many.side_effect = lambda entries, **kwargs: values.update(entries)
+    monkeypatch.setattr(mdx, 'cache', store)
+    monkeypatch.setattr(manga.truyenqq_service, 'search_manga', AsyncMock(return_value=page([{'slug': f'qq-{n}'} for n in range(20)], 20)))
+    async def upstream(path, params):
+        calls.append(dict(params))
+        return {'total': 2754, 'data': [{'id': str(UUID(int=n + 1)), 'attributes': {'title': {'en': f'Book {n}'}}}
+            for n in range(params['offset'], params['offset'] + params['limit'])]}
+    monkeypatch.setattr(mdx, '_request_json', upstream)
+    async def read():
+        found = []
+        for number in range(1, 7):
+            kwargs = options()
+            kwargs['page'] = number
+            result = await manga.search(**kwargs)
+            assert len(result['data']['items']) == 24
+            found.extend(row['slug'] for row in result['data']['items'])
+            assert len(calls) == (1 if number <= 4 else 2)
+        assert len(set(found)) == len(found)
+        assert [call['offset'] for call in calls] == [0, 96]
+    asyncio.run(read())
+
+
+def test_hidden_titles_before_the_requested_window_do_not_shift_later_pages(monkeypatch):
+    isolate(monkeypatch)
+    monkeypatch.setattr(manga, '_get_hidden_slugs', AsyncMock(return_value={'mdx-1': 'hidden'}))
+    monkeypatch.setattr(manga.truyenqq_service, 'search_manga', AsyncMock(return_value=page([{'slug': f'qq-{n}'} for n in range(20)], 20)))
+    monkeypatch.setattr(manga.mangadex_service, 'search_manga', AsyncMock(return_value=page([{'slug': f'mdx-{n}'} for n in range(96)], 200)))
+    kwargs = options()
+    kwargs['page'] = 2
+    result = asyncio.run(manga.search(**kwargs))
+    assert [row['slug'] for row in result['data']['items']] == [f'mdx-{n}' for n in range(4, 28)]
