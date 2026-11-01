@@ -89,5 +89,18 @@ chapters are all unavailable; those no longer inflate popular/A-Z page counts.
 Homepage image failures remain local to their cards. The previous valid source
 snapshot is retained during a transient refresh failure.
 
+The MangaDex filter panel uses its native 77-tag catalog (format, genre, theme,
+content), without TruyenQQ-only categories or speculative aliases. Categories
+and cards share the Mature preference; sensitive options such as Sexual
+Violence appear only when enabled. Turning Mature off clears a now-hidden
+selected tag without discarding the reader's other filters.
+
+Browse warms one adjacent MangaDex page shortly after the visible page settles,
+using the exact query key, filters and frozen snapshot of foreground navigation.
+Save-data/slow-network and hidden-document guards remain active. A typed page
+number and touch/pointer intent can start loading a deeper page before submit.
+The paginated MangaDex grid renders all available rows together without the
+12-card batching or index-based entrance delay; other grids keep their defaults.
+
 Official API schema:
 https://api.mangadex.org/docs/static/api.yaml

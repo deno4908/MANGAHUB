@@ -6,6 +6,7 @@ import { adaptListData } from '@/lib/adapters';
 import TagBadge from './TagBadge';
 import { useSearchParams } from 'react-router-dom';
 import { X, SlidersHorizontal, TrendingUp, Clock3, Star, ArrowUpAZ, Languages, ChevronDown } from 'lucide-react';
+import { MANGADEX_TAG_GROUPS } from '@/lib/mangaDexTags';
 
 const statusVi: Record<string, string> = {
   ongoing: 'Đang ra',
@@ -81,10 +82,10 @@ const translatedLanguageOptions = [
 
 const FilterPanel = () => {
   const { filters, setFilter, resetFilters } = useMangaStore();
-  const { data: categories = [] } = useCategories();
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
   const isMangaDexSource = searchParams.get('source') === 'mangadex';
+  const { data: categories = [] } = useCategories(isMangaDexSource ? 'mangadex' : 'truyenqq');
 
   const prefetchGenre = (slug: string, pages: number[] = [1]) => {
     if (!slug) return;
@@ -174,23 +175,30 @@ const FilterPanel = () => {
       {/* Genres */}
       <div>
         <h4 className="text-xs font-bold mb-2 text-foreground/80 uppercase tracking-wider">Thể loại</h4>
-        <div className="flex flex-wrap gap-1.5">
-          {categories.map(cat => (
-            <TagBadge
-              key={cat.slug}
-              tag={cat.name}
-              active={filters.genres.includes(cat.slug)}
-              onMouseEnter={() => {
-                if (cat.source === 'mangadex') return;
-                prefetchGenre(cat.slug, [1]);
-              }}
-              onClick={() => {
-                if (cat.source !== 'mangadex') {
-                  prefetchGenre(cat.slug, [1]);
-                }
-                toggleGenre(cat.slug);
-              }}
-            />
+        <div className="space-y-3">
+          {(isMangaDexSource ? MANGADEX_TAG_GROUPS : [{ group: 'all', label: '' }]).map(section => (
+            <div key={section.group}>
+              {section.label && <h5 className="mb-1.5 text-xs font-semibold text-muted-foreground">{section.label}</h5>}
+              <div className="flex flex-wrap gap-1.5">
+                {categories.filter(cat => section.group === 'all' || ('group' in cat && cat.group === section.group)).map(cat => (
+                  <TagBadge
+                    key={cat.slug}
+                    tag={cat.name}
+                    active={filters.genres.includes(cat.slug)}
+                    onMouseEnter={() => {
+                      if (isMangaDexSource || cat.source === 'mangadex') return;
+                      prefetchGenre(cat.slug, [1]);
+                    }}
+                    onClick={() => {
+                      if (!isMangaDexSource && cat.source !== 'mangadex') {
+                        prefetchGenre(cat.slug, [1]);
+                      }
+                      toggleGenre(cat.slug);
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
           ))}
         </div>
       </div>

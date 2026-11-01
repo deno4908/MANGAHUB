@@ -1711,7 +1711,7 @@ const BrowseManga = () => {
   const baseMangaDexCatalogLimit = isMangaDexSourceTab
     ? (showMatureContent ? MANGADEX_CATALOG_LIMIT_TAB_WITH_MATURE : MANGADEX_CATALOG_LIMIT_TAB_DEFAULT)
     : (showMatureContent ? MANGADEX_CATALOG_LIMIT_WITH_MATURE : MANGADEX_CATALOG_LIMIT_DEFAULT);
-  const categoriesQuery = useCategories();
+  const categoriesQuery = useCategories(isMangaDexSourceTab ? 'mangadex' : 'all');
   const categories = categoriesQuery.data || [];
 
   const setBrowseSource = (nextSource: BrowseSourceTab) => {
@@ -2360,7 +2360,7 @@ const BrowseManga = () => {
     queueMicrotask(release);
     return () => { intentGeneration.current++; queueMicrotask(prefetchedCovers.current); };
   }, [activeSource, page, normalizedSearch, mangaDexTranslatedLanguage, filters.status,
-    filters.sort, filters.genres, showMatureContent]);
+    filters.sort, filters.genres, filters.year, filters.minRating, showMatureContent]);
   const prefetchBrowsePage = useCallback((target: number) => {
     const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
     if (!browseUrlReady || target === page || pagePrefetchBusy.current || connection?.saveData || /(^|-)2g$/.test(connection?.effectiveType || '')) return;
@@ -3171,7 +3171,8 @@ const BrowseManga = () => {
   }, [sortParam, filters.sort, setFilter]);
 
   useEffect(() => {
-    const normalizedGenres = parseBrowseGenreParams(genreParam || tagParam || '');
+    const normalizedGenres = parseBrowseGenreParams(genreParam || tagParam || '')
+      .filter(slug => showMatureContent || !isMatureManga({ tags: [slug] }));
     const normalizedGenreKey = normalizedGenres.join(',');
     const normalizedSort = normalizeBrowseSortParam(sortParam);
     const normalizedStatus = normalizeBrowseStatusParam(statusParam);
@@ -3229,6 +3230,7 @@ const BrowseManga = () => {
     minRatingParam,
     translatedLanguageParam,
     isMangaDexSourceTab,
+    showMatureContent,
     filters.genres,
     filters.sort,
     filters.status,
@@ -4498,23 +4500,27 @@ const BrowseManga = () => {
       ? categoryQuery.isSuccess
       : listQuery.isSuccess;
   const currentPage = hasResolvedTotalPages ? Math.min(page, totalPages) : page;
-  const warmedNextQQPage = useRef('');
+  const warmedNextBrowsePage = useRef('');
   useEffect(() => {
-    if ((!useOTruyenFilteredServerMode && !(useQQListMode && !isClientPaginationMode))
-        || !canQueryQQSelection || isFetching || isLoading
+    const pagedMangaDex = useMangaDexLatestFeedMode || useMangaDexServerSearchMode;
+    if ((!pagedMangaDex && !useOTruyenFilteredServerMode && !(useQQListMode && !isClientPaginationMode))
+        || (!pagedMangaDex && !canQueryQQSelection) || isFetching || isLoading
         || !hasResolvedTotalPages || page >= totalPages) return;
-    const nextKey = JSON.stringify((useOTruyenFilteredServerMode ? qqPageOptions(page + 1) : listPageOptions(page + 1)).queryKey);
-    if (warmedNextQQPage.current === nextKey) return;
+    const nextKey = JSON.stringify(useMangaDexLatestFeedMode ? getMangaDexLatestFeedQueryKey(page + 1)
+      : useMangaDexServerSearchMode ? getMangaDexServerSearchQueryKey(page + 1)
+      : (useOTruyenFilteredServerMode ? qqPageOptions(page + 1) : listPageOptions(page + 1)).queryKey);
+    if (warmedNextBrowsePage.current === nextKey) return;
     // Warm just one adjacent page after the current list has settled. Use the
     // existing filters, access checks, save-data guard and foreground cache key.
     const timer = window.setTimeout(() => {
       if (document.visibilityState === 'hidden' || pagePrefetchBusy.current) return;
-      warmedNextQQPage.current = nextKey;
+      warmedNextBrowsePage.current = nextKey;
       prefetchBrowsePage(page + 1);
-    }, 500);
+    }, pagedMangaDex ? 120 : 500);
     return () => window.clearTimeout(timer);
   }, [useOTruyenFilteredServerMode, useQQListMode, isClientPaginationMode, canQueryQQSelection, isFetching, isLoading,
-    hasResolvedTotalPages, page, totalPages, qqPageOptions, listPageOptions, prefetchBrowsePage]);
+    hasResolvedTotalPages, page, totalPages, qqPageOptions, listPageOptions, prefetchBrowsePage,
+    useMangaDexLatestFeedMode, useMangaDexServerSearchMode, getMangaDexLatestFeedQueryKey, getMangaDexServerSearchQueryKey]);
   const canExpandMangaDexDemand = canExpandMangaDexCatalog;
   const isAtMangaDexLoadedLimit =
     canExpandMangaDexDemand &&
@@ -5309,7 +5315,8 @@ const BrowseManga = () => {
     if (page > totalPages) setPage(totalPages);
   }, [page, totalPages, hasResolvedTotalPages, isLoading, isFetching, isNearMangaDexLoadedLimit]);
 
-  // Adjacent source pages are warmed only after a pagination hover/focus.
+  // One adjacent page is warmed after the visible page; deeper jumps can be
+  // warmed by pagination hover, focus or a page number typed before submit.
 
   const isTabLoadingState =
     (isOTruyenSourceTab && filters.genres.length > 0 && !categoriesQuery.isSuccess && !categoriesQuery.isError) ||
@@ -5476,7 +5483,8 @@ const BrowseManga = () => {
                 <>
                   <MangaGrid
                     manga={displayItems}
-                    lazyBatch
+                    lazyBatch={!isMangaDexSourceTab}
+                    animateEntrance={!isMangaDexSourceTab}
                     initialBatchSize={12}
                     batchStep={6}
                     batchDelayMs={120}

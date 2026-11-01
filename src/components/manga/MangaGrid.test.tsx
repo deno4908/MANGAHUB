@@ -24,13 +24,31 @@ function show(items: Manga[], client: QueryClient, maxItems?: number) {
   </MemoryRouter></QueryClientProvider>);
 }
 
+it('renders all 24 paginated MangaDex cards immediately without a staggered invisible entrance', () => {
+  const client = new QueryClient();
+  vi.spyOn(mangaApi, 'getCardMetadata').mockResolvedValue({ items: {} });
+  vi.spyOn(mangaApi, 'getMangaDexLatestChapters').mockResolvedValue({ items: {} });
+  const items = Array.from({ length: 24 }, (_, n) => {
+    const id = `${String(n + 1).padStart(8, '0')}-1111-4111-8111-111111111111`;
+    return card(id, { source: 'mangadex', cover: `https://uploads.mangadex.org/covers/${id}/ready.jpg.256.jpg`,
+      chapters: [{ id: '22222222-2222-4222-8222-222222222222', number: 4 } as any] });
+  });
+  render(<QueryClientProvider client={client}><MemoryRouter>
+    <MangaGrid manga={items} lazyBatch={false} animateEntrance={false} />
+  </MemoryRouter></QueryClientProvider>);
+  const links = screen.getAllByRole('link');
+  expect(links).toHaveLength(24);
+  for (const link of links) expect(link.parentElement).toHaveStyle({ opacity: '1' });
+  client.clear();
+});
+
 it('loads a known MangaDex CDN cover immediately and recovers an expired filename through its ID', async () => {
   const client = new QueryClient();
   const id = '55555555-5555-4555-8555-555555555555';
   const cover = `https://uploads.mangadex.org/covers/${id}/fast.jpg.256.jpg`;
   show([card(id, { source: 'mangadex', cover, chapters: [{ id: '22222222-2222-4222-8222-222222222222', number: 2 } as any] })], client);
   const image = screen.getByRole('img', { name: `Readable title ${id}` });
-  expect(image).toHaveAttribute('src', cover);
+  expect(new URL(image.getAttribute('src')!).searchParams.get('url')).toBe(cover);
   fireEvent.error(image);
   await waitFor(() => expect(image.getAttribute('src')).toContain(`/api/manga/mangadex-cover/${id}`));
   client.clear();

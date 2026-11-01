@@ -67,6 +67,7 @@ const MangaPagination = ({ currentPage, totalPages, onPageChange, onPageIntent }
           type="button"
           disabled={currentPage === 1}
           onClick={() => onPageChange(currentPage - 1)}
+          onPointerDown={() => onPageIntent?.(currentPage - 1)}
           onPointerEnter={() => intendPage(currentPage - 1)} onFocus={() => intendPage(currentPage - 1)} onPointerLeave={clearIntent} onBlur={clearIntent}
           className="p-2 rounded-md bg-secondary text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
           aria-label="Trang trước"
@@ -82,6 +83,7 @@ const MangaPagination = ({ currentPage, totalPages, onPageChange, onPageIntent }
               type="button"
               key={p}
               onClick={() => onPageChange(p)}
+              onPointerDown={() => onPageIntent?.(p)}
               onPointerEnter={() => intendPage(p)} onFocus={() => intendPage(p)} onPointerLeave={clearIntent} onBlur={clearIntent}
               className={`w-9 h-9 rounded-md text-sm font-medium transition-all ${
                 currentPage === p
@@ -99,6 +101,7 @@ const MangaPagination = ({ currentPage, totalPages, onPageChange, onPageIntent }
           type="button"
           disabled={currentPage === totalPages}
           onClick={() => onPageChange(currentPage + 1)}
+          onPointerDown={() => onPageIntent?.(currentPage + 1)}
           onPointerEnter={() => intendPage(currentPage + 1)} onFocus={() => intendPage(currentPage + 1)} onPointerLeave={clearIntent} onBlur={clearIntent}
           className="p-2 rounded-md bg-secondary text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
           aria-label="Trang sau"
@@ -116,7 +119,11 @@ const MangaPagination = ({ currentPage, totalPages, onPageChange, onPageIntent }
           inputMode="numeric"
           pattern="[0-9]*"
           value={pageInput}
-          onChange={(event) => setPageInput(event.target.value.replace(/\D/g, ''))}
+          onChange={(event) => {
+            const value = event.target.value.replace(/\D/g, '');
+            setPageInput(value);
+            intendPage(Number.parseInt(value, 10));
+          }}
           placeholder="Trang"
           className="h-full w-16 rounded-md border border-border bg-card px-2 text-center text-sm font-medium text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
           aria-label={`Đến trang, từ 1 đến ${totalPages}`}

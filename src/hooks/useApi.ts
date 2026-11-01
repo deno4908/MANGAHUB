@@ -23,7 +23,6 @@ import {
   adaptCategories,
   adaptChapterPages,
   thumbUrl,
-  MANGADEX_EXTRA_GENRES,
 } from "@/lib/adapters";
 import { MANGADEX_ID_RE, normalizeMangaDexId } from "@/lib/mangaLinks";
 import { loadMangaDexChapterPages } from "@/lib/mangaDexImages";
@@ -31,6 +30,8 @@ import { invalidateMangaRealtimeQueries } from "@/lib/querySync";
 import { mangaDetailQueryKey } from "@/lib/mangaDetailQuery";
 import type { Manga } from "@/types/manga";
 import { isMatureManga } from "@/lib/contentFilter";
+import { MANGADEX_TAGS } from "@/lib/mangaDexTags";
+import { useSettingsStore } from "@/store/settingsStore";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const LOCAL_COVER_FALLBACK = "/no-cover.svg";
@@ -550,10 +551,13 @@ export function useSearch(keyword: string, page = 1, enabled = true) {
   });
 }
 
-export function useCategories() {
+export function useCategories(source: 'all' | 'mangadex' | 'truyenqq' = 'all') {
+  const showMature = useSettingsStore(s => s.settings.privacy.showMatureContent);
   return useQuery({
-    queryKey: ["manga", "categories"],
+    queryKey: ["manga", "categories", 'native-v2', source === 'mangadex' ? 'mangadex' : 'truyenqq'],
+    initialData: source === 'mangadex' ? MANGADEX_TAGS : undefined,
     queryFn: async () => {
+      if (source === 'mangadex') return MANGADEX_TAGS;
       const data = await mangaApi.getCategories();
       const otruyenCats = adaptCategories(data);
       // 'di-gioi' is an OTruyen alias of 'xuyen-khong' (both = isekai) → deduplicate
@@ -561,10 +565,14 @@ export function useCategories() {
       const ISEKAI_ALIAS_SLUGS = new Set(['di-gioi']);
       // Remove OTruyen entries that duplicate the merged isekai entry
       const filteredOtruyen = otruyenCats.filter((c) => !ISEKAI_ALIAS_SLUGS.has(c.slug));
-      // Merge MangaDex-exclusive genres (skip if same slug already exists)
-      const existingSlugs = new Set(filteredOtruyen.map((c) => c.slug));
-      const extra = MANGADEX_EXTRA_GENRES.filter((g) => !existingSlugs.has(g.slug));
-      return [...filteredOtruyen, ...extra];
+      return filteredOtruyen;
+    },
+    select: categories => {
+      const existingSlugs = new Set(categories.map(category => category.slug));
+      const visibleSource = source === 'all'
+        ? [...categories, ...MANGADEX_TAGS.filter(tag => !existingSlugs.has(tag.slug))] : categories;
+      return visibleSource.filter(category => showMature ||
+        !isMatureManga({ title: category.name, tags: [category.slug] }));
     },
     staleTime: 60 * 60 * 1000,
   });

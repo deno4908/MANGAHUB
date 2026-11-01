@@ -25,7 +25,7 @@ const GenreCloud = () => {
           whileHover={{ scale: 1.05 }}
         >
           <Link
-            to={`/manga?genre=${encodeURIComponent(cat.slug)}`}
+            to={`/manga?genre=${encodeURIComponent(cat.slug)}${cat.source === 'mangadex' ? '&source=mangadex' : ''}`}
             className="tag-pill"
           >
             {cat.name}

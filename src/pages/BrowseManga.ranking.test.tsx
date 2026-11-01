@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mangaApi, ratingApi } from '@/lib/api';
 import { useMangaStore } from '@/store/mangaStore';
 import BrowseManga from './BrowseManga';
+import { useSettingsStore } from '@/store/settingsStore';
 
 vi.mock('@/components/manga/FilterPanel', () => ({ default: () => null }));
 vi.mock('@/components/manga/MangaGrid', () => ({ default: ({ manga }: any) =>
@@ -19,6 +20,8 @@ const page = (items: any[]) => ({ data: { items, params: { pagination: {
 let client: QueryClient;
 beforeEach(() => {
   viewer.loggedIn = false;
+  useSettingsStore.setState(state => ({ settings: { ...state.settings,
+    privacy: { ...state.settings.privacy, showMatureContent: false } } }));
   useMangaStore.getState().resetFilters();
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
@@ -246,6 +249,33 @@ it('keeps all 24 unrated titles in rating order for a signed-in reader', async (
   await waitFor(() => expect(screen.getByTestId('ranked-cards').children).toHaveLength(24));
   expect(mangaApi.searchMangaDex).not.toHaveBeenCalled();
   expect(ratingApi.getTopRatedManga).not.toHaveBeenCalled();
+});
+
+it('warms the next MangaDex page with identical filters and reuses it immediately after clicking', async () => {
+  vi.mocked(mangaApi.getMangaDexLatestFeed).mockImplementation(async options => ({ data: {
+    items: [{ slug: mdx, name: `Fast page ${options.page}`, source: 'mangadex', status: 'ongoing',
+      year: 2025, rating_average: 4.5, rating_count: 2, thumb_url: '/no-cover.svg' }],
+    feed_snapshot: 'b'.repeat(32), params: { pagination: { currentPage: options.page, totalItemsPerPage: 24, totalItems: 72 } },
+  } }));
+  show('/manga?source=mangadex&sort=popular&genre=action&status=ongoing&year=2025&minRating=4');
+  await screen.findByText('Fast page 1:0|');
+  await waitFor(() => expect(vi.mocked(mangaApi.getMangaDexLatestFeed).mock.calls.some(([arg]) => arg.page === 2)).toBe(true));
+  const first = vi.mocked(mangaApi.getMangaDexLatestFeed).mock.calls.find(([arg]) => arg.page === 1)![0];
+  expect(mangaApi.getMangaDexLatestFeed).toHaveBeenCalledWith(expect.objectContaining({
+    ...first, page: 2, feedSnapshot: 'b'.repeat(32), signal: expect.any(AbortSignal),
+  }));
+  expect(vi.mocked(mangaApi.getMangaDexLatestFeed).mock.calls.some(([arg]) => arg.page === 3)).toBe(false);
+  fireEvent.click(screen.getAllByRole('button', { name: 'Trang 2' })[0]);
+  expect(screen.getByTestId('ranked-cards')).toHaveTextContent('Fast page 2');
+  expect(vi.mocked(mangaApi.getMangaDexLatestFeed).mock.calls.filter(([arg]) => arg.page === 2)).toHaveLength(1);
+});
+
+it('removes a hidden Mature tag from the URL without losing the other filters', async () => {
+  show('/manga?source=mangadex&genre=action,sexual-violence&sort=latest&status=ongoing');
+  await waitFor(() => expect(screen.getByTestId('location')).not.toHaveTextContent('sexual-violence'));
+  expect(mangaApi.getMangaDexLatestFeed).toHaveBeenCalledWith(expect.objectContaining({
+    genreSlugs: ['action'], status: 'ongoing', sort: 'latest', showMature: false,
+  }));
 });
 
 it('keeps source filters and ordering on direct next pages and after remounting', async () => {

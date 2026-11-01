@@ -16,6 +16,7 @@ interface MangaGridProps {
   batchStep?: number;
   batchDelayMs?: number;
   maxItems?: number;
+  animateEntrance?: boolean;
 }
 
 const MANGADEX_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -121,6 +122,7 @@ const MangaGrid = React.forwardRef<HTMLDivElement, MangaGridProps>(
     batchStep = 4,
     batchDelayMs = 180,
     maxItems,
+    animateEntrance = true,
   }, ref) => {
     const showMatureContent = useSettingsStore((s) => s.settings.privacy.showMatureContent);
     const verifiedManga = useCanonicalMangaRecords(manga, { requireQQMatch: true, fillMissingCovers: true });
@@ -161,7 +163,7 @@ const MangaGrid = React.forwardRef<HTMLDivElement, MangaGridProps>(
           {title && <h2 className="text-lg font-comic tracking-wide mb-3">{title}</h2>}
           <div className="space-y-0.5">
             {renderItems.map((m, i) => (
-              <MangaCard key={m.id} manga={m} index={i} variant="horizontal" />
+              <MangaCard key={m.id} manga={m} index={i} variant="horizontal" animateEntrance={animateEntrance} />
             ))}
           </div>
         </div>
@@ -174,7 +176,7 @@ const MangaGrid = React.forwardRef<HTMLDivElement, MangaGridProps>(
           {title && <h2 className="text-lg font-comic tracking-wide mb-3">{title}</h2>}
           <div className="space-y-0">
             {renderItems.map((m, i) => (
-              <MangaCard key={m.id} manga={m} index={i} variant="compact" />
+              <MangaCard key={m.id} manga={m} index={i} variant="compact" animateEntrance={animateEntrance} />
             ))}
           </div>
         </div>
@@ -190,7 +192,7 @@ const MangaGrid = React.forwardRef<HTMLDivElement, MangaGridProps>(
         {title && <h2 className="text-lg font-comic tracking-wide mb-3">{title}</h2>}
         <div className={`grid ${gridCols} gap-3 md:gap-4 items-stretch`}>
           {renderItems.map((m, i) => (
-            <MangaCard key={m.id} manga={m} index={i} />
+            <MangaCard key={m.id} manga={m} index={i} animateEntrance={animateEntrance} />
           ))}
         </div>
       </div>

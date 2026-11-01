@@ -31,7 +31,7 @@ it('refreshes stale covers with valid titles across bookmarks, follows and histo
   });
   await waitFor(() => {
     for (const query of result.current) {
-      expect(query.data?.[0].manga_thumb).toContain('/fresh.jpg');
+      expect(decodeURIComponent(query.data?.[0].manga_thumb || '')).toContain('/fresh.jpg');
       expect(query.data?.[1].manga_thumb).toContain(`${legacy}-23163`);
       expect(query.data?.[2].manga_thumb).toContain('one-piece-1-128');
     }
@@ -44,7 +44,7 @@ it('refreshes stale covers with valid titles across bookmarks, follows and histo
   }
   expect(request).toHaveBeenCalledTimes(2);
   expect(request).toHaveBeenCalledWith(expect.arrayContaining(['dao-hai-tac']), expect.objectContaining({ 'dao-hai-tac': 'Đảo Hải Tặc' }));
-  expect(rows[0].manga_thumb).toContain('/old.jpg');
+  expect(decodeURIComponent(rows[0].manga_thumb)).toContain('/old.jpg');
   expect(rows[2].manga_slug).toBe('65b1234567890abcdef12345');
   client.clear();
 });

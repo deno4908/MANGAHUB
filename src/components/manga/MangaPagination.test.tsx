@@ -3,6 +3,22 @@ import { describe, expect, it, vi } from "vitest";
 import MangaPagination from "./MangaPagination";
 
 describe("MangaPagination", () => {
+  it('warms a typed page before submit and a touch target without the hover delay', () => {
+    vi.useFakeTimers();
+    try {
+      const intent = vi.fn(), change = vi.fn();
+      render(<MangaPagination currentPage={1} totalPages={70} onPageChange={change} onPageIntent={intent} />);
+      const input = screen.getByRole('textbox');
+      fireEvent.change(input, { target: { value: '70' } });
+      act(() => vi.advanceTimersByTime(150));
+      expect(intent).toHaveBeenCalledWith(70);
+      expect(change).not.toHaveBeenCalled();
+      fireEvent.pointerDown(screen.getByRole('button', { name: 'Trang 2' }));
+      expect(intent).toHaveBeenLastCalledWith(2);
+      fireEvent.submit(input.closest('form')!);
+      expect(change).toHaveBeenCalledWith(70);
+    } finally { cleanup(); vi.useRealTimers(); }
+  });
   it("jumps to the requested page without changing the surrounding filters", () => {
     const onPageChange = vi.fn();
     render(<MangaPagination currentPage={3} totalPages={20} onPageChange={onPageChange} />);
