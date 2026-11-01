@@ -102,7 +102,7 @@ it('requests QQ independently if the combined home catalog also fails or contain
   }));
 });
 
-it('replaces MangaDex cards with QQ when data loads but both cover sources fail', async () => {
+it('keeps the MangaDex catalog when one image exhausts both cover sources', async () => {
   vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([mdx]));
   show();
   expect(await screen.findByRole('heading', { level: 2, name: mdx.name })).toBeInTheDocument();
@@ -110,8 +110,8 @@ it('replaces MangaDex cards with QQ when data loads but both cover sources fail'
   fireEvent.error(image);
   expect(screen.getByRole('heading', { level: 2, name: mdx.name })).toBeInTheDocument();
   fireEvent.error(image);
-  expect(await screen.findByRole('heading', { level: 2, name: qq.name })).toBeInTheDocument();
-  await waitFor(() => expect(screen.queryByText(mdx.name)).not.toBeInTheDocument());
+  expect(screen.getByRole('heading', { level: 2, name: mdx.name })).toBeInTheDocument();
+  expect(within(section('Mới cập nhật')).getByRole('heading', { level: 3, name: mdx.name })).toBeInTheDocument();
   expect(mangaApi.getOTruyenFiltered).not.toHaveBeenCalled();
 });
 
@@ -221,4 +221,27 @@ it('keeps previously loaded MangaDex home cards visible when its refresh fails',
   await act(async () => { await client.refetchQueries({ queryKey: ['manga', 'homepage'] }); });
   expect(within(section('Mới cập nhật')).getByRole('heading', { level: 3, name: mdx.name })).toBeInTheDocument();
   expect(screen.getByRole('heading', { level: 2, name: mdx.name })).toBeInTheDocument();
+});
+
+it('keeps loaded MangaDex cards and retries an empty source refresh', async () => {
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([mdx]));
+  show();
+  await screen.findByRole('heading', { level: 2, name: mdx.name });
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([]));
+  await act(async () => { await client.refetchQueries({ queryKey: ['manga', 'homepage'] }); });
+  expect(screen.getByRole('heading', { level: 2, name: mdx.name })).toBeInTheDocument();
+  const state = client.getQueryData<any>(['manga', 'homepage', 'synchronized-v2', 120, false]);
+  expect(state.unavailableSources).toContain('mangadex');
+});
+
+it('keeps good QQ sections instead of swapping in a fallback list on refresh failure', async () => {
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([mdx]));
+  show();
+  await screen.findByRole('heading', { level: 2, name: mdx.name });
+  vi.mocked(mangaApi.getHomepage).mockRejectedValue(new Error('temporary QQ outage'));
+  await act(async () => { await client.refetchQueries({ queryKey: ['manga', 'homepage'] }); });
+  expect(mangaApi.getOTruyenFiltered).not.toHaveBeenCalled();
+  const state = client.getQueryData<any>(['manga', 'homepage', 'synchronized-v2', 120, false]);
+  expect(state.latest.items[0].id).toBe(qq.slug);
+  expect(state.unavailableSources).toContain('truyenqq');
 });

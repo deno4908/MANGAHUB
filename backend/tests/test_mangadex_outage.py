@@ -129,3 +129,49 @@ def test_search_without_a_snapshot_reports_a_source_error(stored, monkeypatch):
     assert response.status_code == 503
     assert json.loads(response.body)["code"] == "MANGADEX_UNAVAILABLE"
     assert b"private source" not in response.body
+
+
+def test_home_keeps_last_good_snapshot_across_source_failures_but_not_other_filters(stored, monkeypatch):
+    good = {"data": {"items": [{"slug": MANGA, "name": "Known title"}]}}
+    live = AsyncMock(return_value=good)
+    monkeypatch.setattr(mdx, "_get_latest_vi_chapter_feed_live", live)
+    assert asyncio.run(mdx.get_latest_vi_chapter_feed(snapshot=True)) == good
+    live.side_effect = RuntimeError("source unavailable")
+    result = asyncio.run(mdx.get_latest_vi_chapter_feed(snapshot=True))
+    assert result["data"]["items"] == good["data"]["items"]
+    assert result["data"]["source_unavailable"] is True
+    for change in [{"content_ratings": ["safe"]}, {"excluded_manga_ids": [MANGA]}, {"snapshot": False}]:
+        with pytest.raises(RuntimeError):
+            asyncio.run(mdx.get_latest_vi_chapter_feed(**{"snapshot": True, **change}))
+
+
+def test_cover_batch_requests_current_relationships_once_instead_of_cover_history(stored, monkeypatch):
+    request = AsyncMock(return_value={"data": [{"id": MANGA, "relationships": [
+        {"id": "current-cover", "type": "cover_art", "attributes": {"fileName": "current.jpg"}}
+    ]}]})
+    monkeypatch.setattr(mdx, "_request_json", request)
+    individual = AsyncMock(side_effect=AssertionError("must not fan out to individual titles"))
+    monkeypatch.setattr(mdx, "_fetch_cover_url_by_manga_id", individual)
+    result = asyncio.run(mdx._fetch_cover_urls_for_manga_ids([MANGA]))
+    assert result[MANGA].endswith("/current.jpg.512.jpg")
+    request.assert_awaited_once_with("/manga", {
+        "ids[]": [MANGA], "includes[]": ["cover_art"], "limit": 1,
+        "contentRating[]": ["safe", "suggestive", "erotica", "pornographic"],
+    })
+    individual.assert_not_called()
+
+
+def test_missing_cover_relationship_does_not_trigger_individual_requests(stored, monkeypatch):
+    request = AsyncMock(return_value={"data": [{"id": MANGA, "relationships": []}]})
+    monkeypatch.setattr(mdx, "_request_json", request)
+    assert asyncio.run(mdx._fetch_cover_urls_for_manga_ids([MANGA])) == {}
+    request.assert_awaited_once()
+
+
+def test_cover_batch_outage_reuses_stale_urls_without_extending_their_lifetime(stored, monkeypatch):
+    values, cache = stored
+    values[f"mangadex:cover-url:v2:{MANGA}:stale"] = COVER
+    request = AsyncMock(side_effect=RuntimeError("source unavailable"))
+    monkeypatch.setattr(mdx, "_request_json", request)
+    assert asyncio.run(mdx._fetch_cover_urls_for_manga_ids([MANGA]))[MANGA] == COVER
+    assert f"mangadex:cover-url:v2:{MANGA}" not in cache.set_many.call_args.args[0]

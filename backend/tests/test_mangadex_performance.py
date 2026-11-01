@@ -9,6 +9,37 @@ from fastapi_app.services.request_coalescing import coalesce_reads
 MANGA = "11111111-1111-4111-8111-111111111111"
 
 
+@pytest.mark.parametrize("sort,order", [("popular", "followedCount"), ("latest", "latestUploadedChapter"), ("title", "title")])
+def test_deep_source_search_keeps_filters_and_jumps_directly_to_offset(monkeypatch, sort, order):
+    monkeypatch.setattr(mdx, "cache", Mock(get=Mock(return_value=None)))
+    monkeypatch.setattr(mdx, "_get_mangadex_tag_id_by_slug", AsyncMock(return_value={"action": "action-id"}))
+    request = AsyncMock(return_value={"data": [], "total": 20000})
+    monkeypatch.setattr(mdx, "_request_json", request)
+    result = asyncio.run(mdx.search_manga("title", page=70, limit=24, sort=sort,
+        included_tag_slugs=["action"], statuses=["ongoing"], attach_latest=False))
+    request.assert_awaited_once()
+    path, params = request.call_args.args
+    assert path == "/manga"
+    assert params["offset"] == 1656
+    assert params["includedTags[]"] == ["action-id"]
+    assert params["status[]"] == ["ongoing"]
+    assert params["availableTranslatedLanguage[]"] == "vi"
+    assert params["title"] == "title"
+    assert params[f"order[{order}]"] == ("asc" if sort == "title" else "desc")
+    assert result["data"]["params"]["pagination"]["totalItems"] == 10000
+
+
+def test_source_search_last_page_stays_within_the_ten_thousand_entry_window(monkeypatch):
+    monkeypatch.setattr(mdx, "cache", Mock(get=Mock(return_value=None)))
+    request = AsyncMock(return_value={"data": [], "total": 20000})
+    monkeypatch.setattr(mdx, "_request_json", request)
+    result = asyncio.run(mdx.search_manga("", page=999, limit=24, sort="latest", attach_latest=False))
+    params = request.call_args.args[1]
+    assert params["offset"] == 9984
+    assert params["limit"] == 16
+    assert result["data"]["params"]["pagination"]["currentPage"] == 417
+
+
 @pytest.mark.parametrize("sort", ["latest", "popular", "title", "updated", "relevance"])
 def test_search_keeps_title_filter_for_every_sort(monkeypatch, sort):
     monkeypatch.setattr(mdx, "cache", Mock(get=Mock(return_value=None)))
@@ -67,7 +98,7 @@ def test_home_snapshot_reads_one_chapter_page_even_for_a_mass_upload(monkeypatch
     assert calls == ["/chapter"]
 
 
-def test_latest_pagination_counts_titles_instead_of_chapters(monkeypatch):
+def test_native_latest_pagination_counts_accessible_chapter_entries(monkeypatch):
     monkeypatch.setattr(mdx, "cache", Mock(get=Mock(return_value=None)))
     async def request(path, params=None):
         if path == "/manga":
@@ -81,7 +112,8 @@ def test_latest_pagination_counts_titles_instead_of_chapters(monkeypatch):
     monkeypatch.setattr(mdx, "_fetch_cover_urls_for_manga_ids", AsyncMock(return_value={}))
     result = asyncio.run(mdx.get_latest_vi_chapter_feed(limit=24))
     pagination = result["data"]["params"]["pagination"]
-    assert pagination["totalItems"] == 6900  # 288 title pages, not 4727 chapter pages
+    assert pagination["totalItems"] == 10000
+    assert pagination["unit"] == "chapter"
     assert pagination["totalItemsPerPage"] == 24
 
 

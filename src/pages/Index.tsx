@@ -1,6 +1,4 @@
 import { useMemo, useEffect, useState, useCallback } from 'react';
-import { ImageFailureContext } from '@/components/ui/ImageFailureContext';
-import { isMangaDexCoverUrl } from '@/lib/homeSourceFallback';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -987,10 +985,6 @@ const syncMangaDexLatestChapters = (
 
 const Index = () => {
   const queryClient = useQueryClient();
-  const [hasMangaDexCoverFailure, setHasMangaDexCoverFailure] = useState(false);
-  const reportHomeImageFailure = useCallback((src: string) => {
-    if (isMangaDexCoverUrl(src)) setHasMangaDexCoverFailure(true);
-  }, []);
   const showMatureContent = useSettingsStore((s) => s.settings.privacy.showMatureContent);
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
   const authUser = useUserStore((s) => s.user);
@@ -1010,7 +1004,7 @@ const Index = () => {
   const homeBannerData = data?.mangadex;
   const isHomeBannerError = (data?.unavailableSources.includes('mangadex') && !homeBannerData?.items.length)
     || (isHomepageError && !data);
-  const isMangaDexUnavailable = isHomeBannerError || hasMangaDexCoverFailure;
+  const isMangaDexUnavailable = isHomeBannerError;
   const isHomeSourceAvailable = useCallback((item: Manga) =>
     !isMangaDexUnavailable || (item.source !== 'mangadex' && !normalizeMangaDexId(item.id)),
   [isMangaDexUnavailable]);
@@ -1732,7 +1726,6 @@ const Index = () => {
   const isHeroBannerLoading = isHomeSynchronizedLoading;
 
   return (
-    <ImageFailureContext.Provider value={reportHomeImageFailure}>
     <div className="min-h-screen">
       <HomeAnnouncementPopup key={activeAnnouncement?.id || 'none'} announcement={activeAnnouncement} />
       <section className="container mx-auto px-4 pt-5">
@@ -1794,7 +1787,6 @@ const Index = () => {
         </section>
       </div>
     </div>
-    </ImageFailureContext.Provider>
   );
 };
 

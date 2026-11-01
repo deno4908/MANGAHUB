@@ -120,7 +120,7 @@ def test_hidden_titles_removed_before_slice_and_mass_upload_deduplicated(source)
     rows, _, _ = source
     rows.extend([release(n, manga=1) for n in range(1, 31)])
     rows.extend(release(n, manga=n) for n in range(31, 60))
-    result = asyncio.run(mdx.get_latest_vi_chapter_feed(limit=2, excluded_manga_ids=[identifier(31)]))
+    result = asyncio.run(mdx.get_latest_vi_chapter_feed(limit=2, excluded_manga_ids=[identifier(31)], included_tag_slugs=["action"]))
     assert ids(result) == [identifier(1), identifier(32)]
 
 
@@ -131,10 +131,10 @@ def test_frozen_chunks_survive_new_head_release_and_clock_minute_change(source, 
     monkeypatch.setattr(mdx.time, "time", lambda: now)
 
     async def check():
-        first = await mdx.get_latest_vi_chapter_feed(limit=24)
+        first = await mdx.get_latest_vi_chapter_feed(limit=24, included_tag_slugs=["action"])
         rows.insert(0, release(0, manga=900))
         monkeypatch.setattr(mdx.time, "time", lambda: now + 120)
-        second = await mdx.get_latest_vi_chapter_feed(page=2, limit=24, feed_snapshot=first["data"]["feed_snapshot"])
+        second = await mdx.get_latest_vi_chapter_feed(page=2, limit=24, feed_snapshot=first["data"]["feed_snapshot"], included_tag_slugs=["action"])
         return first, second
 
     first, second = asyncio.run(check())
@@ -165,10 +165,10 @@ def test_later_page_reuses_the_completed_filtered_window_without_rescanning(sour
     rows.extend(release(n) for n in range(1, 200))
 
     async def check():
-        fifth = await mdx.get_latest_vi_chapter_feed(page=5, limit=24)
+        fifth = await mdx.get_latest_vi_chapter_feed(page=5, limit=24, included_tag_slugs=["action"])
         prior_calls = len(calls)
         # Reading an earlier page of the same window needs no upstream calls.
-        third = await mdx.get_latest_vi_chapter_feed(page=3, limit=24, feed_snapshot=fifth["data"]["feed_snapshot"])
+        third = await mdx.get_latest_vi_chapter_feed(page=3, limit=24, feed_snapshot=fifth["data"]["feed_snapshot"], included_tag_slugs=["action"])
         assert len(calls) == prior_calls
         return fifth, third
 
@@ -208,3 +208,33 @@ def test_router_forwards_filters_and_never_replaces_release_failure_with_metadat
     assert feed.call_args.kwargs["statuses"] == ["ongoing"]
     assert feed.call_args.kwargs["page"] == 3
     search.assert_not_called()
+
+
+@pytest.mark.parametrize("page,offset,size", [(20, 456, 24), (70, 1656, 24), (313, 7488, 24), (417, 9984, 16)])
+def test_native_latest_deep_link_fetches_only_its_own_chapter_page(source, page, offset, size):
+    rows, calls, _ = source
+    rows.extend(release(n, manga=1 if n < offset else n) for n in range(1, 11001))
+    result = asyncio.run(mdx.get_latest_vi_chapter_feed(page=page, limit=24))
+    assert len(calls) == 1
+    path, params = calls[0]
+    assert path == "/chapter"
+    assert params["offset"] == offset
+    assert params["limit"] == size
+    assert params["translatedLanguage[]"] == "vi"
+    assert len(ids(result)) == size
+    assert result["data"]["params"]["pagination"]["totalItems"] == 10000
+    assert result["data"]["params"]["pagination"]["unit"] == "chapter"
+
+
+def test_native_latest_groups_a_title_within_a_page_without_skipping_later_pages(source):
+    rows, calls, _ = source
+    rows.extend([release(1, manga=1), release(2, manga=1), release(3, manga=1), release(4, manga=2)])
+    async def check():
+        first = await mdx.get_latest_vi_chapter_feed(page=1, limit=2)
+        second = await mdx.get_latest_vi_chapter_feed(page=2, limit=2)
+        return first, second
+    first, second = asyncio.run(check())
+    assert ids(first) == [identifier(1)]
+    assert ids(second) == [identifier(1), identifier(2)]
+    assert first["data"]["params"]["pagination"]["totalItems"] == 4
+    assert [params["offset"] for _, params in calls] == [0, 2]

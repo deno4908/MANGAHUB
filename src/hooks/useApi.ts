@@ -202,6 +202,8 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
           if (sourceSignal.aborted) throw error;
         }
         if (sourceSignal.aborted) throw new DOMException('Homepage request cancelled', 'AbortError');
+        // Keep the previous catalog on transient errors/empty refreshes.
+        if (previous?.latest.items.length || previous?.ongoing.items.length) throw new Error('QQ home refresh unavailable');
         const fallback = await mangaApi.getOTruyenFiltered({ page: 1, limit: 24, sort: 'latest',
           showMature, attachRatings: false, timeoutMs: 2_000, signal: sourceSignal });
         if (!adaptListData(fallback).items.length) throw new Error('QQ home data unavailable');
@@ -225,7 +227,10 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
         needsQQ ? readHomepageSource(qq, sources.signal).then(value => ready(value)) : Promise.resolve(undefined),
         needsMangaDex ? readHomepageSource(sourceSignal => mangaApi.getMangaDexHomeBanner({ limit: 24,
           showMature, filterHidden: true, attachRatings: false, timeoutMs: 6_000, signal: sourceSignal }), sources.signal)
-          .then(value => ready(value, adaptListData(value).items.length > 0)) : Promise.resolve(undefined),
+          .then(value => {
+            if (!adaptListData(value).items.length) throw new Error('MangaDex home data unavailable');
+            return ready(value);
+          }) : Promise.resolve(undefined),
       ]).finally(() => {
         clearTimeout(graceTimer);
         signal.removeEventListener('abort', cancel);
@@ -235,11 +240,14 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
       const qqData = results[0].status === 'fulfilled' ? results[0].value : undefined;
       const mdxData = results[1].status === 'fulfilled' ? results[1].value : undefined;
       const failedQQSections: string[] = Array.isArray(qqData?.meta?.unavailable_sections)
-        ? qqData.meta.unavailable_sections : [];
+        ? [...qqData.meta.unavailable_sections] : [];
       const qqLatest = qqData ? adaptListData(qqData.latest || {}) : previous?.latest || adaptListData({});
       const qqOngoing = qqData ? adaptListData(qqData.ongoing || {}) : previous?.ongoing || adaptListData({});
+      if (qqData && !qqLatest.items.length && !failedQQSections.includes('latest')) failedQQSections.push('latest');
+      if (qqData && !qqOngoing.items.length && !failedQQSections.includes('ongoing')) failedQQSections.push('ongoing');
       const unavailableSources = (['truyenqq', 'mangadex'] as const)
-        .filter((_, index) => results[index].status === 'rejected' || (index === 0 && failedQQSections.length > 0));
+        .filter((_, index) => results[index].status === 'rejected' || (index === 0 && failedQQSections.length > 0)
+          || (index === 1 && mdxData?.data?.source_unavailable === true));
       return {
         // /homepage can return HTTP 200 with only one QQ section available.
         // Keep its last good section (or the other usable QQ list on first

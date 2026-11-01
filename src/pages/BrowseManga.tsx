@@ -1834,7 +1834,8 @@ const BrowseManga = () => {
       Boolean(filters.status)
     );
   const useMangaDexLatestFeedMode = isMangaDexSourceTab && filters.sort === 'latest'
-    && mangaDexTranslatedLanguage !== 'non_vi' && !hasLocalClientFilters;
+    && mangaDexTranslatedLanguage !== 'non_vi' && !hasLocalClientFilters
+    && !hasSearch && filters.genres.length === 0 && !filters.status;
   const mangaDexHasServerQueryableFilters =
     hasSearch ||
     filters.genres.length > 0 ||
