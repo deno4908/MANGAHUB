@@ -1091,6 +1091,9 @@ export const mangaApi = {
       translatedLanguage?: string;
       status?: string;
       keyword?: string;
+      sort?: string;
+      year?: number | null;
+      minRating?: number;
       feedSnapshot?: string;
       timeoutMs?: number;
       signal?: AbortSignal;
@@ -1105,9 +1108,12 @@ export const mangaApi = {
       translated_language: options.translatedLanguage || 'vi',
       status: options.status || '',
       keyword: options.keyword || '',
+      sort: options.sort || 'latest',
+      min_rating: String(options.minRating || 0),
       feed_snapshot: options.feedSnapshot || '',
     });
-    return publicApi<any>(`/api/manga/mangadex/latest-feed?${query.toString()}`, {
+    if (options.year) query.set('year', String(options.year));
+    return publicApi<any>(`/api/manga/mangadex/browse?${query.toString()}`, {
       timeoutMs: options.timeoutMs ?? 18_000,
       signal: options.signal,
     });

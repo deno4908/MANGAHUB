@@ -1833,8 +1833,7 @@ const BrowseManga = () => {
       hasLocalClientFilters ||
       Boolean(filters.status)
     );
-  const useMangaDexLatestFeedMode = isMangaDexSourceTab && filters.sort === 'latest'
-    && mangaDexTranslatedLanguage === 'vi' && !hasLocalClientFilters;
+  const useMangaDexLatestFeedMode = isMangaDexSourceTab && mangaDexTranslatedLanguage === 'vi';
   const mangaDexHasServerQueryableFilters =
     hasSearch ||
     filters.genres.length > 0 ||
@@ -1845,7 +1844,7 @@ const BrowseManga = () => {
     filters.sort === 'rating' &&
     !hasLocalClientFilters &&
     mangaDexHasServerQueryableFilters;
-  const useGlobalTopRatedMode = filters.sort === 'rating' && !useMangaDexServerRatingMode;
+  const useGlobalTopRatedMode = filters.sort === 'rating' && !useMangaDexServerRatingMode && !useMangaDexLatestFeedMode;
   const useMangaDexServerSearchMode =
     isMangaDexSourceTab &&
     !useMangaDexLatestFeedMode &&
@@ -2141,27 +2140,31 @@ const BrowseManga = () => {
 
   const latestFeedSnapshots = useRef<Record<string, string>>({});
   const latestFeedSelection = JSON.stringify([showMatureContent, mangaDexTranslatedLanguage,
-    mangaDexServerSearchGenreSlugs, filters.status || '', normalizedSearch]);
+    mangaDexServerSearchGenreSlugs, filters.status || '', normalizedSearch, filters.sort, filters.year, filters.minRating]);
   const getMangaDexLatestFeedQueryKey = useCallback(
     (targetPage: number) => [
       'manga',
       'mangadex',
       'latest-feed',
-      'readable-title-index-v1',
+      'canonical-catalog-v2',
       targetPage,
       showMatureContent,
       mangaDexTranslatedLanguage,
       mangaDexServerSearchGenreSlugs,
       filters.status || '',
       normalizedSearch,
+      filters.sort,
+      filters.year,
+      filters.minRating,
     ] as const,
-    [showMatureContent, mangaDexTranslatedLanguage, mangaDexServerSearchGenreSlugs, filters.status, normalizedSearch],
+    [showMatureContent, mangaDexTranslatedLanguage, mangaDexServerSearchGenreSlugs, filters.status, normalizedSearch,
+      filters.sort, filters.year, filters.minRating],
   );
 
   const fetchMangaDexLatestFeedPage = useCallback(
     async (targetPage: number, signal?: AbortSignal) => {
       const matchesSelection = (key: readonly unknown[]) => key[2] === 'latest-feed'
-        && key[3] === 'readable-title-index-v1' && JSON.stringify(key.slice(5)) === latestFeedSelection;
+        && key[3] === 'canonical-catalog-v2' && JSON.stringify(key.slice(5)) === latestFeedSelection;
       // Returning from a detail page remounts BrowseManga. Recover the window
       // from its cached pages so the next page still belongs to the same feed.
       const cachedWindow = queryClient.getQueryCache().findAll({
@@ -2178,6 +2181,9 @@ const BrowseManga = () => {
         translatedLanguage: mangaDexTranslatedLanguage,
         status: filters.status || '',
         keyword: normalizedSearch,
+        sort: filters.sort,
+        year: filters.year,
+        minRating: filters.minRating,
         feedSnapshot: previous,
         timeoutMs: 12_000,
         signal,
@@ -2193,7 +2199,7 @@ const BrowseManga = () => {
         releaseChapter: normalizeMangaDexId(item.chapters[0]?.id) ? item.chapters[0] : undefined })) };
     },
     [showMatureContent, mangaDexServerSearchGenreSlugs, mangaDexTranslatedLanguage, filters.status,
-      normalizedSearch, latestFeedSelection, queryClient],
+      normalizedSearch, filters.sort, filters.year, filters.minRating, latestFeedSelection, queryClient],
   );
 
   const mangaDexLatestFeedQuery = useQuery({
@@ -5269,7 +5275,7 @@ const BrowseManga = () => {
         : withVisibleRatings;
 
     const ratingModeItems =
-      filters.sort === 'rating' && canUseUserRatings
+      filters.sort === 'rating' && canUseUserRatings && !useMangaDexLatestFeedMode
         ? withMyRatings.filter(hasTrustedRatingSignal)
         : withMyRatings;
 

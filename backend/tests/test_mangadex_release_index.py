@@ -137,6 +137,102 @@ def test_shared_live_probe_updates_first_page_without_changing_old_snapshots(sto
     assert not set(ids(first)) & set(ids(second))
 
 
+@pytest.mark.parametrize("genres,statuses,year,minimum,mature", [
+    ([], [], None, 0, True), (["action"], [], None, 0, True),
+    (["action", "romance"], [], None, 0, True), ([], ["ongoing"], None, 0, True),
+    ([], ["completed"], None, 0, True), ([], ["hiatus"], None, 0, True),
+    ([], ["cancelled"], None, 0, True), ([], [], 2025, 0, True),
+    ([], [], 2026, 0, True), ([], [], None, 3, True), ([], [], None, 3.5, True),
+    ([], [], None, 4, True), ([], [], None, 4.5, True),
+    (["action"], ["ongoing"], 2026, 3.5, True),
+    (["action", "romance"], ["completed"], 2025, 4, True),
+    ([], [], None, 0, False), (["action"], ["hiatus"], None, 4.5, False),
+])
+def test_all_orders_share_exact_filtered_membership_totals_and_full_pages(
+        store, monkeypatch, genres, statuses, year, minimum, mature):
+    from fastapi_app.services import mangadex_browse
+    rows, stats, expected = [], {}, set()
+    hidden = {mid(n) for n in range(7, 901, 47)}
+    for n in range(1, 901):
+        row = chapter(n)
+        attrs = index.manga_relation(row)["attributes"]
+        attrs.update(year=2025 + n % 2, status=["ongoing", "completed", "hiatus", "cancelled"][n % 4],
+                     contentRating="erotica" if n % 9 == 0 else "safe")
+        if n % 3:
+            attrs["tags"].append({"id": "romance-id", "attributes": {"name": {"en": "Romance"}}})
+        score = [0, 3, 3.5, 4, 4.5, 5][n % 6]
+        stats[mid(n)] = {"rating_average": score, "rating_count": n % 13, "views": n % 41}
+        rows.append(row)
+        if mid(n) in hidden or (not mature and attrs["contentRating"] == "erotica"):
+            continue
+        if statuses and attrs["status"] not in statuses:
+            continue
+        if year and attrs["year"] != year:
+            continue
+        if score < minimum or ("romance" in genres and n % 3 == 0):
+            continue
+        expected.add(mid(n))
+    put(store, state(rows))
+    monkeypatch.setattr(mdx, "_get_mangadex_tag_id_by_slug", AsyncMock(return_value={"action": "action-id", "romance": "romance-id"}))
+    monkeypatch.setattr(mangadex_browse, "statistics", AsyncMock(return_value=stats))
+
+    async def check():
+        for sort in ("latest", "popular", "rating", "title"):
+            all_items, token, totals = [], "", set()
+            for page in range(1, max(1, (len(expected) + 23) // 24) + 1):
+                result = await mangadex_browse.page(db=None, page=page, sort=sort, year=year,
+                    min_rating=minimum, genres=genres, statuses=statuses, excluded=list(hidden),
+                    ratings=["safe", "suggestive", "erotica", "pornographic"] if mature else ["safe", "suggestive"],
+                    feed_snapshot=token)
+                data = result["data"]
+                token = data["feed_snapshot"]
+                totals.add(data["params"]["pagination"]["totalItems"])
+                batch = data["items"]
+                assert len(batch) == min(24, max(0, len(expected) - (page - 1) * 24))
+                all_items.extend(batch)
+            assert totals == {len(expected)}
+            assert len(all_items) == len({item["slug"] for item in all_items})
+            assert {item["slug"] for item in all_items} == expected
+            if sort == "latest":
+                values = [item["chaptersLatest"][0]["publish_at"] for item in all_items]
+                assert values == sorted(values, reverse=True)
+            elif sort == "popular":
+                values = [item["views"] for item in all_items]
+                assert values == sorted(values, reverse=True)
+            elif sort == "rating":
+                values = [(item["rating_average"], item["rating_count"], item["views"]) for item in all_items]
+                assert values == sorted(values, reverse=True)
+            else:
+                values = [item["name"].casefold() for item in all_items]
+                assert values == sorted(values)
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("initially_empty", [False, True])
+def test_ranking_changes_do_not_move_existing_page_boundaries(store, monkeypatch, initially_empty):
+    from fastapi_app.services import mangadex_browse
+    put(store, state([chapter(n) for n in range(1, 81)]))
+    stats = {} if initially_empty else {mid(n): {"views": n} for n in range(1, 81)}
+    monkeypatch.setattr(mangadex_browse, "statistics", AsyncMock(side_effect=lambda db: copy.deepcopy(stats)))
+    first = asyncio.run(mangadex_browse.page(db=None, sort="popular"))
+    stats[mid(1)] = {"views": 9999}
+    second = asyncio.run(mangadex_browse.page(db=None, page=2, sort="popular", feed_snapshot=first["data"]["feed_snapshot"]))
+    assert ids(second) == [mid(n) for n in range(56, 32, -1)]
+    assert not set(ids(first)) & set(ids(second))
+
+
+def test_changing_sort_reuses_the_same_aggregate_snapshot_without_repacking_catalog(store, monkeypatch):
+    from fastapi_app.services import mangadex_browse
+    put(store, state([chapter(n) for n in range(1, 81)]))
+    monkeypatch.setattr(mangadex_browse, "statistics", AsyncMock(return_value={mid(1): {"views": 10}}))
+    first = asyncio.run(mangadex_browse.page(db=None, sort="latest"))
+    pack = Mock(wraps=index._pack)
+    monkeypatch.setattr(index, "_pack", pack)
+    second = asyncio.run(mangadex_browse.page(db=None, sort="popular"))
+    assert second["data"]["feed_snapshot"] == first["data"]["feed_snapshot"]
+    pack.assert_not_called()
+
+
 def test_bootstrap_cursor_crosses_ten_thousand_rows_and_mass_uploads_still_give_full_pages(store, monkeypatch):
     rows = [chapter(n, book=1) for n in range(1, 10101)]
     rows.extend(chapter(n, book=n - 10099) for n in range(10101, 10149))

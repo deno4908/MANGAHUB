@@ -9,14 +9,16 @@ import BrowseManga from './BrowseManga';
 vi.mock('@/components/manga/FilterPanel', () => ({ default: () => null }));
 vi.mock('@/components/manga/MangaGrid', () => ({ default: ({ manga }: any) =>
   <div data-testid="ranked-cards">{manga.map((item: any) => <span key={item.id} data-cover={item.cover}>{item.title}:{item.views}|</span>)}</div> }));
+const viewer = vi.hoisted(() => ({ loggedIn: false }));
 vi.mock('@/store/userStore', () => ({ useUserStore: (select: (state: any) => unknown) =>
-  select({ isLoggedIn: false, user: null, isRestoringSession: false }) }));
+  select({ isLoggedIn: viewer.loggedIn, user: viewer.loggedIn ? { id: 'viewer' } : null, isRestoringSession: false }) }));
 const mdx = '66666666-6666-4666-8666-666666666666';
 const page = (items: any[]) => ({ data: { items, params: { pagination: {
   currentPage: 1, totalItemsPerPage: 24, totalItems: items.length,
 } } } });
 let client: QueryClient;
 beforeEach(() => {
+  viewer.loggedIn = false;
   useMangaStore.getState().resetFilters();
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
@@ -103,17 +105,19 @@ it('keeps native QQ popularity order for zero-view titles after promoting local 
   await waitFor(() => expect(screen.getByTestId('ranked-cards')).toHaveTextContent('Local top:90|QQ first:0|QQ next:0|'));
 });
 
-it('resolves rated MangaDex covers in a metadata batch without fetching individual details', async () => {
+it('uses the complete canonical catalog for rating order and receives its covers in the page', async () => {
   const cover = `https://uploads.mangadex.org/covers/${mdx}/fast.jpg.256.jpg`;
-  vi.mocked(ratingApi.getTopRatedManga).mockResolvedValue({ items: [{ manga_slug: mdx, average: 5, count: 2 }] });
-  const batch = vi.spyOn(mangaApi, 'getCardMetadata').mockResolvedValue({ items: { [mdx]: {
-    id: mdx, slug: mdx, title: 'Rated MangaDex', source: 'mangadex', cover_url: cover, content_rating: 'safe',
-  } } });
+  vi.mocked(mangaApi.getMangaDexLatestFeed).mockResolvedValue(page([{
+    slug: mdx, name: 'Rated MangaDex', source: 'mangadex', thumb_url: cover,
+    content_rating: 'safe', rating_average: 5, rating_count: 2,
+  }]));
   const detail = vi.spyOn(mangaApi, 'getMangaDexDetail');
   show('/manga?source=mangadex&sort=rating');
   await screen.findByText('Rated MangaDex:0|');
   expect(screen.getByText('Rated MangaDex:0|')).toHaveAttribute('data-cover', cover);
-  expect(batch).toHaveBeenCalledWith([mdx]);
+  expect(mangaApi.getMangaDexLatestFeed).toHaveBeenCalledWith(expect.objectContaining({ sort: 'rating' }));
+  expect(ratingApi.getTopRatedManga).not.toHaveBeenCalled();
+  expect(mangaApi.searchMangaDex).not.toHaveBeenCalled();
   expect(detail).not.toHaveBeenCalled();
 });
 
@@ -211,6 +215,37 @@ it('keeps status and genre filters on the Vietnamese release index', async () =>
   }));
   expect(mangaApi.searchMangaDex).not.toHaveBeenCalled();
   expect(mangaApi.getMangaDexLatestChapters).not.toHaveBeenCalled();
+});
+
+it.each(['latest', 'popular', 'rating', 'alphabetical'])('sends every Vietnamese filter to the same catalog for %s', async sort => {
+  viewer.loggedIn = true;
+  vi.mocked(mangaApi.getMangaDexLatestFeed).mockImplementation(async options => ({ data: {
+    items: Array.from({ length: 24 }, (_, n) => ({ slug: `${String(n + 1).padStart(8, '0')}-1111-4111-8111-111111111111`,
+      name: `Canonical ${n + 1}`, source: 'mangadex', status: 'ongoing', year: 2025,
+      rating_average: 4.5, rating_count: 3, thumb_url: '/no-cover.svg', content_rating: 'safe',
+      category: [{ name: 'Action', slug: 'action' }] })),
+    params: { pagination: { currentPage: options.page, totalItemsPerPage: 24, totalItems: 73 } },
+  } }));
+  show(`/manga?source=mangadex&sort=${sort}&genres=action&status=ongoing&year=2025&minRating=4`);
+  await waitFor(() => expect(screen.getByTestId('ranked-cards').children).toHaveLength(24));
+  expect(mangaApi.getMangaDexLatestFeed).toHaveBeenCalledWith(expect.objectContaining({
+    sort, genreSlugs: ['action'], status: 'ongoing', year: 2025, minRating: 4, translatedLanguage: 'vi',
+  }));
+  expect(mangaApi.searchMangaDex).not.toHaveBeenCalled();
+  expect(mangaApi.getMangaDexViCatalog).not.toHaveBeenCalled();
+  expect(ratingApi.getTopRatedManga).not.toHaveBeenCalled();
+});
+
+it('keeps all 24 unrated titles in rating order for a signed-in reader', async () => {
+  viewer.loggedIn = true;
+  vi.mocked(mangaApi.getMangaDexLatestFeed).mockResolvedValue(page(Array.from({ length: 24 }, (_, n) => ({
+    slug: `${String(n + 1).padStart(8, '0')}-1111-4111-8111-111111111111`, name: `Unrated ${n + 1}`,
+    source: 'mangadex', rating_average: 0, rating_count: 0, thumb_url: '/no-cover.svg', content_rating: 'safe',
+  }))));
+  show('/manga?source=mangadex&sort=rating');
+  await waitFor(() => expect(screen.getByTestId('ranked-cards').children).toHaveLength(24));
+  expect(mangaApi.searchMangaDex).not.toHaveBeenCalled();
+  expect(ratingApi.getTopRatedManga).not.toHaveBeenCalled();
 });
 
 it('keeps source filters and ordering on direct next pages and after remounting', async () => {

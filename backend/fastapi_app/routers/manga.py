@@ -5916,6 +5916,9 @@ async def mangadex_search(
     show_mature: bool = Query(False),
     attach_ratings: bool = Query(False),
     filter_hidden: bool = Query(True),
+    year: int | None = Query(None, ge=1000, le=3000),
+    min_rating: float = Query(0, ge=0, le=5),
+    feed_snapshot: str = Query(""),
     user=Depends(get_optional_user),
     db=Depends(get_supabase_public),
 ):
@@ -5947,6 +5950,12 @@ async def mangadex_search(
         hidden = await _get_hidden_slugs(db)
 
     normalized_sort = str(sort or "").strip().lower()
+    if effective_translated_language == "vi":
+        return await _indexed_mangadex_browse(db=db, page=page, limit=limit,
+            ratings=content_ratings, hidden=hidden, genres=genre_values,
+            statuses=status_values, keyword=keyword, sort=normalized_sort,
+            year=year, min_rating=min_rating, original_languages=original_language_values,
+            feed_snapshot=feed_snapshot)
     try:
         if normalized_sort == "rating":
             data = await _build_mangadex_rating_search(
@@ -6275,6 +6284,41 @@ async def mangadex_vi_catalog(
             attach_ratings=attach_ratings,
             filter_hidden=filter_hidden,
         )
+
+
+async def _indexed_mangadex_browse(**options):
+    from fastapi_app.services import mangadex_browse
+    from fastapi_app.services.mangadex_release_index import IndexBuilding
+    hidden = options.pop("hidden", {})
+    options["excluded"] = [mid for mid in (_extract_mangadex_id(key) for key in hidden) if mid]
+    try:
+        return await mangadex_browse.page(**options)
+    except IndexBuilding:
+        return JSONResponse(status_code=202, content={"data": {"items": [], "index_pending": True}},
+                            headers={"Cache-Control": "no-store", "Retry-After": "3"})
+    except RuntimeError as error:
+        logger.warning("MangaDex shared catalog unavailable (%s)", type(error).__name__)
+        return _mangadex_unavailable_response()
+
+
+@router.get("/mangadex/browse")
+async def mangadex_browse(
+    page: int = Query(1, ge=1), limit: int = Query(24, ge=1, le=24),
+    sort: str = Query("latest", pattern="^(latest|popular|rating|title|alphabetical)$"),
+    genre_slugs: str = Query(""), status: str = Query(""), keyword: str = Query(""),
+    translated_language: str = Query("vi"),
+    year: int | None = Query(None, ge=1000, le=3000), min_rating: float = Query(0, ge=0, le=5),
+    show_mature: bool = Query(False), filter_hidden: bool = Query(True), feed_snapshot: str = Query(""),
+    db=Depends(get_supabase_public),
+):
+    if translated_language != "vi":
+        raise HTTPException(status_code=400, detail="Unsupported catalog language")
+    return await _indexed_mangadex_browse(db=db, page=page, limit=limit, sort=sort,
+        ratings=["safe", "suggestive", "erotica", "pornographic"] if show_mature else ["safe", "suggestive"],
+        hidden=await _get_hidden_slugs(db) if filter_hidden else {},
+        genres=[v.strip().lower() for v in genre_slugs.split(",") if v.strip()],
+        statuses=[v.strip().lower() for v in status.split(",") if v.strip()], keyword=keyword,
+        year=year, min_rating=min_rating, feed_snapshot=feed_snapshot)
 
 
 @router.get("/mangadex/latest-feed")

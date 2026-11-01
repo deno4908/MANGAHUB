@@ -122,10 +122,13 @@ def test_search_recovers_the_exact_page_after_catalog_invalidation(stored, monke
 
 
 def test_search_without_a_snapshot_reports_a_source_error(stored, monkeypatch):
+    from fastapi_app.services import mangadex_browse
+    monkeypatch.setattr(mangadex_browse, "page", AsyncMock(side_effect=RuntimeError("private source response")))
     monkeypatch.setattr(mdx, "search_manga", AsyncMock(side_effect=RuntimeError("private source response")))
     response = asyncio.run(manga.mangadex_search(keyword="", page=2, limit=24,
         genre_slugs="", translated_language="vi", original_language="", status="", sort="popular",
-        show_mature=True, attach_ratings=False, filter_hidden=False, user=None, db=None))
+        show_mature=True, attach_ratings=False, filter_hidden=False,
+        year=None, min_rating=0, feed_snapshot="", user=None, db=None))
     assert response.status_code == 503
     assert json.loads(response.body)["code"] == "MANGADEX_UNAVAILABLE"
     assert b"private source" not in response.body

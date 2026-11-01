@@ -46,8 +46,26 @@ index_pending and the browser shows preparation with automatic retry instead
 of pretending an incomplete chapter batch is a full title page. Authentication,
 site-access policy and hidden-title checks remain active.
 
-Latest browsing with genre/status/title filters also uses the Vietnamese index.
-Other sort orders retain their existing native search or local ranking rules.
+Vietnamese browsing uses /api/manga/mangadex/browse for all four sort orders.
+The legacy /search endpoint delegates Vietnamese requests to the same catalog.
+Title search, AND-combined genres, publication status/year, hidden IDs, mature
+visibility and minimum internal rating apply before sorting and slicing. The
+eligible total is independent of the chosen ordering. A-Z orders title names;
+popular ranks local MangaHub views; rating ranks internal average/count, with
+unrated eligible titles retained after rated titles. Latest uses readableAt.
+
+Public aggregate views/ratings are loaded in paged DB reads, merging UUID and
+mdx-UUID aliases and the latest score per user. Shared cache and concurrent-read
+coalescing avoid repeating those reads for each page/tab. Old aggregates remain
+usable during a temporary DB failure; missing statistics return a retryable
+service error instead of silently applying a zero-score filter. Browsing
+snapshots freeze aggregate rankings as well as release metadata for 30 minutes.
+The client keeps server membership/order, including unrated items, and sends
+year/minimum score to the server instead of filtering a partial local catalog.
+
+The eligible set requires a published, available Vietnamese release. The title
+API's availableTranslatedLanguage flag alone can include manga whose Vietnamese
+chapters are all unavailable; those no longer inflate popular/A-Z page counts.
 
 Homepage image failures remain local to their cards. The previous valid source
 snapshot is retained during a transient refresh failure.

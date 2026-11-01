@@ -93,16 +93,18 @@ def test_qq_shows_verified_ranking_while_slow_legacy_titles_finish(monkeypatch):
 
 
 def test_mangadex_popular_endpoint_uses_global_local_ranking_not_upstream_follows(monkeypatch):
+    from fastapi_app.services import mangadex_browse
     builder = AsyncMock(return_value={"data": {"items": []}})
-    monkeypatch.setattr(manga, "_build_mangadex_popular_with_local_views", builder)
+    monkeypatch.setattr(mangadex_browse, "page", builder)
     monkeypatch.setattr(manga, "_get_hidden_slugs", AsyncMock(return_value={}))
     monkeypatch.setattr(manga, "_async_attach_local_views_to_mangadex_payload", AsyncMock())
     asyncio.run(manga.mangadex_search(keyword="", page=2, limit=24, genre_slugs="action", translated_language="vi",
                 original_language="", status="", sort="popular", show_mature=True, attach_ratings=False,
-                filter_hidden=True, user=None, db=EmptyDB()))
+                filter_hidden=True, year=None, min_rating=0, feed_snapshot="", user=None, db=EmptyDB()))
     assert builder.await_count == 1
     assert builder.call_args.kwargs["page"] == 2
-    assert builder.call_args.kwargs["genre_values"] == ["action"]
+    assert builder.call_args.kwargs["genres"] == ["action"]
+    assert builder.call_args.kwargs["sort"] == "popular"
 
 
 def test_cold_mangadex_ranking_does_not_depend_on_the_home_catalog_cache(monkeypatch):

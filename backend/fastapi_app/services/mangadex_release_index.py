@@ -7,6 +7,7 @@ import asyncio
 import base64
 import contextvars
 import gzip
+import hashlib
 import json
 import logging
 import re
@@ -177,7 +178,8 @@ def compact(row):
     return {"id": row["id"], "attributes": {k: (row.get("attributes") or {}).get(k, "") for k in fields}, "relationships": relations}
 
 
-async def page_rows(*, page, limit, ratings, excluded, tags, statuses, keyword, snapshot=""):
+async def page_rows(*, page, limit, ratings, excluded, tags, statuses, keyword, snapshot="",
+                    sort="latest", year=None, min_rating=0, statistics=None, original_languages=None):
     from fastapi_app.services import mangadex_service as mdx
     # A fresh first page can adopt new releases; later pages stay on the
     # immutable version they started browsing so their titles do not overlap.
@@ -187,6 +189,21 @@ async def page_rows(*, page, limit, ratings, excluded, tags, statuses, keyword, 
         raise IndexBuilding()
     if time.time() - state.get("last_checked", 0) >= 60:
         request_refresh()
+    if statistics is not None and "statistics" not in state:
+        version = uuid.uuid5(uuid.NAMESPACE_URL, state["version"] + hashlib.sha256(
+            json.dumps(statistics, sort_keys=True).encode()).hexdigest()).hex
+        key = "snapshot:" + version
+        entry = _local.get(key)
+        if entry and entry[0] > time.monotonic():
+            state = entry[1]
+        else:
+            state = {**state, "version": version, "statistics": statistics}
+            try:
+                await asyncio.to_thread(lambda: _client().set(PREFIX + key, _pack(state), nx=True, ex=SNAPSHOT_TTL))
+            except RedisError:
+                pass
+            _remember(key, state, SNAPSHOT_TTL)
+    statistics = state["statistics"] if "statistics" in state else (statistics or {})
     title_query = mdx._slugify_tag(keyword)
     selected = []
     for row in state["rows"].values():
@@ -202,6 +219,12 @@ async def page_rows(*, page, limit, ratings, excluded, tags, statuses, keyword, 
             continue
         if statuses and attrs.get("status") not in statuses:
             continue
+        if original_languages and attrs.get("originalLanguage") not in original_languages:
+            continue
+        if year and str(attrs.get("year") or "") != str(year):
+            continue
+        if float((statistics.get(relation.get("id")) or {}).get("rating_average", 0)) < min_rating:
+            continue
         if set(ratings).issubset({"safe", "suggestive"}) and any(_mature_marker(value) for value in [title, *mdx._extract_genres(attrs)]):
             continue
         if not set(tags).issubset({tag.get("id") for tag in attrs.get("tags", [])}):
@@ -210,9 +233,19 @@ async def page_rows(*, page, limit, ratings, excluded, tags, statuses, keyword, 
             continue
         selected.append(row)
     selected.sort(key=release_order, reverse=True)
+    if sort in {"title", "alphabetical"}:
+        selected.sort(key=lambda row: (mdx._pick_title(manga_relation(row).get("attributes") or {}).casefold(), manga_relation(row)["id"]))
+    elif sort == "popular":
+        selected.sort(key=lambda row: int((statistics.get(manga_relation(row)["id"]) or {}).get("views", 0)), reverse=True)
+    elif sort == "rating":
+        selected.sort(key=lambda row: (
+            float((statistics.get(manga_relation(row)["id"]) or {}).get("rating_average", 0)),
+            int((statistics.get(manga_relation(row)["id"]) or {}).get("rating_count", 0)),
+            int((statistics.get(manga_relation(row)["id"]) or {}).get("views", 0))), reverse=True)
     total = len(selected)
     page = min(max(1, page), max(1, (total + limit - 1) // limit))
-    return selected[(page - 1) * limit:page * limit], total, page, state["version"]
+    return [{**row, "browse_statistics": statistics.get(manga_relation(row)["id"], {})}
+            for row in selected[(page - 1) * limit:page * limit]], total, page, state["version"]
 
 
 _SAVE = """

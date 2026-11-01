@@ -2313,7 +2313,9 @@ async def _get_indexed_vi_feed(**options):
     excluded = {str(mid).removeprefix("mdx-").lower() for mid in options.get("excluded_manga_ids") or []}
     rows, total, page, version = await index.page_rows(page=page, limit=limit,
         ratings=ratings, excluded=excluded, tags=tags, statuses=options.get("statuses") or [],
-        keyword=options.get("keyword") or "", snapshot=options.get("feed_snapshot") or "")
+        keyword=options.get("keyword") or "", snapshot=options.get("feed_snapshot") or "",
+        sort=options.get("sort") or "latest", year=options.get("year"), min_rating=options.get("min_rating") or 0,
+        statistics=options.get("statistics"), original_languages=options.get("original_languages"))
     cover_map = await _fetch_cover_urls_for_manga_ids([index.manga_relation(row)["id"] for row in rows])
     items = []
     for row in rows:
@@ -2328,8 +2330,12 @@ async def _get_indexed_vi_feed(**options):
         item = _to_legacy_item(manga, latest_chapter={"chapter_name": number, "chapter_title": title, "publish_at": stamp})
         item["chaptersLatest"] = [{"chapter_name": number, "chapter_title": title,
             "chapter_api_data": row["id"], "publish_at": stamp, "updated_at": stamp, "translated_language": "vi"}]
+        stats = row.get("browse_statistics") or {}
+        item.update(rating_average=stats.get("rating_average", 0), rating_count=stats.get("rating_count", 0),
+                    views=stats.get("views", 0), view_count=stats.get("views", 0), local_view_count=stats.get("views", 0))
+        item["year"] = (relation.get("attributes") or {}).get("year")
         items.append(item)
-    return {"data": {"items": items, "feed_snapshot": version, "order": "readableAt:desc",
+    return {"data": {"items": items, "feed_snapshot": version, "order": options.get("sort") or "readableAt:desc",
         "params": {"pagination": {"totalItems": total, "totalItemsPerPage": limit,
             "currentPage": page, "unit": "manga"}}}}
 
