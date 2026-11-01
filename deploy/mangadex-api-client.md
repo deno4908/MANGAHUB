@@ -32,3 +32,9 @@ saved covers route MangaDex CDN URLs through the authenticated image proxy
 immediately, rather than waiting for a direct browser image to fail first.
 The private in-memory cover cache still shares downloads; image host validation,
 payload validation, and access policy checks remain enabled.
+
+Small catalog cards request the CDN's 256px variant when the metadata supplies
+a 512px cover. Adjacent-page prefetch uses the same variant and proxy URL so
+the card can reuse it. Large detail/hero covers and reader pages retain their
+existing size. A sample cover was 32,856 bytes at 256px versus 100,871 bytes at
+512px; download time still depends on the source, proxy, and reader's network.

@@ -51,3 +51,25 @@ it('loads direct MangaDex covers through the proxy immediately and keeps proxy U
   expect(second).toEqual(first);
   expect(first.fallback).toContain(`/api/manga/mangadex-cover/${mdx}`);
 });
+
+it('shares the small cover URL between card rendering and page prefetch while retaining full size by default', () => {
+  const source = `https://uploads.mangadex.org/covers/${mdx}/current.png.512.jpg`;
+  const small = source.replace('.512.jpg', '.256.jpg');
+  const fullCover = resolveSavedMangaCover(mdx, source);
+  const card = resolveSavedMangaCover(mdx, fullCover.primary, fullCover.fallback, 256);
+  const prefetch = resolveSavedMangaCover(mdx, source, undefined, 256);
+  expect(new URL(fullCover.primary).searchParams.get('url')).toBe(source);
+  expect(new URL(card.primary).searchParams.get('url')).toBe(small);
+  expect(card).toEqual(prefetch);
+  expect(resolveSavedMangaCover(mdx, card.primary, card.fallback, 256)).toEqual(card);
+});
+
+it('does not resize reader pages, original covers, or other source images', () => {
+  const page = 'https://node.mangadex.network/data/hash/page.512.jpg';
+  const original = `https://uploads.mangadex.org/covers/${mdx}/original.jpg`;
+  for (const source of [page, original]) {
+    expect(new URL(resolveSavedMangaCover(mdx, source, undefined, 256).primary).searchParams.get('url')).toBe(source);
+  }
+  const ownCover = 'https://own.supabase.co/storage/v1/object/public/covers/own.512.jpg';
+  expect(resolveSavedMangaCover('own-book', ownCover, undefined, 256).primary).toBe(ownCover);
+});

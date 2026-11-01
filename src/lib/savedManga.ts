@@ -53,7 +53,7 @@ export function needsSavedCover(value: unknown): boolean {
 }
 
 /** Load MangaDex covers through our image client; recover stale filenames by ID. */
-export function resolveSavedMangaCover(identifier: string, cover?: string, storedFallback?: string): { primary: string; fallback: string } {
+export function resolveSavedMangaCover(identifier: string, cover?: string, storedFallback?: string, coverSize: 256 | 512 = 512): { primary: string; fallback: string } {
   const id = normalizeMangaDexId(identifier) || String(identifier || '').trim();
   const current = id ? thumbUrl('', id) : PLACEHOLDER;
   const raw = String(cover || '').trim();
@@ -71,6 +71,9 @@ export function resolveSavedMangaCover(identifier: string, cover?: string, store
     } else if (!/^https?:\/\//i.test(primary)) primary = thumbUrl(primary, id);
     const source = new URL(primary, API_BASE);
     if (/^https?:$/.test(source.protocol) && /^(?:uploads\.mangadex\.org|.+\.mangadex\.network)$/i.test(source.hostname)) {
+      if (coverSize === 256 && source.hostname === 'uploads.mangadex.org' && source.pathname.startsWith('/covers/')) {
+        source.pathname = source.pathname.replace(/\.512\.jpg$/i, '.256.jpg');
+      }
       // A browser can be redirected to an interactive challenge by the CDN.
       // Use the authenticated proxy immediately, sharing coverCache downloads.
       primary = `${API_BASE}/api/images/img?url=${encodeURIComponent(source.href)}`;
