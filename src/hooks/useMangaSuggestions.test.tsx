@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mangaApi } from '@/lib/api';
 import { useMangaSuggestions } from './useMangaSuggestions';
 
-vi.mock('@/lib/api', () => ({ mangaApi: { search: vi.fn(), searchMangaDex: vi.fn() } }));
+const requests = vi.hoisted(() => ({ qq: vi.fn(), mdx: vi.fn() }));
+vi.mock('@/lib/api', () => ({ mangaApi: { searchSuggestions: vi.fn() } }));
 vi.mock('@/lib/adapters', () => ({ adaptMangaItem: (item: any) => ({ ...item, id: item.slug }) }));
 vi.mock('@/lib/contentFilter', () => ({ isMatureManga: (item: any) => item.mature === true }));
 const page = (...items: any[]) => ({ data: { items } });
@@ -17,13 +18,16 @@ function pending<T = any>() {
 async function debounce() { await act(async () => { vi.advanceTimersByTime(200); }); }
 
 describe('independent source suggestions', () => {
-  beforeEach(() => { vi.useFakeTimers(); vi.resetAllMocks(); });
+  beforeEach(() => { vi.useFakeTimers(); vi.resetAllMocks();
+    vi.mocked(mangaApi.searchSuggestions).mockImplementation((q, source, options) =>
+      source === 'uploaded' ? Promise.resolve(page()) : (source === 'truyenqq' ? requests.qq : requests.mdx)(q, options));
+  });
   afterEach(() => { cleanup(); vi.useRealTimers(); });
 
   it('shows MangaDex while QQ is pending, then shows results from both sources', async () => {
     const slow = pending();
-    vi.mocked(mangaApi.search).mockReturnValue(slow.promise);
-    vi.mocked(mangaApi.searchMangaDex).mockResolvedValue(page(mdx));
+    requests.qq.mockReturnValue(slow.promise);
+    requests.mdx.mockResolvedValue(page(mdx));
     const { result } = renderHook(() => useMangaSuggestions('one piece'));
     await debounce();
     expect(result.current.items.map(item => item.id)).toEqual(['mdx-id']);
@@ -32,28 +36,29 @@ describe('independent source suggestions', () => {
     expect(result.current.items).toHaveLength(6);
     expect(result.current.items[1].source).toBe('mangadex');
     expect(result.current.loading).toBe(false);
-    expect(mangaApi.search).toHaveBeenCalledTimes(1);
-    expect(mangaApi.searchMangaDex).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(mangaApi.search).mock.calls[0][2]).toMatchObject({ includeMangaDex: false, attachRatings: false });
+    expect(requests.qq).toHaveBeenCalledTimes(1);
+    expect(requests.mdx).toHaveBeenCalledTimes(1);
+    expect(mangaApi.searchSuggestions).toHaveBeenCalledWith('one piece', 'truyenqq', expect.objectContaining({ showMature: false }));
   });
 
   it('keeps successful QQ results when MangaDex fails and does not cache the failure', async () => {
-    vi.mocked(mangaApi.search).mockResolvedValue(page(qq()));
-    vi.mocked(mangaApi.searchMangaDex).mockRejectedValue(new Error('upstream unavailable'));
+    requests.qq.mockResolvedValue(page(qq()));
+    requests.mdx.mockRejectedValue(new Error('upstream unavailable'));
     const { result, rerender } = renderHook(({ q }) => useMangaSuggestions(q), { initialProps: { q: 'one piece' } });
     await debounce();
     expect(result.current.items.map(item => item.id)).toEqual(['qq-123']);
     rerender({ q: '' }); rerender({ q: 'one piece' }); await debounce();
-    expect(mangaApi.search).toHaveBeenCalledTimes(2);
+    expect(requests.qq).toHaveBeenCalledTimes(1);
+    expect(requests.mdx).toHaveBeenCalledTimes(2);
   });
 
   it('cancels old searches and never publishes a late result for an earlier keyword', async () => {
     const old = pending();
-    vi.mocked(mangaApi.search).mockReturnValueOnce(old.promise).mockResolvedValue(page(qq('new-123')));
-    vi.mocked(mangaApi.searchMangaDex).mockResolvedValue(page());
+    requests.qq.mockReturnValueOnce(old.promise).mockResolvedValue(page(qq('new-123')));
+    requests.mdx.mockResolvedValue(page());
     const { result, rerender } = renderHook(({ q }) => useMangaSuggestions(q), { initialProps: { q: 'older' } });
     await debounce();
-    const signal = vi.mocked(mangaApi.search).mock.calls[0][2]!.signal!;
+    const signal = requests.qq.mock.calls[0][1]!.signal!;
     rerender({ q: 'newer' }); await debounce();
     expect(signal.aborted).toBe(true);
     await act(async () => old.resolve(page(qq('old-999'))));
@@ -61,22 +66,49 @@ describe('independent source suggestions', () => {
   });
 
   it('applies mature settings, clears results below two characters and isolates viewers', async () => {
-    vi.mocked(mangaApi.search).mockResolvedValue(page(qq(), { ...qq('adult-1'), mature: true }));
-    vi.mocked(mangaApi.searchMangaDex).mockResolvedValue(page(mdx));
+    requests.qq.mockResolvedValue(page(qq(), { ...qq('adult-1'), mature: true }));
+    requests.mdx.mockResolvedValue(page(mdx));
     const { result, rerender } = renderHook(({ q, viewer }) => useMangaSuggestions(q, { viewerKey: viewer }),
       { initialProps: { q: 'one piece', viewer: 'one' } });
     await debounce();
     expect(result.current.items.map(item => item.id)).toEqual(['qq-123', 'mdx-id']);
     rerender({ q: 'o', viewer: 'one' }); expect(result.current.items).toEqual([]);
     rerender({ q: 'one piece', viewer: 'two' }); await debounce();
-    expect(mangaApi.search).toHaveBeenCalledTimes(2);
+    expect(requests.qq).toHaveBeenCalledTimes(2);
   });
 
   it('distinguishes failed sources from a successful empty search', async () => {
-    vi.mocked(mangaApi.search).mockRejectedValue(new Error('timeout'));
-    vi.mocked(mangaApi.searchMangaDex).mockRejectedValue(new Error('timeout'));
+    requests.qq.mockRejectedValue(new Error('timeout'));
+    requests.mdx.mockRejectedValue(new Error('timeout'));
     const { result } = renderHook(() => useMangaSuggestions('unavailable'));
     await debounce();
     expect(result.current).toMatchObject({ failed: true, loading: false, settled: true, items: [] });
+  });
+
+  it('starts at 120 ms and reopens cached results immediately without another network request', async () => {
+    requests.qq.mockResolvedValue(page(qq()));
+    requests.mdx.mockResolvedValue(page(mdx));
+    const { result, rerender } = renderHook(({ q }) => useMangaSuggestions(q), { initialProps: { q: 'one piece' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(119); });
+    expect(mangaApi.searchSuggestions).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(result.current.items).toHaveLength(2);
+    rerender({ q: '' });
+    rerender({ q: 'ONE PIECE' });
+    expect(result.current.items).toHaveLength(2);
+    expect(result.current.loading).toBe(false);
+    await debounce();
+    expect(mangaApi.searchSuggestions).toHaveBeenCalledTimes(3);
+  });
+
+  it('shows uploaded suggestions while both external sources are still pending', async () => {
+    requests.qq.mockReturnValue(new Promise(() => {}));
+    requests.mdx.mockReturnValue(new Promise(() => {}));
+    vi.mocked(mangaApi.searchSuggestions).mockImplementation((q, source, options) => source === 'uploaded'
+      ? Promise.resolve(page({ slug: 'upload-1', source: 'uploaded' })) : (source === 'truyenqq' ? requests.qq : requests.mdx)(q, options));
+    const { result } = renderHook(() => useMangaSuggestions('one piece'));
+    await debounce();
+    expect(result.current.items.map(item => item.id)).toEqual(['upload-1']);
+    expect(result.current.loading).toBe(true);
   });
 });

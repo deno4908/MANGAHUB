@@ -542,10 +542,11 @@ export function useChapter(chapterId: string | undefined) {
   });
 }
 
-export function useSearch(keyword: string, page = 1, enabled = true) {
+export function useSearch(keyword: string, page = 1, enabled = true, genres: string[] = []) {
   const normalizedKeyword = keyword.trim();
+  const showMature = useSettingsStore(s => s.settings.privacy.showMatureContent);
   return useQuery({
-    queryKey: ["manga", "search", normalizedKeyword, page],
+    queryKey: ["manga", "search", "paged-v3", normalizedKeyword, page, [...genres].sort(), showMature],
     queryFn: async ({ signal }) => {
       if (!normalizedKeyword)
         return {
@@ -555,6 +556,7 @@ export function useSearch(keyword: string, page = 1, enabled = true) {
           totalPages: 1,
         };
       const data = await mangaApi.search(normalizedKeyword, page, {
+        limit: 24, showMature, genreSlugs: genres,
         skipAuth: true,
         attachRatings: false,
         mangaDexAttachLatest: false,

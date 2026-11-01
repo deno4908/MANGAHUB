@@ -5780,6 +5780,38 @@ async def add_view(
     }
 
 
+def _search_payload(items, total, page, limit, unavailable=()):
+    return {"data": {"items": items, "params": {"pagination": {
+        "totalItems": total, "totalItemsPerPage": limit, "currentPage": page,
+        "totalPages": max(1, math.ceil(total / limit)),
+    }}}, "meta": {"unavailable_sources": list(unavailable)}}
+
+
+async def _search_uploads(keyword, db, limit=None):
+    # Include every published match in stable order; never repeat the first ten
+    # uploads on every page or omit them from the combined result count.
+    def load():
+        rows, offset = [], 0
+        while True:
+            size = min(500, limit - offset) if limit else 500
+            result = (db.table("manga_uploads")
+                .select("manga_slug, title, author, cover_url, manga_type, genres, description, publish_status")
+                .eq("status", "published").ilike("title", f"%{keyword}%")
+                .order("manga_slug").range(offset, offset + size - 1).execute())
+            batch = result.data or []
+            rows.extend(batch)
+            if len(batch) < size or (limit and len(rows) >= limit):
+                return rows
+            offset += len(batch)
+    rows = await asyncio.to_thread(load)
+    return [{"name": row.get("title", ""), "slug": row.get("manga_slug", ""),
+        "thumb_url": row.get("cover_url", ""),
+        "category": [{"name": g, "slug": g.lower().replace(" ", "-")} for g in (row.get("genres") or [])],
+        "status": row.get("publish_status", "ongoing"), "content": (row.get("description") or "")[:200],
+        "author": [row.get("author", "")], "is_user_upload": True,
+        "manga_type": row.get("manga_type", "manga")} for row in rows]
+
+
 @router.get("/search")
 async def search(
     keyword: str = Query(..., min_length=1),
@@ -5790,117 +5822,93 @@ async def search(
     mangadex_timeout_ms: int = Query(0, ge=0, le=15000),
     mangadex_translated_language: str = Query("vi"),
     mangadex_attach_latest: bool = Query(True),
+    limit: int = 24,
+    show_mature: bool = True,
+    genre_slugs: str = "",
     user=Depends(get_optional_user),
     db=Depends(get_supabase_public),
     response: Response = None,
 ):
-    """Tìm kiếm truyện."""
-    otruyen_task = truyenqq_service.search_manga(keyword, page=page)
-    if include_mangadex:
-        mangadex_task: Any = mangadex_service.search_manga(
-            keyword=keyword,
-            page=page,
-            limit=mangadex_limit,
-            translated_language=mangadex_translated_language,
-            attach_latest=mangadex_attach_latest,
-        )
-        if mangadex_timeout_ms > 0:
-            mangadex_task = asyncio.wait_for(
-                mangadex_task,
-                timeout=mangadex_timeout_ms / 1000,
-            )
-        data_result, mdx_result = await asyncio.gather(
-            otruyen_task,
-            mangadex_task,
-            return_exceptions=True,
-        )
-    else:
-        try:
-            data_result = await otruyen_task
-        except Exception as exc:
-            data_result = exc
-        mdx_result = {"data": {"items": [], "params": {"pagination": {"totalItems": 0}}}}
-
-    data = data_result if isinstance(data_result, dict) else {"data": {"items": [], "params": {"pagination": {}}}}
-    mdx_data = mdx_result if isinstance(mdx_result, dict) else {"data": {"items": [], "params": {"pagination": {"totalItems": 0}}}}
-
-    base_items = (data.get("data") or {}).get("items") or []
-    mdx_items = (mdx_data.get("data") or {}).get("items") or []
-
-    # Search user-uploaded manga from manga_uploads table
-    uploaded_items = []
-    try:
-        uploaded_result = await asyncio.to_thread(
-            lambda: db.table("manga_uploads")
-            .select("manga_slug, title, author, cover_url, manga_type, genres, description, publish_status")
-            .eq("status", "published")
-            .ilike("title", f"%{keyword}%")
-            .limit(10)
-            .execute()
-        )
-        if uploaded_result and uploaded_result.data:
-            for um in uploaded_result.data:
-                uploaded_items.append({
-                    "name": um.get("title", ""),
-                    "slug": um.get("manga_slug", ""),
-                    "thumb_url": um.get("cover_url", ""),
-                    "category": [{"name": g, "slug": g.lower().replace(" ", "-")} for g in (um.get("genres") or [])],
-                    "status": um.get("publish_status", "ongoing"),
-                    "content": (um.get("description") or "")[:200],
-                    "author": [um.get("author", "")],
-                    "is_user_upload": True,
-                    "manga_type": um.get("manga_type", "manga"),
-                })
-    except Exception:
-        pass
-
-    unavailable_sources = []
-    if isinstance(data_result, Exception):
-        unavailable_sources.append("truyenqq")
-    if include_mangadex and isinstance(mdx_result, Exception):
-        unavailable_sources.append("mangadex")
-    if not uploaded_items and len(unavailable_sources) == (2 if include_mangadex else 1):
-        raise HTTPException(503, "Các nguồn tìm kiếm tạm thời không khả dụng. Vui lòng thử lại.",
-                            headers=data_result.headers if isinstance(data_result, HTTPException) else None)
-    if isinstance(data_result, HTTPException) and response is not None and data_result.headers:
-        response.headers.update(data_result.headers)
-    data.setdefault("meta", {})["unavailable_sources"] = unavailable_sources
-    merged_items = [*uploaded_items, *base_items, *mdx_items]
-    seen: set[str] = set()
-    dedup_items = []
-    for item in merged_items:
-        slug = str((item or {}).get("slug") or (item or {}).get("id") or "")
-        if not slug or slug in seen:
+    """One result window across uploads, QQ's finite matches and MangaDex."""
+    limit = max(1, min(24, limit))
+    offset = (page - 1) * limit
+    genres = {slug.strip().lower() for slug in genre_slugs.split(",") if slug.strip()}
+    # QQ's AJAX endpoint has one finite match set. Reuse it on every UI page
+    # to calculate its prefix length, not as a second independently paged list.
+    qq, uploads, hidden = await asyncio.gather(
+        truyenqq_service.search_manga(keyword, page=1), _search_uploads(keyword, db),
+        _get_hidden_slugs(db), return_exceptions=True)
+    if isinstance(hidden, Exception):
+        raise hidden
+    unavailable = ["truyenqq"] if isinstance(qq, Exception) else []
+    if isinstance(uploads, Exception):
+        unavailable.append("uploaded")
+        uploads = []
+    if isinstance(qq, HTTPException) and response is not None and qq.headers:
+        response.headers.update(qq.headers)
+    prefix, seen = [], set()
+    for item in [*uploads, *_otruyen_payload_items(qq)]:
+        slug = str(item.get("slug") or item.get("id") or "").lower()
+        if not slug or slug in seen or not _otruyen_item_matches_filters(item,
+            required_genres=genres, status_value="", show_mature=show_mature, hidden=hidden):
             continue
         seen.add(slug)
-        dedup_items.append(item)
-
-    # Filter hidden manga from search results
-    hidden = await _get_hidden_slugs(db)
-    if hidden:
-        dedup_items = _filter_hidden(dedup_items, hidden)
-
-    if isinstance(data, dict):
-        data.setdefault("data", {})
-        data["data"]["items"] = dedup_items
-        data["data"].setdefault("params", {})
-        data["data"]["params"].setdefault("pagination", {})
-        base_total = int(str(data["data"]["params"]["pagination"].get("totalItems") or len(base_items)))
-        mdx_total = int(str((((mdx_data.get("data") or {}).get("params") or {}).get("pagination") or {}).get("totalItems") or len(mdx_items)))
-        data["data"]["params"]["pagination"]["totalItems"] = base_total + mdx_total
-        # Each source advances one source page per UI page. Dividing their
-        # combined total by the first merged page size skips later MDX pages.
-        data["data"]["params"]["pagination"]["totalPages"] = max(
-            1, _otruyen_payload_total_pages(data_result), _otruyen_payload_total_pages(mdx_data)
-        )
-        data["data"]["params"]["pagination"]["totalItemsPerPage"] = max(
-            len(dedup_items),
-            int(str(data["data"]["params"]["pagination"].get("totalItemsPerPage") or 24)),
-        )
-        data["data"]["params"]["pagination"]["currentPage"] = page
+        prefix.append(item)
+    items = prefix[offset:offset + limit]
+    mdx_total = 0
+    if include_mangadex:
+        # Offset the MDX window by the finite prefix so surplus results carry
+        # into page two. Fetch only the missing slots, never discard a page tail.
+        mdx_offset = max(0, offset - len(prefix))
+        slots = limit - len(items)
+        try:
+            task = mangadex_service.search_manga(keyword=keyword, page=page,
+                limit=slots or 1, offset_override=mdx_offset,
+                translated_language=mangadex_translated_language,
+                attach_latest=mangadex_attach_latest, included_tag_slugs=sorted(genres),
+                content_ratings=["safe", "suggestive", "erotica", "pornographic"] if show_mature else ["safe", "suggestive"])
+            mdx = await asyncio.wait_for(task, mangadex_timeout_ms / 1000) if mangadex_timeout_ms > 0 else await task
+            pagination = ((mdx.get("data") or {}).get("params") or {}).get("pagination") or {}
+            mdx_total = min(10000, int(pagination.get("totalItems") or 0))
+            if slots:
+                items.extend(_filter_hidden(_otruyen_payload_items(mdx), hidden)[:slots])
+        except Exception:
+            unavailable.append("mangadex")
+    if not prefix and "truyenqq" in unavailable and (not include_mangadex or "mangadex" in unavailable):
+        raise HTTPException(503, "Các nguồn tìm kiếm tạm thời không khả dụng. Vui lòng thử lại.",
+            headers=qq.headers if isinstance(qq, HTTPException) else None)
+    data = _search_payload(items, len(prefix) + mdx_total, page, limit, unavailable)
     if attach_ratings:
         await _async_attach_ratings_to_items(data, db, user)
     return data
+
+
+@router.get("/suggestions")
+async def search_suggestions(keyword: str = Query(..., min_length=2, max_length=200),
+    source: str = Query(..., pattern="^(truyenqq|mangadex|uploaded)$"),
+    limit: int = Query(6, ge=1, le=6), show_mature: bool = False,
+    db=Depends(get_supabase_public)):
+    # Each source returns independently. Suggestions need covers/titles, not
+    # chapter, rating or view enrichment. Uploaded suggestions read six rows
+    # independently so a slow external source cannot hold them back.
+    async def load():
+        if source == "truyenqq":
+            return await truyenqq_service.search_manga(keyword, page=1)
+        if source == "uploaded":
+            items = await _search_uploads(keyword, db, limit=limit)
+            return _search_payload(items, len(items), 1, limit)
+        return await mangadex_service.search_manga(keyword=keyword, page=1, limit=limit,
+            translated_language="vi", attach_latest=False,
+            content_ratings=["safe", "suggestive", "erotica", "pornographic"] if show_mature else ["safe", "suggestive"])
+    try:
+        payload, hidden = await asyncio.gather(load(), _get_hidden_slugs(db))
+    except HTTPException:
+        raise
+    except RuntimeError as error:
+        raise HTTPException(503, "Gợi ý tạm thời không khả dụng.") from error
+    items = [item for item in _otruyen_payload_items(payload) if _otruyen_item_matches_filters(item,
+        required_genres=set(), status_value="", show_mature=show_mature, hidden=hidden)][:limit]
+    return _search_payload(items, len(items), 1, limit)
 
 
 @router.get("/mangadex/search")

@@ -8,7 +8,7 @@ import { adaptMangaItem } from '@/lib/adapters';
 import { useMangaSuggestions } from '@/hooks/useMangaSuggestions';
 import { useSettingsStore } from '@/store/settingsStore';
 import { Manga } from '@/types/manga';
-import OptimizedImage from '@/components/ui/OptimizedImage';
+import SuggestionCover from '@/components/manga/SuggestionCover';
 import { getMangaDetailPath } from '@/lib/mangaLinks';
 import BrandLogo from '@/components/manga/BrandLogo';
 
@@ -198,7 +198,7 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
                   {suggestions.map(m => (
                     <Link key={m.id} to={getMangaDetailPath(m.id)} onClick={() => { setSearchQuery(''); clearSuggestions(); }}
                       className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-muted transition-colors">
-                      <OptimizedImage src={m.cover} alt="" className="w-8 h-11 rounded object-cover border border-border" />
+                      <SuggestionCover manga={m} />
                       <div className="min-w-0">
                         <p className="text-sm font-semibold line-clamp-1">{m.title}</p>
                         <p className="text-[10px] text-muted-foreground line-clamp-1">{compactAuthorText(m.author)} · {chapterBadgeText(m)}</p>
@@ -333,7 +333,7 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
                 {suggestions.map(m => (
                   <Link key={m.id} to={getMangaDetailPath(m.id)} onClick={() => { setSearchQuery(''); clearSuggestions(); setShowSearch(false); }}
                     className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted transition-colors">
-                    <OptimizedImage src={m.cover} alt="" className="w-8 h-11 rounded object-cover border border-border" />
+                    <SuggestionCover manga={m} />
                     <div className="min-w-0">
                       <p className="text-sm font-semibold line-clamp-1">{m.title}</p>
                       <p className="text-[10px] text-muted-foreground line-clamp-1">{compactAuthorText(m.author)} · {chapterBadgeText(m)}</p>

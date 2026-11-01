@@ -54,94 +54,47 @@ const SearchPage = () => {
   const [query, setQuery] = useState(urlQuery);
   const page = parseSearchPage(searchParams.get("page"));
   const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
-  const [debouncedQuery, setDebouncedQuery] = useState(urlQuery);
-  const queryRef = useRef(urlQuery);
-  const skipNextQueryUrlWriteRef = useRef(false);
-  const hasInitializedQuerySyncRef = useRef(false);
-
-  const setSearchLocation = useCallback(
-    (nextQuery: string, nextPage: number, replace = false) => {
-      setSearchParams((currentParams) => {
-        const nextParams = new URLSearchParams(currentParams);
-        const hasQuery = nextQuery.trim().length > 0;
-        const safePage = Math.max(1, Math.floor(Number(nextPage) || 1));
-
-        if (hasQuery) {
-          // Preserve spaces while typing. Search requests normalize separately.
-          nextParams.set("q", nextQuery);
-        } else {
-          nextParams.delete("q");
-        }
-
-        if (safePage > 1) {
-          nextParams.set("page", String(safePage));
-        } else {
-          nextParams.delete("page");
-        }
-
-        return nextParams;
-      }, { replace });
-    },
-    [setSearchParams],
-  );
-
-  const setPage = useCallback(
-    (nextPage: number, replace = false) => {
-      setSearchLocation(query, nextPage, replace);
-    },
-    [query, setSearchLocation],
-  );
-
+  const inputTimer = useRef<ReturnType<typeof setTimeout>>();
+  const debouncedQuery = urlQuery;
+  const setSearchLocation = useCallback((nextQuery: string, nextPage: number, replace = false) => {
+    setSearchParams(current => {
+      const next = new URLSearchParams(current);
+      if (nextQuery.trim()) next.set("q", nextQuery); else next.delete("q");
+      if (nextPage > 1) next.set("page", String(nextPage)); else next.delete("page");
+      return next;
+    }, { replace });
+  }, [setSearchParams]);
+  // URL navigation owns the submitted query and page. Only typing schedules a
+  // reset to page one; a new setSearchParams callback must never schedule it.
   useEffect(() => {
-    queryRef.current = query;
-  }, [query]);
-
-  useEffect(() => {
-    if (urlQuery === queryRef.current) return;
-
-    // A URL change from back/forward or a shared link is authoritative. Do not
-    // immediately write it back, otherwise it would reset its page to one.
-    skipNextQueryUrlWriteRef.current = true;
-    queryRef.current = urlQuery;
+    clearTimeout(inputTimer.current);
     setQuery(urlQuery);
-    setDebouncedQuery(urlQuery);
-  }, [urlQuery]);
-
-  const handleQueryChange = (val: string) => setQuery(val);
-
-  useEffect(() => {
-    if (!hasInitializedQuerySyncRef.current) {
-      hasInitializedQuerySyncRef.current = true;
-      return;
-    }
-
-    if (skipNextQueryUrlWriteRef.current) {
-      skipNextQueryUrlWriteRef.current = false;
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      setDebouncedQuery(query);
-      // Keep a typed search shareable without adding a history entry per keystroke.
-      setSearchLocation(query, 1, true);
-    }, 250);
-    return () => window.clearTimeout(timer);
-  }, [query, setSearchLocation]);
+  }, [urlQuery, page]);
+  useEffect(() => () => clearTimeout(inputTimer.current), []);
+  const handleQueryChange = (value: string) => {
+    setQuery(value);
+    clearTimeout(inputTimer.current);
+    inputTimer.current = setTimeout(() => setSearchLocation(value, 1, true), 200);
+  };
+  const setPage = (nextPage: number) => {
+    clearTimeout(inputTimer.current);
+    setQuery(urlQuery);
+    setSearchLocation(urlQuery, nextPage);
+  };
 
   const trimmedDebouncedQuery = debouncedQuery.trim();
   const serverSearchPage = page;
-  const combinedQuery = useSearch(trimmedDebouncedQuery, page, selectedGenres.length === 0);
   const { data: homepageData } = useHomepage(!trimmedDebouncedQuery && selectedGenres.length === 0);
   const { data: categories = [] } = useCategories();
   const selectedSlugs = selectedGenres.map(name => categories.find(cat => cat.name === name)?.slug || toSlug(name));
+  const combinedQuery = useSearch(trimmedDebouncedQuery, page, true, selectedSlugs);
   const filteredQuery = useQuery({
     queryKey: ["search", "filtered-v2", trimmedDebouncedQuery, selectedSlugs, page, showMatureContent],
-    enabled: selectedGenres.length > 0,
+    enabled: selectedGenres.length > 0 && !trimmedDebouncedQuery,
     queryFn: async () => {
       const requests = [mangaApi.searchMangaDex({ keyword: trimmedDebouncedQuery, genreSlugs: selectedSlugs,
-        page, sort: trimmedDebouncedQuery ? "relevance" : "latest", showMature: showMatureContent })];
-      if (!trimmedDebouncedQuery) requests.push(mangaApi.getOTruyenFiltered({ genreSlugs: selectedSlugs, page, sort: "latest", showMature: showMatureContent }));
-      else requests.push(mangaApi.search(trimmedDebouncedQuery, page, { includeMangaDex: false, attachRatings: false }));
+        page, limit: 12, sort: "latest", showMature: showMatureContent })];
+      if (!trimmedDebouncedQuery) requests.push(mangaApi.getOTruyenFiltered({ genreSlugs: selectedSlugs, page, limit: 12, sort: "latest", showMature: showMatureContent }));
       const settled = await Promise.allSettled(requests);
       const pages = settled.filter((item): item is PromiseFulfilledResult<any> => item.status === "fulfilled")
         .map(item => adaptListData(item.value));
@@ -152,7 +105,7 @@ const SearchPage = () => {
     },
     staleTime: 2 * 60 * 1000, retry: 1, refetchOnWindowFocus: false,
   });
-  const activeQuery = selectedGenres.length ? filteredQuery : combinedQuery;
+  const activeQuery = selectedGenres.length && !trimmedDebouncedQuery ? filteredQuery : combinedQuery;
   const searchData = activeQuery.data;
   const isLoading = activeQuery.isLoading;
   const isSearchFetching = activeQuery.isFetching;
@@ -171,16 +124,9 @@ const SearchPage = () => {
     if (!showMatureContent) {
       items = items.filter((m) => !isMatureManga(m));
     }
-    if (selectedGenres.length === 0 || !trimmedDebouncedQuery) return items;
-    const selected = selectedGenres.map(normalizeTag);
-
-    const filteredBaseItems = items.filter((m) =>
-      m.source === 'mangadex' || selected.every((g) => m.genres.map(normalizeTag).includes(g)),
-    );
-
-    return filteredBaseItems;
+    return items;
   }, [debouncedQuery, searchData, homepageData, showMatureContent, selectedGenres]);
-  const results = allResults;
+  const results = allResults.slice(0, 24);
 
   const loadingState =
     (isLoading && allResults.length === 0) ||
@@ -250,7 +196,7 @@ const SearchPage = () => {
             </div>
             {results.length > 0 ? (
               <>
-                <MangaGrid manga={results} />
+                <MangaGrid manga={results} lazyBatch={false} animateEntrance={false} />
                 {debouncedQuery.trim() || selectedGenres.length > 0 ? (
                   <MangaPagination
                     currentPage={page}

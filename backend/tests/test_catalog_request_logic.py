@@ -47,7 +47,7 @@ def test_latest_search_uses_the_shared_eligible_catalog_with_filters(monkeypatch
     assert source.call_args.kwargs["original_languages"] == ["ja"]
 
 
-def test_combined_search_pagination_advances_each_source_page(monkeypatch):
+def test_combined_search_paginates_one_global_window(monkeypatch):
     isolate(monkeypatch)
     monkeypatch.setattr(manga.truyenqq_service, "search_manga", AsyncMock(return_value=page(
         [{"slug": "qq-1"}, {"slug": "qq-2"}], None, size=2, pages=1)))
@@ -56,8 +56,8 @@ def test_combined_search_pagination_advances_each_source_page(monkeypatch):
     result = asyncio.run(manga.search(keyword="one piece", page=1, include_mangadex=True, attach_ratings=False,
         mangadex_limit=24, mangadex_timeout_ms=0, mangadex_translated_language="vi", mangadex_attach_latest=False,
         user=None, db=EmptyDB()))
-    assert len(result["data"]["items"]) == 26
-    assert result["data"]["params"]["pagination"]["totalPages"] == 100
+    assert len(result["data"]["items"]) == 24
+    assert result["data"]["params"]["pagination"]["totalPages"] == 101
 
 
 def test_home_can_render_latest_when_the_other_section_fails(monkeypatch):

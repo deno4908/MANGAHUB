@@ -1312,6 +1312,9 @@ export const mangaApi = {
     keyword: string,
     page = 1,
     options?: {
+      limit?: number;
+      showMature?: boolean;
+      genreSlugs?: string[];
       includeMangaDex?: boolean;
       attachRatings?: boolean;
       mangaDexLimit?: number;
@@ -1330,9 +1333,12 @@ export const mangaApi = {
     const query = new URLSearchParams({
       keyword,
       page: String(page),
+      limit: String(Math.max(1, Math.min(24, options?.limit ?? 24))),
       include_mangadex: includeMangaDex ? "1" : "0",
       attach_ratings: attachRatings ? "1" : "0",
     });
+    if (typeof options?.showMature === 'boolean') query.set('show_mature', String(options.showMature));
+    if (options?.genreSlugs?.length) query.set('genre_slugs', [...new Set(options.genreSlugs)].sort().join(','));
     if (Number.isFinite(mangaDexLimit) && mangaDexLimit > 0) {
       query.set("mangadex_limit", String(Math.floor(mangaDexLimit)));
     }
@@ -1352,6 +1358,10 @@ export const mangaApi = {
       signal: options?.signal,
     });
   },
+  searchSuggestions: (keyword: string, source: 'truyenqq' | 'mangadex' | 'uploaded', options: {
+    showMature: boolean; signal: AbortSignal;
+  }) => publicApi<any>(`/api/manga/suggestions?${new URLSearchParams({ keyword, source,
+    limit: '6', show_mature: String(options.showMature) })}`, { timeoutMs: 6_000, signal: options.signal }),
   getChapter: (id: string) => publicApi<any>(`/api/manga/chapter/${id}`),
   getRandom: () => publicApi<any>("/api/manga/random"),
   getTrending: (limit = 20, source: "all" | "truyenqq" | "mangadex" = "all") => {
