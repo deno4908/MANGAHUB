@@ -54,8 +54,9 @@ export function needsSavedCover(value: unknown): boolean {
 
 /** Load MangaDex covers through our image client; recover stale filenames by ID. */
 export function resolveSavedMangaCover(identifier: string, cover?: string, storedFallback?: string, coverSize: 256 | 512 = 512): { primary: string; fallback: string } {
-  const id = normalizeMangaDexId(identifier) || String(identifier || '').trim();
-  const current = id ? thumbUrl('', id) : PLACEHOLDER;
+  const mangaDexId = normalizeMangaDexId(identifier);
+  const id = mangaDexId || String(identifier || '').trim();
+  const current = id ? thumbUrl('', id) + (mangaDexId && coverSize === 256 ? '?size=256' : '') : PLACEHOLDER;
   const raw = String(cover || '').trim();
   let primary = usable(raw) && !legacyCover(raw) ? raw : current;
   if (!usable(primary)) return { primary: PLACEHOLDER, fallback: PLACEHOLDER };
@@ -72,7 +73,10 @@ export function resolveSavedMangaCover(identifier: string, cover?: string, store
     const source = new URL(primary, API_BASE);
     if (/^https?:$/.test(source.protocol) && /^(?:uploads\.mangadex\.org|.+\.mangadex\.network)$/i.test(source.hostname)) {
       if (coverSize === 256 && source.hostname === 'uploads.mangadex.org' && source.pathname.startsWith('/covers/')) {
-        source.pathname = source.pathname.replace(/\.512\.jpg$/i, '.256.jpg');
+        // Older saved records can contain the original multi-megabyte PNG/JPG,
+        // rather than an already sized thumbnail. Cards need the same small URL
+        // in either case, including the by-ID fallback when a filename expires.
+        source.pathname = source.pathname.replace(/\.(?:256|512)\.jpg$/i, '') + '.256.jpg';
       }
       // A browser can be redirected to an interactive challenge by the CDN.
       // Use the authenticated proxy immediately, sharing coverCache downloads.

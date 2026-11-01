@@ -98,6 +98,32 @@ def test_untrusted_or_different_book_cover_hints_are_not_used(stored, monkeypatc
     upstream.assert_awaited_once()
 
 
+@pytest.mark.parametrize('filename', ['original.png', 'cover.jpg.512.jpg', 'cover.jpg.256.jpg'])
+def test_current_cover_fallback_keeps_list_thumbnails_small_without_changing_detail_default(monkeypatch, filename):
+    source = f'https://uploads.mangadex.org/covers/{MANGA}/{filename}'
+    monkeypatch.setattr(mdx, 'get_cover_url', AsyncMock(return_value=source))
+    small = asyncio.run(manga.mangadex_cover(MANGA, size=256))
+    target = parse_qs(urlparse(small.headers['location']).query)['url'][0]
+    original = filename.replace('.512.jpg', '').replace('.256.jpg', '')
+    assert target == f'https://uploads.mangadex.org/covers/{MANGA}/{original}.256.jpg'
+    default = asyncio.run(manga.mangadex_cover(MANGA))
+    assert parse_qs(urlparse(default.headers['location']).query)['url'][0] == source
+
+
+def test_small_cover_http_query_accepts_numeric_size_and_rejects_other_sizes(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(mdx, 'get_cover_url', AsyncMock(return_value=COVER))
+    app = FastAPI()
+    app.include_router(manga.router, prefix='/api/manga')
+    with TestClient(app) as client:
+        response = client.get(f'/api/manga/mangadex-cover/{MANGA}?size=256', follow_redirects=False)
+        assert response.status_code == 302
+        target = parse_qs(urlparse(response.headers['location']).query)['url'][0]
+        assert target == COVER.replace('.512.jpg', '.256.jpg')
+        assert client.get(f'/api/manga/mangadex-cover/{MANGA}?size=100000').status_code == 400
+
+
 def test_search_recovers_the_exact_page_after_catalog_invalidation(stored, monkeypatch):
     values, _ = stored
     async def request(*args, **kwargs):

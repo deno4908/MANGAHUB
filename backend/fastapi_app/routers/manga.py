@@ -15,7 +15,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape, unescape as html_unescape
 from typing import Any, Annotated
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -7617,9 +7617,11 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
 
 
 @router.get("/mangadex-cover/{manga_id}")
-async def mangadex_cover(manga_id: str):
+async def mangadex_cover(manga_id: str, size: int = 512):
     """Resolve MangaDex cover image URL by manga ID and redirect through the local proxy."""
     manga_id = manga_id.strip()
+    if size not in {256, 512}:
+        raise HTTPException(status_code=400, detail="Invalid cover size")
     if not mangadex_service._MANGADEX_UUID_RE.fullmatch(manga_id):
         raise HTTPException(status_code=400, detail="Invalid manga ID")
     manga_id = manga_id.lower()
@@ -7633,6 +7635,12 @@ async def mangadex_cover(manga_id: str):
 
     if not cover_url:
         raise HTTPException(status_code=404, detail="Cover not found")
+
+    if size == 256:
+        source = urlsplit(cover_url)
+        if source.hostname == 'uploads.mangadex.org' and source.path.startswith('/covers/'):
+            small = re.sub(r'\.(?:256|512)\.jpg$', '', source.path, flags=re.I) + '.256.jpg'
+            cover_url = urlunsplit(source._replace(path=small))
 
     return RedirectResponse(url=f"/api/images/img?url={quote(cover_url, safe='')}", status_code=302)
 

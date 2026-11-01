@@ -64,12 +64,23 @@ it('shares the small cover URL between card rendering and page prefetch while re
   expect(resolveSavedMangaCover(mdx, card.primary, card.fallback, 256)).toEqual(card);
 });
 
-it('does not resize reader pages, original covers, or other source images', () => {
+it('does not resize reader pages or other source images', () => {
   const page = 'https://node.mangadex.network/data/hash/page.512.jpg';
-  const original = `https://uploads.mangadex.org/covers/${mdx}/original.jpg`;
-  for (const source of [page, original]) {
+  for (const source of [page]) {
     expect(new URL(resolveSavedMangaCover(mdx, source, undefined, 256).primary).searchParams.get('url')).toBe(source);
   }
   const ownCover = 'https://own.supabase.co/storage/v1/object/public/covers/own.512.jpg';
   expect(resolveSavedMangaCover('own-book', ownCover, undefined, 256).primary).toBe(ownCover);
 });
+
+it.each(['original.jpg', 'original.png', 'original.webp', 'original.png.256.jpg', 'original.jpg.512.jpg'])(
+  'uses a small thumbnail even for an original saved cover and keeps recovery small: %s', filename => {
+    const source = `https://uploads.mangadex.org/covers/${mdx}/${filename}`;
+    const result = resolveSavedMangaCover(mdx, source, undefined, 256);
+    expect(new URL(result.primary).searchParams.get('url')).toBe(source.replace(/\.(?:256|512)\.jpg$/, '') + '.256.jpg');
+    expect(new URL(result.fallback).searchParams.get('size')).toBe('256');
+    expect(resolveSavedMangaCover(mdx, result.primary, result.fallback, 256)).toEqual(result);
+    expect(resolveSavedMangaCover(mdx, '', undefined, 256).primary).toContain('?size=256');
+    expect(new URL(resolveSavedMangaCover(mdx, source).primary).searchParams.get('url')).toBe(source);
+  },
+);
