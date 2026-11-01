@@ -12,6 +12,7 @@ import httpx
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit
 from fastapi_app.services.cache_service import cache
 from fastapi_app.services.request_coalescing import coalesce_reads
 
@@ -32,15 +33,11 @@ _MANGADEX_UUID_RE = re.compile(
 
 BASE_URL = "https://api.mangadex.org"
 REQUEST_HEADERS = {
-    "Accept": "application/json, text/plain, */*",
+    "Accept": "application/json",
     "Accept-Language": "vi,en-US;q=0.9,en;q=0.8",
-    "Origin": "https://mangadex.org",
-    "Referer": "https://mangadex.org/",
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
-    ),
+    # Identify server-to-server API traffic honestly. Browser User-Agents can
+    # be redirected to an interactive edge challenge instead of receiving JSON.
+    "User-Agent": "MangaHub/1.0 (MangaDex API client)",
 }
 
 TRANSPORT_HTTPX = "httpx"
@@ -650,6 +647,7 @@ def _get_curl_session() -> Any:
                 _curl_session = CurlSession(
                     impersonate=CURL_IMPERSONATE,
                     headers=REQUEST_HEADERS,
+                    allow_redirects=False,
                 )
     return _curl_session
 
@@ -672,6 +670,7 @@ def _request_json_via_curl_sync(url: str, params: dict[str, Any]) -> dict[str, A
             url,
             params=params,
             timeout=REQUEST_TIMEOUT_SECONDS,
+            allow_redirects=False,
         )
     except _MangaDexNetworkError:
         raise
@@ -679,6 +678,27 @@ def _request_json_via_curl_sync(url: str, params: dict[str, Any]) -> dict[str, A
         _reset_curl_session()
         raise _MangaDexNetworkError(_format_exception(error)) from error
 
+    return _decode_api_response(response)
+
+
+def _decode_api_response(response: Any) -> dict[str, Any]:
+    """Accept API objects only; never follow or cache an interactive challenge."""
+    location = response.headers.get("Location", "")
+    content_type = response.headers.get("Content-Type", "").lower()
+    # Do not include Location/body in this error: challenge URLs can contain
+    # client identifiers and IP addresses. A browser cookie is not an API key.
+    if "/edge/challenge" in urlsplit(location).path or "text/html" in content_type:
+        raise _MangaDexStatusError(
+            "MangaDex API returned browser verification instead of JSON",
+            status_code=503,
+            retry_after="30",
+        )
+    if 300 <= response.status_code < 400:
+        raise _MangaDexStatusError(
+            f"MangaDex API returned an unexpected redirect (HTTP {response.status_code})",
+            status_code=503,
+            retry_after="30",
+        )
     if response.status_code >= 400:
         request_id = response.headers.get("X-Request-ID", "")
         retry_after = response.headers.get("X-RateLimit-Retry-After") or response.headers.get("Retry-After")
@@ -690,9 +710,12 @@ def _request_json_via_curl_sync(url: str, params: dict[str, Any]) -> dict[str, A
         )
 
     try:
-        return response.json()
+        payload = response.json()
     except Exception as error:
-        raise _MangaDexNetworkError(f"Invalid JSON response: {_format_exception(error)}") from error
+        raise _MangaDexNetworkError("MangaDex API returned invalid JSON") from error
+    if not isinstance(payload, dict):
+        raise _MangaDexNetworkError("MangaDex API returned a non-object JSON response")
+    return payload
 
 
 async def _request_json_via_curl(url: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -703,25 +726,12 @@ async def _request_json_via_curl(url: str, params: dict[str, Any]) -> dict[str, 
 async def _request_json_via_httpx(url: str, params: dict[str, Any]) -> dict[str, Any]:
     client = await _get_client()
     try:
-        response = await client.get(url, params=params)
+        response = await client.get(url, params=params, follow_redirects=False)
     except httpx.HTTPError as error:
         await _reset_client()
         raise _MangaDexNetworkError(_format_exception(error)) from error
 
-    if response.status_code >= 400:
-        request_id = response.headers.get("X-Request-ID", "")
-        retry_after = response.headers.get("X-RateLimit-Retry-After") or response.headers.get("Retry-After")
-        body = _compact_error_body(response.text)
-        raise _MangaDexStatusError(
-            f"HTTP {response.status_code} | X-Request-ID: {request_id} | body: {body}",
-            status_code=response.status_code,
-            retry_after=retry_after,
-        )
-
-    try:
-        return response.json()
-    except Exception as error:
-        raise _MangaDexNetworkError(f"Invalid JSON response: {_format_exception(error)}") from error
+    return _decode_api_response(response)
 
 
 def _stable_request_value(value: Any) -> Any:
