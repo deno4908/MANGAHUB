@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mangaApi } from '@/lib/api';
 import { useHomepageCombined } from './useApi';
+import { setSiteAccessRestricted } from '@/lib/siteAccessState';
 
 const mdxId = 'f239fcd4-9f7f-4296-9e52-ee5a66a7e938';
 const page = (name: string, source = 'truyenqq') => ({ data: {
@@ -17,13 +18,14 @@ function deferred<T = any>() {
 }
 let client: QueryClient;
 beforeEach(() => {
+  setSiteAccessRestricted(false);
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.spyOn(mangaApi, 'getHomepage').mockResolvedValue(home('QQ old'));
   vi.spyOn(mangaApi, 'getMangaDexHomeBanner').mockResolvedValue(page('MangaDex old', 'mangadex'));
   vi.spyOn(mangaApi, 'getFeatured').mockResolvedValue(page('Featured'));
   vi.spyOn(mangaApi, 'getOTruyenFiltered').mockResolvedValue(page('QQ fallback'));
 });
-afterEach(() => { cleanup(); client.clear(); vi.restoreAllMocks(); vi.useRealTimers(); });
+afterEach(() => { cleanup(); client.clear(); setSiteAccessRestricted(false); vi.restoreAllMocks(); vi.useRealTimers(); });
 const wrapper = ({ children }: { children: React.ReactNode }) =>
   <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 
@@ -298,4 +300,79 @@ it('reports an error when neither source nor the QQ fallback is available', asyn
   await waitFor(() => expect(result.current.isError).toBe(true));
   expect(result.current.data).toBeUndefined();
   expect(mangaApi.getHomepage).toHaveBeenCalledTimes(1);
+});
+
+it('recovers a completely failed first load without a manual retry and stops polling after success', async () => {
+  vi.useFakeTimers();
+  vi.mocked(mangaApi.getHomepage).mockRejectedValueOnce(new TypeError('Failed to fetch'));
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockRejectedValueOnce(new Error('temporary outage'));
+  vi.mocked(mangaApi.getOTruyenFiltered).mockRejectedValueOnce(new Error('temporary outage'));
+  const { result } = renderHook(() => useHomepageCombined(), { wrapper });
+  await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+  expect(result.current.isError).toBe(true);
+  expect(result.current.data).toBeUndefined();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1_020); });
+  expect(result.current.data?.latest.items[0].title).toBe('QQ old');
+  expect(result.current.data?.mangadex.items[0].title).toBe('MangaDex old');
+  expect(result.current.data?.unavailableSources).toEqual([]);
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(mangaApi.getHomepage).toHaveBeenCalledTimes(2);
+  expect(mangaApi.getMangaDexHomeBanner).toHaveBeenCalledTimes(2);
+});
+
+it('backs off complete outages to thirty seconds and cancels an automatic retry on unmount', async () => {
+  vi.useFakeTimers();
+  vi.mocked(mangaApi.getHomepage).mockRejectedValue(new Error('offline'));
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockRejectedValue(new Error('offline'));
+  vi.mocked(mangaApi.getOTruyenFiltered).mockRejectedValue(new Error('offline'));
+  const { result, unmount } = renderHook(() => useHomepageCombined(), { wrapper });
+  await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+  let calls = 1;
+  for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(delay - 40); });
+    expect(mangaApi.getHomepage).toHaveBeenCalledTimes(calls);
+    await act(async () => { await vi.advanceTimersByTimeAsync(40); });
+    expect(mangaApi.getHomepage).toHaveBeenCalledTimes(++calls);
+  }
+  const pending = deferred();
+  vi.mocked(mangaApi.getHomepage).mockReturnValue(pending.promise);
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+  expect(result.current.isFetching).toBe(true);
+  const signal = vi.mocked(mangaApi.getHomepage).mock.lastCall?.[0]?.signal;
+  unmount();
+  client.removeQueries({ queryKey: ['manga', 'homepage'] });
+  expect(signal?.aborted).toBe(true);
+  const before = vi.mocked(mangaApi.getHomepage).mock.calls.length;
+  await act(async () => { pending.resolve(home('obsolete')); await vi.advanceTimersByTimeAsync(60_000); });
+  expect(mangaApi.getHomepage).toHaveBeenCalledTimes(before);
+  expect(client.getQueriesData({ queryKey: ['manga', 'homepage'] })).toEqual([]);
+});
+
+it.each([Object.assign(new Error('Forbidden'), { status: 403 }), new Error('MAINTENANCE_MODE'), new Error('BANNED')])(
+  'does not poll or use a QQ fallback after a non-recoverable failure: %s', async error => {
+    vi.useFakeTimers();
+    vi.mocked(mangaApi.getHomepage).mockRejectedValue(error);
+    vi.mocked(mangaApi.getMangaDexHomeBanner).mockRejectedValue(error);
+    const { result } = renderHook(() => useHomepageCombined(), { wrapper });
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(result.current.isError).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(mangaApi.getHomepage).toHaveBeenCalledTimes(1);
+    expect(mangaApi.getMangaDexHomeBanner).toHaveBeenCalledTimes(1);
+    expect(mangaApi.getOTruyenFiltered).not.toHaveBeenCalled();
+  },
+);
+
+it('still recovers for an approved reader when the website requires whitelist access', async () => {
+  vi.useFakeTimers();
+  setSiteAccessRestricted(true); // This means whitelist enabled, not access denied.
+  vi.mocked(mangaApi.getHomepage).mockRejectedValueOnce(new Error('offline'));
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockRejectedValueOnce(new Error('offline'));
+  vi.mocked(mangaApi.getOTruyenFiltered).mockRejectedValue(new Error('offline'));
+  const { result } = renderHook(() => useHomepageCombined(), { wrapper });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1_050); });
+  expect(result.current.data?.latest.items[0].title).toBe('QQ old');
+  expect(result.current.data?.mangadex.items[0].title).toBe('MangaDex old');
+  expect(mangaApi.getHomepage).toHaveBeenCalledTimes(2);
+  expect(mangaApi.getMangaDexHomeBanner).toHaveBeenCalledTimes(2);
 });

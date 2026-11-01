@@ -172,6 +172,19 @@ type HomepageSnapshot = {
   recoveryAttempts: number;
 };
 
+function canRecoverHomepage(error: unknown): boolean {
+  const failure = error as { status?: number; message?: string; retryable?: boolean } | null;
+  if (failure?.retryable === false) return false;
+  if (/^(MAINTENANCE_MODE|BANNED|FORBIDDEN_ROLE::|MANGA_HIDDEN::)/.test(failure?.message || '')) return false;
+  const status = failure?.status;
+  return !status || status >= 500 || [408, 425, 429].includes(status);
+}
+
+function homepageNeedsRecovery(state: { data?: HomepageSnapshot; error: Error | null; status: string }) {
+  return canRecoverHomepage(state.error)
+    && (state.status === 'error' || !!state.data?.unavailableSources.length);
+}
+
 /** Publish one initial snapshot; recover missing sources without blocking it. */
 export function useHomepageCombined(maxChapters = 120, showMature = false) {
   const client = useQueryClient();
@@ -200,7 +213,7 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
               && (showMature || !isMatureManga(item)));
           if (visible) return payload;
         } catch (error) {
-          if (sourceSignal.aborted) throw error;
+          if (sourceSignal.aborted || !canRecoverHomepage(error)) throw error;
         }
         if (sourceSignal.aborted) throw new DOMException('Homepage request cancelled', 'AbortError');
         // Keep the previous catalog on transient errors/empty refreshes.
@@ -237,7 +250,13 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
         signal.removeEventListener('abort', cancel);
       });
       if (signal.aborted) throw new DOMException('Homepage request cancelled', 'AbortError');
-      if (!previous && results.every(result => result.status === 'rejected')) throw new Error('Home data unavailable');
+      const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+      // Access/maintenance failures must not trigger source fallbacks or polling.
+      // React Query retains an existing snapshot when this refresh throws.
+      if (failures.some(result => !canRecoverHomepage(result.reason))) {
+        throw Object.assign(new Error('Home data unavailable'), { retryable: false });
+      }
+      if (!previous && failures.length === results.length) throw new Error('Home data unavailable');
       const qqData = results[0].status === 'fulfilled' ? results[0].value : undefined;
       const mdxData = results[1].status === 'fulfilled' ? results[1].value : undefined;
       const failedQQSections: string[] = Array.isArray(qqData?.meta?.unavailable_sections)
@@ -263,12 +282,15 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
     staleTime: 30 * 1000,
     gcTime: 15 * 60 * 1000,
     retry: 0,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    refetchOnWindowFocus: query => homepageNeedsRecovery(query.state),
+    refetchOnReconnect: query => homepageNeedsRecovery(query.state),
     // Retry only the missing source, quickly once and then with backoff. Queries
     // pause in hidden tabs and cancellation/access loss cannot repopulate them.
     refetchInterval: query => {
-      if (!query.state.data?.unavailableSources.length) return false;
+      if (!homepageNeedsRecovery(query.state)) return false;
+      // A failed first load has no snapshot yet. It needs recovery too, or the
+      // whole home screen stays empty until the visitor presses Retry.
+      if (!query.state.data) return Math.min(1_000 * 2 ** Math.min(query.state.errorUpdateCount - 1, 5), 30_000);
       const attempt = query.state.data.recoveryAttempts;
       return attempt === 0 ? 300 : Math.min(2_000 * 2 ** Math.min(attempt - 1, 5), 60_000);
     },

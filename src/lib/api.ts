@@ -18,7 +18,7 @@ function siteAccessDenied(body: any) {
   if (body?.code !== 'WHITELIST_REQUIRED' && body?.code !== 'ACCESS_TICKET_REVOKED') return;
   setSiteAccessRestricted(true);
   window.dispatchEvent(new CustomEvent(FORCE_SITE_ACCESS_EVENT, { detail: body.site_access }));
-  throw new Error(String(body.detail || 'Bạn không nằm trong whitelist của website.'));
+  throw Object.assign(new Error(String(body.detail || 'Bạn không nằm trong whitelist của website.')), { status: 403, code: body.code });
 }
 export const HOMEPAGE_REFRESH_EVENT = "mb:homepage-refresh";
 const BAN_LOCK_KEY = "banned_lock";
@@ -740,13 +740,13 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
           emitForceForbidden();
           throw new Error(`FORBIDDEN_ROLE::${message}`);
         }
-        throw new Error(message);
+        throw Object.assign(new Error(message), { status: retry.status });
       }
       if (!retry.ok) {
         const body = await retry.json().catch(() => ({}));
-        throw new Error(
+        throw Object.assign(new Error(
           body.error || body.detail || `API error: ${retry.status}`,
-        );
+        ), { status: retry.status });
       }
       return retry;
     }
@@ -756,7 +756,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
     if (shouldStopRestoringSession()) {
       clearTokens({ logoutReason: "session-expired" });
       emitForceLogout("session-expired");
-      throw new Error("Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại");
+      throw Object.assign(new Error("Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại"), { status: 401 });
     }
 
     throw new Error("Không thể làm mới phiên đăng nhập do mạng hoặc máy chủ chậm. Vui lòng thử lại.");
@@ -774,7 +774,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
       emitForceForbidden();
       throw new Error(`FORBIDDEN_ROLE::${message}`);
     }
-    throw new Error(message);
+    throw Object.assign(new Error(message), { status: res.status });
   }
 
   // 451 = admin-hidden manga

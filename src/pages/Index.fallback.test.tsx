@@ -245,3 +245,19 @@ it('keeps good QQ sections instead of swapping in a fallback list on refresh fai
   expect(state.latest.items[0].id).toBe(qq.slug);
   expect(state.unavailableSources).toContain('truyenqq');
 });
+
+it('replaces an initially empty error screen with recovered catalogs without pressing Retry', async () => {
+  let recover!: (value: any) => void;
+  const pending = new Promise(resolve => { recover = resolve; });
+  vi.mocked(mangaApi.getHomepage).mockRejectedValueOnce(new Error('temporary outage')).mockReturnValueOnce(pending);
+  vi.mocked(mangaApi.getOTruyenFiltered).mockRejectedValue(new Error('temporary outage'));
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockRejectedValueOnce(new Error('temporary outage')).mockResolvedValue(page([mdx]));
+  show();
+  expect(await screen.findByText('Chưa tải được truyện. Vui lòng thử lại.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Thử lại' })).toBeEnabled();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Đang thử lại…' })).toBeDisabled(), { timeout: 2_500 });
+  await act(async () => { recover({ latest: page([qq]), ongoing: page([qq]) }); });
+  await waitFor(() => expect(screen.queryByText('Chưa tải được truyện. Vui lòng thử lại.')).not.toBeInTheDocument());
+  expect(within(section('Mới cập nhật')).getByRole('heading', { name: qq.name })).toBeInTheDocument();
+  expect(within(section('Mới cập nhật')).getByRole('heading', { name: mdx.name })).toBeInTheDocument();
+});

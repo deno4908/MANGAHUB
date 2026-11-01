@@ -998,12 +998,17 @@ const Index = () => {
     data,
     isLoading: isInitialMergedLoading,
     isError: isHomepageError,
+    isFetching: isHomepageFetching,
+    errorUpdateCount: homepageErrorCount,
     refetch: refetchHomepageCombined,
   } = useHomepageCombined(120, showMatureContent);
-  const isHomepageCoreReady = !isInitialMergedLoading;
+  // A no-data refetch becomes "pending" again. Keep its error/retry panel
+  // stable instead of flashing the initial skeleton on every recovery attempt.
+  const hasHomepageLoadFailed = isHomepageError || (!data && homepageErrorCount > 0);
+  const isHomepageCoreReady = !isInitialMergedLoading || hasHomepageLoadFailed;
   const homeBannerData = data?.mangadex;
   const isHomeBannerError = (data?.unavailableSources.includes('mangadex') && !homeBannerData?.items.length)
-    || (isHomepageError && !data);
+    || (hasHomepageLoadFailed && !data);
   const isMangaDexUnavailable = isHomeBannerError;
   const isHomeSourceAvailable = useCallback((item: Manga) =>
     !isMangaDexUnavailable || (item.source !== 'mangadex' && !normalizeMangaDexId(item.id)),
@@ -1720,7 +1725,7 @@ const Index = () => {
     return syncMangaDexLatestChapters(candidates, topRatedMangaDexChapterMap as Record<string, MangaDexLatestChapterMeta>);
   }, [topRated, topRatedMangaDexChapterMap, isMangaDexUnavailable, popular]);
 
-  const isHomeSynchronizedLoading = isInitialMergedLoading;
+  const isHomeSynchronizedLoading = isInitialMergedLoading && !hasHomepageLoadFailed;
   const isTopRatedSectionLoading = isHomeSynchronizedLoading;
 
   const isHeroBannerLoading = isHomeSynchronizedLoading;
@@ -1735,10 +1740,11 @@ const Index = () => {
           <HeroSlider manga={heroBannerItems.slice(0, 5)} />
         ) : (
           <div className="h-[340px] bg-muted rounded-2xl flex items-center justify-center">
-            {isHomepageError && isHomeBannerError ? (
+            {hasHomepageLoadFailed && isHomeBannerError ? (
               <div className="text-center space-y-3">
                 <p className="text-muted-foreground font-medium">Chưa tải được truyện. Vui lòng thử lại.</p>
-                <button className="px-4 py-2 rounded-lg bg-primary text-primary-foreground" onClick={() => { void refetchHomepageCombined(); }}>Thử lại</button>
+                <button className="px-4 py-2 rounded-lg bg-primary text-primary-foreground disabled:opacity-60" disabled={isHomepageFetching}
+                  onClick={() => { void refetchHomepageCombined(); }}>{isHomepageFetching ? 'Đang thử lại…' : 'Thử lại'}</button>
               </div>
             ) : <p className="text-muted-foreground font-medium">Chưa có truyện để hiển thị.</p>}
           </div>
