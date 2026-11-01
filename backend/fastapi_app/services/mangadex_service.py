@@ -1107,6 +1107,7 @@ async def get_cover_url(manga_id: str) -> str:
     return cover_url
 
 
+@coalesce_reads
 async def _fetch_cover_urls_for_manga_ids(manga_ids: list[str]) -> dict[str, str]:
     valid_ids = [str(mid or "").strip() for mid in manga_ids]
     valid_ids = [mid for mid in dict.fromkeys(valid_ids) if mid]
@@ -1153,12 +1154,12 @@ async def _fetch_cover_urls_for_manga_ids(manga_ids: list[str]) -> dict[str, str
                     if relation.get("type") == "cover_art" and relation.get("id"):
                         mapping[f"cover:{relation['id']}"] = url
 
-    await asyncio.to_thread(cache.set_many,
-        {f"mangadex:cover-url:v2:{manga_id}": url for manga_id, url in mapping.items()
-         if manga_id not in warm_ids and not manga_id.startswith("cover:")}, ttl=3600)
-    await asyncio.to_thread(_cache_stale_cover_urls,
-        {manga_id: url for manga_id, url in mapping.items()
-         if manga_id not in warm_ids and not manga_id.startswith("cover:")})
+    fresh = {manga_id: url for manga_id, url in mapping.items()
+             if manga_id not in warm_ids and not manga_id.startswith("cover:")}
+    if fresh:
+        await asyncio.to_thread(cache.set_many,
+            {f"mangadex:cover-url:v2:{manga_id}": url for manga_id, url in fresh.items()}, ttl=3600)
+        await asyncio.to_thread(_cache_stale_cover_urls, fresh)
     return mapping
 
 
@@ -2315,7 +2316,8 @@ async def _get_indexed_vi_feed(**options):
         ratings=ratings, excluded=excluded, tags=tags, statuses=options.get("statuses") or [],
         keyword=options.get("keyword") or "", snapshot=options.get("feed_snapshot") or "",
         sort=options.get("sort") or "latest", year=options.get("year"), min_rating=options.get("min_rating") or 0,
-        statistics=options.get("statistics"), original_languages=options.get("original_languages"))
+        statistics=options.get("statistics"), original_languages=options.get("original_languages"),
+        release_state=options.get("release_state"))
     cover_map = await _fetch_cover_urls_for_manga_ids([index.manga_relation(row)["id"] for row in rows])
     items = []
     for row in rows:

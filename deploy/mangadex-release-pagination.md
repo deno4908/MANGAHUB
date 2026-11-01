@@ -28,6 +28,12 @@ cache purges. A separate TLS-validated Redis pool with a bounded three-second
 socket timeout isolates large index I/O from the authentication pool/circuit.
 No new environment variables are required.
 
+Workers prepare title/tag/mature-content metadata once per catalog version,
+then cache up to 64 exact filtered/sorted selections. Cache keys include the
+catalog/statistics version and every filter, including the current hidden IDs.
+Only the requested 24 rows are copied for callers. Processing runs off the ASGI
+event loop, and the prepared-version cache is bounded to two versions.
+
 Refresh work starts after the response body and uses a shared expiring lease.
 Finite 20-second steps resume an updatedAtSince scan, selecting Vietnamese
 readableAt when merging. A periodic full rebuild handles source deletions and
@@ -60,6 +66,19 @@ coalescing avoid repeating those reads for each page/tab. Old aggregates remain
 usable during a temporary DB failure; missing statistics return a retryable
 service error instead of silently applying a zero-score filter. Browsing
 snapshots freeze aggregate rankings as well as release metadata for 30 minutes.
+Ranking snapshots store a small statistics manifest referencing the immutable
+base catalog, instead of duplicating its megabytes for every statistics change.
+Base expiry is extended before publishing each manifest; old full snapshots
+remain readable across deployment. Warm first pages reuse the same snapshot.
+Cold workers skip re-uploading a base snapshot that Redis already contains.
+
+Views and ratings read in parallel using a bounded two-thread pool. Metadata
+and statistics load concurrently on cold workers. An expired successful
+statistics value is served while one coalesced, Vercel-tracked task refreshes
+it; a first read with no known statistics still waits for authoritative data.
+Cover batches coalesce concurrent readers, and fully cached cover URLs require
+no upstream call or cache writes. None of these caches covers authentication,
+moderation decisions or image access policy.
 The client keeps server membership/order, including unrated items, and sends
 year/minimum score to the server instead of filtering a partial local catalog.
 

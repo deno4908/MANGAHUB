@@ -170,7 +170,7 @@ def test_mangadex_cover_batch_reuses_shared_urls_without_crawling(monkeypatch):
     monkeypatch.setattr(mdx, "_request_json", upstream)
     assert asyncio.run(mdx._fetch_cover_urls_for_manga_ids([identifier]))[identifier] == url
     upstream.assert_not_called()
-    assert cache.set_many.call_args.args[0] == {}  # Do not extend the lifetime of old covers.
+    cache.set_many.assert_not_called()  # Do not extend the lifetime of old covers.
 
 
 def test_home_announcements_cannot_hold_up_other_http_requests():

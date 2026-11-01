@@ -177,4 +177,35 @@ def test_cover_batch_outage_reuses_stale_urls_without_extending_their_lifetime(s
     request = AsyncMock(side_effect=RuntimeError("source unavailable"))
     monkeypatch.setattr(mdx, "_request_json", request)
     assert asyncio.run(mdx._fetch_cover_urls_for_manga_ids([MANGA]))[MANGA] == COVER
-    assert f"mangadex:cover-url:v2:{MANGA}" not in cache.set_many.call_args.args[0]
+    cache.set_many.assert_not_called()
+
+
+def test_warm_cover_urls_skip_upstream_and_all_cache_writes(stored, monkeypatch):
+    values, cache = stored
+    values[f"mangadex:cover-url:v2:{MANGA}"] = COVER
+    source = AsyncMock(side_effect=AssertionError("cached covers must not query the source"))
+    monkeypatch.setattr(mdx, "_request_json", source)
+    assert asyncio.run(mdx._fetch_cover_urls_for_manga_ids([MANGA]))[MANGA] == COVER
+    cache.set_many.assert_not_called()
+    source.assert_not_awaited()
+
+
+def test_concurrent_cover_batches_share_upstream_and_disconnected_reader_does_not_cancel_others(stored, monkeypatch):
+    async def check():
+        started, release = asyncio.Event(), asyncio.Event()
+        async def load(*args):
+            started.set()
+            await release.wait()
+            return {"data": [{"id": MANGA, "relationships": [
+                {"type": "cover_art", "attributes": {"fileName": "cover.jpg"}}]}]}
+        source = AsyncMock(side_effect=load)
+        monkeypatch.setattr(mdx, "_request_json", source)
+        first = asyncio.create_task(mdx._fetch_cover_urls_for_manga_ids([MANGA]))
+        second = asyncio.create_task(mdx._fetch_cover_urls_for_manga_ids([MANGA]))
+        await started.wait()
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        release.set()
+        assert (await second)[MANGA] == COVER
+        source.assert_awaited_once()
+    asyncio.run(check())

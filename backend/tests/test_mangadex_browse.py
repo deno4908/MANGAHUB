@@ -42,7 +42,7 @@ def test_statistics_page_all_rows_and_merge_aliases_per_user():
 
     result = browse._read_statistics(SimpleNamespace(table=Query))
     assert result[ID] == {"views": 17, "rating_average": 4.0, "rating_count": 1202}
-    assert requests == [("manga_views", 0), ("ratings", 0), ("ratings", 500), ("ratings", 1000)]
+    assert sorted(requests) == [("manga_views", 0), ("ratings", 0), ("ratings", 500), ("ratings", 1000)]
 
 
 def test_concurrent_statistics_share_one_database_read_and_use_shared_cache(monkeypatch):
@@ -73,6 +73,34 @@ def test_database_outage_uses_previous_statistics_and_never_fakes_zero_ratings(m
     saved = {"checked": 0, "items": {ID: {"rating_average": 4.5, "rating_count": 2}}}
     cache_service.cache.get.return_value = json.dumps(saved)
     assert asyncio.run(browse.statistics(None)) == saved["items"]
+
+
+def test_stale_statistics_return_while_one_tracked_refresh_runs(monkeypatch):
+    import threading
+    entered, release = threading.Event(), threading.Event()
+    previous = {ID: {"views": 10, "rating_average": 4}}
+    newer = {ID: {"views": 11, "rating_average": 4.5}}
+    cache_service.cache.get.return_value = json.dumps({"checked": 0, "items": previous})
+    calls = []
+    def read(db):
+        calls.append(db)
+        entered.set()
+        assert release.wait(2)
+        return newer
+    monkeypatch.setattr(browse, "_read_statistics", read)
+    async def check():
+        try:
+            assert await asyncio.wait_for(browse.statistics("db"), 1) == previous
+            assert await asyncio.to_thread(entered.wait, 1)
+            monkeypatch.setattr(browse, "_local_until", 0)
+            values = await asyncio.gather(*(browse.statistics("db") for _ in range(8)))
+            assert values == [previous] * 8
+            assert len(calls) == 1
+        finally:
+            release.set()
+        await asyncio.gather(*list(browse._refresh_tasks.values()))
+        assert await browse.statistics("db") == newer
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize("sort", ["latest", "popular", "rating", "alphabetical"])

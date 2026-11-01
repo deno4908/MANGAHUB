@@ -45,8 +45,12 @@ def store(monkeypatch):
     monkeypatch.setattr(mdx, "_get_mangadex_tag_id_by_slug", AsyncMock(return_value={"action": "action-id"}))
     monkeypatch.setattr(mdx, "_fetch_cover_urls_for_manga_ids", AsyncMock(return_value={}))
     index._local.clear()
+    index._prepared.clear()
+    index._selections.clear()
     yield client
     index._local.clear()
+    index._prepared.clear()
+    index._selections.clear()
 
 
 def put(client, value):
@@ -231,6 +235,69 @@ def test_changing_sort_reuses_the_same_aggregate_snapshot_without_repacking_cata
     second = asyncio.run(mangadex_browse.page(db=None, sort="popular"))
     assert second["data"]["feed_snapshot"] == first["data"]["feed_snapshot"]
     pack.assert_not_called()
+
+
+def test_compact_ranking_snapshot_reopens_on_another_worker_with_original_order(store, monkeypatch):
+    from fastapi_app.services import mangadex_browse
+    original = state([chapter(n) for n in range(1, 101)])
+    put(store, original)
+    stats = {mid(n): {"views": n} for n in range(1, 101)}
+    monkeypatch.setattr(mangadex_browse, "statistics", AsyncMock(side_effect=lambda db: copy.deepcopy(stats)))
+    first = asyncio.run(mangadex_browse.page(db=None, sort="popular"))
+    token = first["data"]["feed_snapshot"]
+    manifest = index._unpack(store.get(index.PREFIX + "snapshot:" + token))
+    assert "rows" not in manifest
+    assert manifest["base_version"] == original["version"]
+    assert store.ttl(index.PREFIX + "snapshot:" + original["version"]) >= store.ttl(index.PREFIX + "snapshot:" + token)
+    put(store, state([*original["rows"].values(), chapter(500, book=1)]))
+    stats[mid(1)] = {"views": 9999}
+    index._local.clear()
+    index._prepared.clear()
+    index._selections.clear()
+    second = asyncio.run(mangadex_browse.page(db=None, page=2, sort="popular", feed_snapshot=token))
+    assert ids(second) == [mid(n) for n in range(76, 52, -1)]
+    assert not set(ids(first)) & set(ids(second))
+    assert second["data"]["feed_snapshot"] == token
+
+
+def test_warm_pages_reuse_prepared_filters_but_hidden_ids_and_new_versions_still_apply(store, monkeypatch):
+    put(store, state([chapter(n) for n in range(1, 101)]))
+    first = asyncio.run(mdx.get_latest_vi_chapter_feed())
+    marker = Mock(wraps=index._mature_marker)
+    monkeypatch.setattr(index, "_mature_marker", marker)
+    next_page = asyncio.run(mdx.get_latest_vi_chapter_feed(page=2, feed_snapshot=first["data"]["feed_snapshot"]))
+    hidden = asyncio.run(mdx.get_latest_vi_chapter_feed(excluded_manga_ids=[mid(100)]))
+    assert len(ids(next_page)) == len(ids(hidden)) == 24
+    assert mid(100) not in ids(hidden)
+    assert hidden["data"]["params"]["pagination"]["totalItems"] == 99
+    marker.assert_not_called()
+    put(store, state([chapter(n) for n in range(1, 102)]))
+    index._local.clear()
+    newer = asyncio.run(mdx.get_latest_vi_chapter_feed())
+    assert ids(newer)[0] == mid(101)
+    assert marker.call_count > 0
+
+
+def test_filter_processing_does_not_block_other_async_requests(store, monkeypatch):
+    import threading
+    put(store, state([chapter(n) for n in range(1, 51)]))
+    entered, release = threading.Event(), threading.Event()
+    original = index._filter_and_sort
+    def slow(*args):
+        entered.set()
+        assert release.wait(2)
+        return original(*args)
+    monkeypatch.setattr(index, "_filter_and_sort", slow)
+    async def check():
+        task = asyncio.create_task(mdx.get_latest_vi_chapter_feed())
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            # This coroutine must still run while the CPU/filter worker waits.
+            assert not task.done()
+        finally:
+            release.set()
+        assert len(ids(await task)) == 24
+    asyncio.run(check())
 
 
 def test_bootstrap_cursor_crosses_ten_thousand_rows_and_mass_uploads_still_give_full_pages(store, monkeypatch):
