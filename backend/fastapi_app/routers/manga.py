@@ -26,6 +26,7 @@ from fastapi_app.dependencies import get_optional_user, get_supabase, get_supaba
 from fastapi_app.services.cache_service import cache
 from fastapi_app.services import mangadex_service, truyenqq_service
 from fastapi_app.services.public_reads import cached_public_read
+from fastapi_app.services.request_coalescing import coalesce_reads
 otruyen_service = truyenqq_service  # compatibility for existing integrations
 
 from fastapi_app.utils.anti_spam import (
@@ -134,7 +135,7 @@ COMBINED_LIST_TTL_SECONDS = 120
 COMBINED_LIST_STALE_TTL_SECONDS = 900
 COMBINED_LIST_MDX_TIMEOUT_SECONDS = 6.0
 TRENDING_CACHE_TTL_SECONDS = 120
-TRENDING_CACHE_VERSION = "v17-source-independent"
+TRENDING_CACHE_VERSION = "v18-ranked-only"
 TRENDING_ENABLE_NETWORK_DETAIL_ENRICH = False
 MANGADEX_STARTUP_WARMUP_ENABLED = str(
     os.getenv("MANGADEX_STARTUP_WARMUP_ENABLED", "false") or "false"
@@ -6690,8 +6691,8 @@ async def trending_manga(
     trending: list[dict] = []
     normalized_source = _normalize_trending_source(source)
     hidden = await _get_hidden_slugs(db)
-    revisions = ":".join(_source_revision(name) for name in ("truyenqq", "mangadex")
-                         if normalized_source in {"all", name})
+    revisions = ":".join(await asyncio.gather(*(asyncio.to_thread(_source_revision, name)
+        for name in ("truyenqq", "mangadex") if normalized_source in {"all", name})))
     cache_suffix = (f"{limit}" if normalized_source == "all" else f"{normalized_source}:{limit}") + f":rev={revisions}"
     cache_key = f"manga:trending:{TRENDING_CACHE_VERSION}:{cache_suffix}"
     memory_key = f"{TRENDING_CACHE_VERSION}:{cache_suffix}"
@@ -6727,7 +6728,7 @@ async def trending_manga(
     if trending and _has_positive_trending_views(trending):
         _trending_memory_cache[memory_key] = (trending, time.time())
         try:
-            cache.set(
+            await asyncio.to_thread(cache.set,
                 cache_key,
                 json.dumps({"trending": trending, "total": len(trending)}, ensure_ascii=False),
                 ttl=TRENDING_CACHE_TTL_SECONDS,
@@ -6766,7 +6767,7 @@ def _schedule_trending_refresh(
             if trending and _has_positive_trending_views(trending):
                 _trending_memory_cache[memory_key] = (trending, time.time())
                 try:
-                    cache.set(
+                    await asyncio.to_thread(cache.set,
                         cache_key,
                         json.dumps({"trending": trending, "total": len(trending)}, ensure_ascii=False),
                         ttl=TRENDING_CACHE_TTL_SECONDS,
@@ -6918,6 +6919,7 @@ def _load_trending_snapshots(slugs: list[str], revision: str) -> dict[str, Any]:
     return snapshots
 
 
+@coalesce_reads
 async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") -> list[dict]:
     """Heavy computation: build trending from manga_views + reading_history DB tables."""
     import asyncio
@@ -7605,11 +7607,9 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
     except Exception:
         pass
 
-    if len(trending) < limit and normalized_source in {"all", "truyenqq"}:
-        # Fill short local rankings with OTruyen list data so the rankings page is not sparse.
-        fallback_trending = await _build_otruyen_fallback_trending(limit, hidden)
-        trending = _merge_trending_fill(trending, fallback_trending, limit)
-
+    # A ranking must not fetch unrelated latest releases to fill empty slots.
+    # Besides adding an external source wait, those cards are not ranked by
+    # local views. A short real ranking is preferable to invented entries.
     if not trending:
         trending = await asyncio.to_thread(_load_recent_trending_fallback, limit=limit, hidden=hidden, source=normalized_source)
 

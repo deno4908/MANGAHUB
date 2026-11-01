@@ -72,24 +72,72 @@ it.each(['truyenqq', 'mangadex'] as const)('does not show an early hero or cards
   show();
   await waitFor(() => expect(mangaApi.getFeatured).toHaveBeenCalled());
   await act(async () => { await Promise.resolve(); });
-  expect(screen.queryByText(mdx.name)).not.toBeInTheDocument();
-  expect(screen.queryByText(qq.name)).not.toBeInTheDocument();
-  expect(mangaApi.getTrending).not.toHaveBeenCalled();
+  expect(screen.queryByRole('heading', { level: 2, name: mdx.name })).not.toBeInTheDocument();
+  expect(within(section('Mới cập nhật')).queryByText(qq.name)).not.toBeInTheDocument();
+  // Ranking is independent primary data, so it can start while catalogs wait.
+  expect(mangaApi.getTrending).toHaveBeenCalledTimes(1);
   await act(async () => finish(source === 'truyenqq' ? { latest: page([qq]), ongoing: page([qq]) } : page([mdx])));
   await waitFor(() => expect(screen.getAllByText(mdx.name).length).toBeGreaterThan(0));
   expect(screen.getAllByText(qq.name).length).toBeGreaterThan(0);
 });
 
-it('uses QQ for the banner and every home section when MangaDex fails, including stale pinned/rated/trending titles', async () => {
+it('uses QQ for the banner when the MangaDex home feed fails while retaining the independent ranking', async () => {
   show();
   expect(await screen.findByRole('heading', { level: 2, name: qq.name })).toBeInTheDocument();
-  for (const title of ['Mới cập nhật', 'Phổ biến nhất', 'Đánh giá cao', 'Mới thêm gần đây']) {
+  for (const title of ['Mới cập nhật', 'Đánh giá cao', 'Mới thêm gần đây']) {
     await waitFor(() => expect(within(section(title)).getAllByText(qq.name).length).toBeGreaterThan(0));
   }
-  await waitFor(() => expect(screen.queryByText(mdx.name)).not.toBeInTheDocument());
+  expect(within(section('Phổ biến nhất')).getByText(mdx.name)).toBeInTheDocument();
   expect(screen.queryByText(/Chưa tải được truyện/)).not.toBeInTheDocument();
   expect(mangaApi.getOTruyenFiltered).not.toHaveBeenCalled();
   expect(screen.getByRole('link', { name: 'Chi tiết' })).toHaveAttribute('href', '/manga/qq-readable');
+});
+
+it('starts ranking alongside the home catalogs and never flashes catalog fallbacks while waiting', async () => {
+  let finish!: (value: any) => void;
+  const ranking = new Promise(resolve => { finish = resolve; });
+  vi.mocked(mangaApi.getTrending).mockReturnValue(ranking);
+  show();
+  expect(mangaApi.getTrending).toHaveBeenCalledTimes(1);
+  await screen.findByRole('heading', { level: 2, name: qq.name });
+  const popular = section('Phổ biến nhất');
+  expect(within(popular).queryAllByRole('heading', { level: 3 })).toHaveLength(0);
+  expect(within(popular).queryByText(qq.name)).not.toBeInTheDocument();
+  await act(async () => { finish({ trending: [{ slug: 'real-popular-12345', title: 'Đúng bảng xếp hạng',
+    thumb: 'https://qq.example/ranked.jpg', views: 999 }] }); });
+  await waitFor(() => expect(within(popular).getByRole('heading', { level: 3, name: 'Đúng bảng xếp hạng' })).toBeInTheDocument());
+  expect(within(popular).queryByText(qq.name)).not.toBeInTheDocument();
+});
+
+it('renders all twelve real popular titles immediately in server tie order without waiting for home sources', async () => {
+  vi.mocked(mangaApi.getHomepage).mockReturnValue(new Promise(() => {}));
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockReturnValue(new Promise(() => {}));
+  const ranked = Array.from({ length: 12 }, (_, n) => ({ slug: `ranked-${n}-12345`, title: `Xếp hạng ${12 - n}`,
+    thumb: `https://qq.example/rank-${n}.jpg`, views: 100 }));
+  vi.mocked(mangaApi.getTrending).mockResolvedValue({ trending: ranked });
+  show();
+  const popular = section('Phổ biến nhất');
+  await waitFor(() => expect(within(popular).getAllByRole('heading', { level: 3 }).map(node => node.textContent))
+    .toEqual(ranked.map(row => row.title)));
+  expect(screen.queryByRole('heading', { level: 2, name: qq.name })).not.toBeInTheDocument();
+  expect(screen.queryByRole('heading', { level: 2, name: mdx.name })).not.toBeInTheDocument();
+});
+
+it('shows an honest empty ranking instead of filling it with latest titles', async () => {
+  vi.mocked(mangaApi.getTrending).mockResolvedValue({ trending: [] });
+  show();
+  await screen.findByRole('heading', { level: 2, name: qq.name });
+  expect(within(section('Phổ biến nhất')).getByText('Chưa có truyện trong bảng xếp hạng.')).toBeInTheDocument();
+  expect(within(section('Phổ biến nhất')).queryByText(qq.name)).not.toBeInTheDocument();
+});
+
+it('retains the real ranking when a background refresh fails, without catalog substitution', async () => {
+  show();
+  await waitFor(() => expect(within(section('Phổ biến nhất')).getByText(mdx.name)).toBeInTheDocument());
+  vi.mocked(mangaApi.getTrending).mockRejectedValue(new Error('temporary ranking outage'));
+  await act(async () => { await client.refetchQueries({ queryKey: ['manga', 'home', 'trending-popular-v4'] }); });
+  expect(within(section('Phổ biến nhất')).getByText(mdx.name)).toBeInTheDocument();
+  expect(within(section('Phổ biến nhất')).queryByText(qq.name)).not.toBeInTheDocument();
 });
 
 it('requests QQ independently if the combined home catalog also fails or contains no items', async () => {

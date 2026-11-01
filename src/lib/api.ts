@@ -1364,12 +1364,12 @@ export const mangaApi = {
     limit: '6', show_mature: String(options.showMature) })}`, { timeoutMs: 6_000, signal: options.signal }),
   getChapter: (id: string) => publicApi<any>(`/api/manga/chapter/${id}`),
   getRandom: () => publicApi<any>("/api/manga/random"),
-  getTrending: (limit = 20, source: "all" | "truyenqq" | "mangadex" = "all") => {
+  getTrending: (limit = 20, source: "all" | "truyenqq" | "mangadex" = "all", options: { signal?: AbortSignal } = {}) => {
     const query = new URLSearchParams({
       limit: String(limit),
       source,
     });
-    return publicApi<any>(`/api/manga/trending?${query.toString()}`);
+    return publicApi<any>(`/api/manga/trending?${query.toString()}`, { signal: options.signal });
   },
 };
 

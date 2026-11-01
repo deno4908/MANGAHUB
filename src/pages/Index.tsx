@@ -655,22 +655,6 @@ const dedupeById = (items: Manga[]): Manga[] => {
   });
 };
 
-const mergeUniqueMangaById = (primary: Manga[], fallback: Manga[], limit: number): Manga[] => {
-  const byId = new Map<string, Manga>();
-
-  for (const item of [...primary, ...fallback]) {
-    const key = String(item.id || '').trim().toLowerCase();
-    if (!key) continue;
-
-    const current = byId.get(key);
-    if (!current || compareByPopular(item, current) < 0) {
-      byId.set(key, item);
-    }
-  }
-
-  return Array.from(byId.values()).sort(compareByPopular).slice(0, limit);
-};
-
 const getMyRatedLatestChapter = (record: MyRatedMangaItem): string =>
   String(record.latest_chapter || record.latestChapter || '').trim();
 
@@ -1507,19 +1491,16 @@ const Index = () => {
       .sort((a, b) => chapterRecencyTime(b) - chapterRecencyTime(a)).slice(0, 10);
   }, [latestMergedRated]);
 
-  const { data: trendingPayload, isLoading: isTrendingLoading } = useQuery({
-    queryKey: ['manga', 'home', 'trending-popular-v3', HOME_POPULAR_TRENDING_FETCH_LIMIT],
-    queryFn: async () => {
-      try {
-        return await mangaApi.getTrending(HOME_POPULAR_TRENDING_FETCH_LIMIT, 'all');
-      } catch {
-        return { trending: [] };
-      }
-    },
-    enabled: canRunHomeDeferredQueries,
+  const { data: trendingPayload, isLoading: isTrendingLoading, isError: isTrendingError,
+    refetch: refetchTrending } = useQuery({
+    queryKey: ['manga', 'home', 'trending-popular-v4', HOME_POPULAR_TRENDING_FETCH_LIMIT],
+    // This is primary section data. Start beside the home catalogs, without
+    // their source deadline or the idle delay used for optional enrichment.
+    queryFn: ({ signal }) => mangaApi.getTrending(HOME_POPULAR_TRENDING_FETCH_LIMIT, 'all', { signal }),
     staleTime: 2 * 60 * 1000,
     retry: 1,
-    placeholderData: (previousData) => previousData,
+    refetchInterval: query => query.state.status === 'error' ? 30_000 : false,
+    refetchOnWindowFocus: false,
   });
 
   const trendingRows = useMemo<TrendingMangaItem[]>(
@@ -1579,7 +1560,7 @@ const Index = () => {
           year: new Date().getFullYear(),
         }),
         id: itemId,
-        title: pickDisplayTitle(itemId, base?.title, row.title) || base?.title || 'Chưa có tiêu đề',
+        title: pickDisplayTitle(itemId, row.title, base?.title) || base?.title || 'Chưa có tiêu đề',
         cover,
         coverProxy,
         genres: rowGenres.length ? rowGenres : (base?.genres || []),
@@ -1600,7 +1581,9 @@ const Index = () => {
     }
 
     const visible = showMatureContent ? output : output.filter((item) => !isMatureManga(item));
-    return visible.sort(compareByPopular).slice(0, HOME_POPULAR_LIMIT * 2);
+    // Preserve the server ranking, including tie order. Delayed personal
+    // ratings/metadata must not reshuffle the already correct first render.
+    return visible.slice(0, HOME_POPULAR_LIMIT * 2);
   }, [trendingRows, topRatedKnownLookup, guestTopRatedLookup, showMatureContent]);
 
   const popular = useMemo(
@@ -1608,8 +1591,8 @@ const Index = () => {
     [featuredRated, latestMergedRated, ongoingMergedRated],
   );
   const popularVisible = useMemo(
-    () => mergeUniqueMangaById(popularFromTrending, popular, HOME_POPULAR_LIMIT * 2),
-    [popularFromTrending, popular],
+    () => popularFromTrending,
+    [popularFromTrending],
   );
   const popularRatingSlugs = useMemo(
     () => Array.from(new Set(
@@ -1767,9 +1750,14 @@ const Index = () => {
         </Section>
 
         <Section title="Phổ biến nhất" link="/manga?sort=popular">
-          {isHomeSynchronizedLoading || (isTrendingLoading && !popularVisible.length)
+          {isTrendingLoading
             ? <SkeletonGrid count={12} />
-            : <MangaGrid manga={popularDisplay} maxItems={HOME_POPULAR_LIMIT} lazyBatch initialBatchSize={6} batchStep={6} batchDelayMs={240} />}
+            : popularDisplay.length
+              ? <MangaGrid manga={popularDisplay} maxItems={HOME_POPULAR_LIMIT} lazyBatch={false} animateEntrance={false} />
+              : <div className="py-8 text-center text-sm text-muted-foreground">
+                <p>{isTrendingError ? 'Chưa tải được bảng xếp hạng. Vui lòng thử lại.' : 'Chưa có truyện trong bảng xếp hạng.'}</p>
+                {isTrendingError && <button className="mt-3 text-primary" onClick={() => void refetchTrending()}>Thử lại bảng xếp hạng</button>}
+              </div>}
         </Section>
 
         <Section title="Đánh giá cao" link="/manga?sort=rating">
