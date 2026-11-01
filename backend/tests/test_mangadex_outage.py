@@ -134,7 +134,7 @@ def test_search_without_a_snapshot_reports_a_source_error(stored, monkeypatch):
 def test_home_keeps_last_good_snapshot_across_source_failures_but_not_other_filters(stored, monkeypatch):
     good = {"data": {"items": [{"slug": MANGA, "name": "Known title"}]}}
     live = AsyncMock(return_value=good)
-    monkeypatch.setattr(mdx, "_get_latest_vi_chapter_feed_live", live)
+    monkeypatch.setattr(mdx, "_get_indexed_vi_feed", live)
     assert asyncio.run(mdx.get_latest_vi_chapter_feed(snapshot=True)) == good
     live.side_effect = RuntimeError("source unavailable")
     result = asyncio.run(mdx.get_latest_vi_chapter_feed(snapshot=True))

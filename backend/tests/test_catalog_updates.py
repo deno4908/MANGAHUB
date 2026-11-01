@@ -57,6 +57,15 @@ def cache(monkeypatch):
 
 
 def test_upstream_change_reaches_detail_feed_other_worker_and_stream(monkeypatch, cache):
+    import fakeredis
+    from fastapi_app.services import mangadex_release_index as release_index
+    client = fakeredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(release_index, '_client', lambda: client)
+    monkeypatch.setattr(release_index, '_seed', lambda: {
+        'schema': 1, 'language': 'vi', 'ready': True, 'rows': {},
+        'version': 'a' * 32, 'last_checked': 0,
+    })
+    monkeypatch.setattr(release_index, '_local', release_index.OrderedDict())
     number = 1
     calls = []
 

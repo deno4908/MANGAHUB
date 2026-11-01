@@ -93,7 +93,7 @@ def test_home_snapshot_reads_one_chapter_page_even_for_a_mass_upload(monkeypatch
         return {}
     monkeypatch.setattr(mdx, "_request_json", request)
     monkeypatch.setattr(mdx, "_fetch_cover_urls_for_manga_ids", covers)
-    result = asyncio.run(mdx.get_latest_vi_chapter_feed(limit=24, snapshot=True))
+    result = asyncio.run(mdx._get_latest_vi_chapter_feed_live(limit=24, snapshot=True))
     assert len(result["data"]["items"]) == 1
     assert calls == ["/chapter"]
 
@@ -110,7 +110,7 @@ def test_native_latest_pagination_counts_accessible_chapter_entries(monkeypatch)
             "relationships": [{"type": "manga", "id": MANGA, "attributes": {"title": {"en": "Title"}}}]}]}
     monkeypatch.setattr(mdx, "_request_json", request)
     monkeypatch.setattr(mdx, "_fetch_cover_urls_for_manga_ids", AsyncMock(return_value={}))
-    result = asyncio.run(mdx.get_latest_vi_chapter_feed(limit=24))
+    result = asyncio.run(mdx._get_latest_vi_chapter_feed_live(limit=24))
     pagination = result["data"]["params"]["pagination"]
     assert pagination["totalItems"] == 10000
     assert pagination["unit"] == "chapter"

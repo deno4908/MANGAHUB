@@ -2278,8 +2278,9 @@ async def get_latest_vi_chapter_feed(
                    excluded_manga_ids=excluded_manga_ids, snapshot=snapshot,
                    translated_language=translated_language, included_tag_slugs=included_tag_slugs,
                    statuses=statuses, keyword=keyword, feed_snapshot=feed_snapshot)
+    load = _get_indexed_vi_feed if translated_language == "vi" else _get_latest_vi_chapter_feed_live
     if not snapshot:
-        return await _get_latest_vi_chapter_feed_live(**options)
+        return await load(**options)
     # A home snapshot survives minute/revision changes. Keep filters (including
     # hidden IDs) in the key; never borrow another reader's content selection.
     key = "mangadex:home-last-good:v1:" + hashlib.sha256(json.dumps([
@@ -2288,7 +2289,7 @@ async def get_latest_vi_chapter_feed(
         sorted(included_tag_slugs or []), sorted(statuses or []), keyword,
     ]).encode()).hexdigest()
     try:
-        result = await _get_latest_vi_chapter_feed_live(**options)
+        result = await load(**options)
     except RuntimeError:
         previous = await asyncio.to_thread(_load_json_cache_payload, key)
         if previous and (previous.get("data") or {}).get("items"):
@@ -2298,6 +2299,39 @@ async def get_latest_vi_chapter_feed(
     if (result.get("data") or {}).get("items"):
         await asyncio.to_thread(cache.set, key, json.dumps(result, ensure_ascii=False), ttl=3600)
     return result
+
+
+async def _get_indexed_vi_feed(**options):
+    from fastapi_app.services import mangadex_release_index as index
+    page = max(1, int(options.get("page") or 1))
+    limit = max(1, min(24, int(options.get("limit") or 24)))
+    tags = await _resolve_mangadex_tag_ids(options.get("included_tag_slugs"))
+    if tags is None:
+        return {"data": {"items": [], "params": {"pagination": {"totalItems": 0,
+            "totalItemsPerPage": limit, "currentPage": page}}}}
+    ratings = options.get("content_ratings") or ["safe", "suggestive"]
+    excluded = {str(mid).removeprefix("mdx-").lower() for mid in options.get("excluded_manga_ids") or []}
+    rows, total, page, version = await index.page_rows(page=page, limit=limit,
+        ratings=ratings, excluded=excluded, tags=tags, statuses=options.get("statuses") or [],
+        keyword=options.get("keyword") or "", snapshot=options.get("feed_snapshot") or "")
+    cover_map = await _fetch_cover_urls_for_manga_ids([index.manga_relation(row)["id"] for row in rows])
+    items = []
+    for row in rows:
+        relation = index.manga_relation(row)
+        mid, attrs = relation["id"], row.get("attributes") or {}
+        manga = _parse_manga(relation.get("attributes") or {}, mid, authors=[], artists=[], cover_url=cover_map.get(mid, ""))
+        groups = _parse_scanlation_groups(_relation_bucket(row).get("scanlation_group", []))
+        number = str(attrs.get("chapter") or "").strip()
+        title = _build_chapter_with_groups(number, groups) if number else str(attrs.get("title") or "Chương đặc biệt")
+        stamp = str(attrs.get("readableAt") or attrs.get("publishAt") or attrs.get("createdAt") or "")
+        manga["local_last_published_at"] = stamp
+        item = _to_legacy_item(manga, latest_chapter={"chapter_name": number, "chapter_title": title, "publish_at": stamp})
+        item["chaptersLatest"] = [{"chapter_name": number, "chapter_title": title,
+            "chapter_api_data": row["id"], "publish_at": stamp, "updated_at": stamp, "translated_language": "vi"}]
+        items.append(item)
+    return {"data": {"items": items, "feed_snapshot": version, "order": "readableAt:desc",
+        "params": {"pagination": {"totalItems": total, "totalItemsPerPage": limit,
+            "currentPage": page, "unit": "manga"}}}}
 
 
 async def _get_latest_vi_chapter_feed_live(

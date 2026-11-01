@@ -101,9 +101,12 @@ def _client(url, connect_timeout, socket_timeout):
     return FastRedis.from_url(url, **options)
 
 
-def client_for(url):
+def client_for(url, *, socket_timeout_seconds=None):
+    # Large public catalog snapshots use a separate bounded pool. Their I/O
+    # must not trip authentication's short socket timeout/circuit.
+    timeout = config.REDIS_SOCKET_TIMEOUT_SECONDS if socket_timeout_seconds is None else min(3.0, max(0.05, float(socket_timeout_seconds)))
     return _client(normalize_url(url), config.REDIS_CONNECT_TIMEOUT_SECONDS,
-                   config.REDIS_SOCKET_TIMEOUT_SECONDS)
+                   timeout)
 
 
 def security_client():

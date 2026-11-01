@@ -44,7 +44,7 @@ it('offers a quiet unsupported-genre state without issuing an invalid QQ request
   expect(mangaApi.getList).not.toHaveBeenCalled();
   expect(mangaApi.getOTruyenFiltered).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Tìm trên MangaDex' }));
-  await waitFor(() => expect(mangaApi.searchMangaDex).toHaveBeenCalledWith(expect.objectContaining({
+  await waitFor(() => expect(mangaApi.getMangaDexLatestFeed).toHaveBeenCalledWith(expect.objectContaining({
     genreSlugs: ['action', 'villainess'], status: 'ongoing', translatedLanguage: 'vi',
   })));
   expect(screen.getByTestId('location')).toHaveTextContent('source=mangadex');

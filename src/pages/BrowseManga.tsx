@@ -1834,8 +1834,7 @@ const BrowseManga = () => {
       Boolean(filters.status)
     );
   const useMangaDexLatestFeedMode = isMangaDexSourceTab && filters.sort === 'latest'
-    && mangaDexTranslatedLanguage !== 'non_vi' && !hasLocalClientFilters
-    && !hasSearch && filters.genres.length === 0 && !filters.status;
+    && mangaDexTranslatedLanguage === 'vi' && !hasLocalClientFilters;
   const mangaDexHasServerQueryableFilters =
     hasSearch ||
     filters.genres.length > 0 ||
@@ -2148,7 +2147,7 @@ const BrowseManga = () => {
       'manga',
       'mangadex',
       'latest-feed',
-      'readable-v6',
+      'readable-title-index-v1',
       targetPage,
       showMatureContent,
       mangaDexTranslatedLanguage,
@@ -2162,7 +2161,7 @@ const BrowseManga = () => {
   const fetchMangaDexLatestFeedPage = useCallback(
     async (targetPage: number, signal?: AbortSignal) => {
       const matchesSelection = (key: readonly unknown[]) => key[2] === 'latest-feed'
-        && key[3] === 'readable-v6' && JSON.stringify(key.slice(5)) === latestFeedSelection;
+        && key[3] === 'readable-title-index-v1' && JSON.stringify(key.slice(5)) === latestFeedSelection;
       // Returning from a detail page remounts BrowseManga. Recover the window
       // from its cached pages so the next page still belongs to the same feed.
       const cachedWindow = queryClient.getQueryCache().findAll({
@@ -2190,7 +2189,7 @@ const BrowseManga = () => {
           && query.queryKey[4] !== targetPage });
       }
       const data = adaptListData(payload);
-      return { ...data, feedSnapshot: next, items: data.items.map(item => ({ ...item,
+      return { ...data, feedSnapshot: next, indexPending: payload?.data?.index_pending === true, items: data.items.map(item => ({ ...item,
         releaseChapter: normalizeMangaDexId(item.chapters[0]?.id) ? item.chapters[0] : undefined })) };
     },
     [showMatureContent, mangaDexServerSearchGenreSlugs, mangaDexTranslatedLanguage, filters.status,
@@ -2209,6 +2208,8 @@ const BrowseManga = () => {
     retry: 1,
     retryDelay: 1200,
     placeholderData: (previousData) => previousData,
+    refetchInterval: query => query.state.data?.indexPending ? 3_000 : false,
+    refetchIntervalInBackground: false,
   });
 
   useEffect(() => {
@@ -4473,7 +4474,7 @@ const BrowseManga = () => {
     : useMangaDexServerSearchMode
       ? mangaDexServerSearchQuery.isSuccess && !mangaDexServerSearchQuery.isPlaceholderData
     : useMangaDexLatestFeedMode
-      ? mangaDexLatestFeedQuery.isSuccess && !mangaDexLatestFeedQuery.isPlaceholderData
+      ? mangaDexLatestFeedQuery.isSuccess && !mangaDexLatestFeedQuery.isPlaceholderData && !mangaDexLatestFeedQuery.data?.indexPending
     : isClientPaginationMode
       ? (
           !isLoading &&
@@ -5413,11 +5414,12 @@ const BrowseManga = () => {
                 </button>
               </div>
             </div>
-          ) : isTabLoadingState ? (
+          ) : isTabLoadingState || (useMangaDexLatestFeedMode && mangaDexLatestFeedQuery.data?.indexPending) ? (
             <div className="space-y-4 py-3">
               <div className="flex items-center justify-center gap-2 text-primary/90">
                 <Loader2 className="w-5 h-5 animate-spin" />
-                <span className="text-sm font-semibold">Đang tải dữ liệu truyện...</span>
+                <span className="text-sm font-semibold">{useMangaDexLatestFeedMode && mangaDexLatestFeedQuery.data?.indexPending
+                  ? 'Đang chuẩn bị danh sách truyện tiếng Việt…' : 'Đang tải dữ liệu truyện...'}</span>
               </div>
               <MangaGridSkeleton count={18} />
               <div className="h-10 rounded-xl bg-muted/40 animate-pulse" />

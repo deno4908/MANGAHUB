@@ -161,9 +161,41 @@ it('uses the Vietnamese chapter feed for latest browsing without narrow filters'
   expect(mangaApi.searchMangaDex).not.toHaveBeenCalled();
 });
 
-it('sends status and genre selection directly to the source title search', async () => {
+it('renders 24 distinct Vietnamese titles on a deep indexed page', async () => {
+  vi.mocked(mangaApi.getMangaDexLatestFeed).mockImplementation(async options => ({ data: {
+    items: Array.from({ length: 24 }, (_, n) => {
+      const id = `${String(n + 1).padStart(8, '0')}-1111-4111-8111-111111111111`;
+      return { id, slug: id, name: `Vietnamese indexed book ${n + 1}`, source: 'mangadex',
+        thumb_url: `https://uploads.mangadex.org/covers/${id}/cover.jpg.512.jpg` };
+    }),
+    feed_snapshot: 'a'.repeat(32), params: { pagination: { currentPage: options.page,
+      totalItemsPerPage: 24, totalItems: 6206, unit: 'manga' } },
+  } }));
+  show('/manga?source=mangadex&sort=latest&page=70');
+  await waitFor(() => expect(screen.getByTestId('ranked-cards').textContent?.split('|').filter(Boolean)).toHaveLength(24));
+  expect(mangaApi.getMangaDexLatestFeed).toHaveBeenCalledWith(expect.objectContaining({ page: 70, translatedLanguage: 'vi' }));
+  expect(mangaApi.searchMangaDex).not.toHaveBeenCalled();
+});
+
+it('shows index preparation instead of an empty result and retries automatically', async () => {
+  vi.useFakeTimers();
+  try {
+    vi.mocked(mangaApi.getMangaDexLatestFeed).mockResolvedValueOnce({ data: { items: [], index_pending: true,
+      params: { pagination: { currentPage: 1, totalItemsPerPage: 24, totalItems: 24 } } } })
+      .mockResolvedValue(page([{ id: mdx, slug: mdx, name: 'Prepared Vietnamese title', source: 'mangadex' }]));
+    show('/manga?source=mangadex&sort=latest');
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(screen.getByText('Đang chuẩn bị danh sách truyện tiếng Việt…')).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
+    expect(screen.getByTestId('ranked-cards')).toHaveTextContent('Prepared Vietnamese title');
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('keeps status and genre filters on the Vietnamese release index', async () => {
   const second = '77777777-7777-4777-8777-777777777777';
-  vi.mocked(mangaApi.searchMangaDex).mockResolvedValue(page([
+  vi.mocked(mangaApi.getMangaDexLatestFeed).mockResolvedValue(page([
     { id: second, slug: second, name: 'Just published', source: 'mangadex', status: 'ongoing',
       chaptersLatest: [{ chapter_api_data: '22222222-2222-4222-8222-222222222222', chapter_name: '2', publish_at: '2026-10-22T12:00:00Z' }] },
     { id: mdx, slug: mdx, name: 'One day old', source: 'mangadex', status: 'ongoing',
@@ -174,12 +206,11 @@ it('sends status and genre selection directly to the source title search', async
   } });
   show('/manga?source=mangadex&sort=latest&status=ongoing&genre=action');
   await waitFor(() => expect(screen.getByTestId('ranked-cards')).toHaveTextContent('Just published:0|One day old:0|'));
-  expect(mangaApi.searchMangaDex).toHaveBeenCalledWith(expect.objectContaining({
-    genreSlugs: ['action'], status: 'ongoing', translatedLanguage: 'vi', sort: 'latest',
+  expect(mangaApi.getMangaDexLatestFeed).toHaveBeenCalledWith(expect.objectContaining({
+    genreSlugs: ['action'], status: 'ongoing', translatedLanguage: 'vi',
   }));
-  expect(mangaApi.getMangaDexLatestFeed).not.toHaveBeenCalled();
-  expect(mangaApi.getMangaDexLatestChapters).toHaveBeenCalledWith(expect.any(Array),
-    expect.objectContaining({ fast: true, translatedLanguage: 'vi' }));
+  expect(mangaApi.searchMangaDex).not.toHaveBeenCalled();
+  expect(mangaApi.getMangaDexLatestChapters).not.toHaveBeenCalled();
 });
 
 it('keeps source filters and ordering on direct next pages and after remounting', async () => {

@@ -103,6 +103,8 @@ class CatalogUpdates:
         else:
             mdx._vi_catalog_lookup_index.clear()
             mdx._vi_catalog_lookup_index_at = 0
+            from fastapi_app.services import mangadex_release_index
+            mangadex_release_index.invalidate_active()
         # These snapshots are small, source-dependent display caches.
         if shared:
             cache_service.cache.set(f"catalog:source-version:{source}", event["revision"], ttl=86400)

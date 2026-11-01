@@ -391,6 +391,9 @@ def _api_auth_error_headers(request: Request) -> dict[str, str]:
         headers["Access-Control-Allow-Credentials"] = "true"
     return headers
 
+from fastapi_app.services.mangadex_release_index import ReleaseIndexMiddleware
+app.add_middleware(ReleaseIndexMiddleware)
+
 # CORS
 app.add_middleware(
     CORSMiddleware,

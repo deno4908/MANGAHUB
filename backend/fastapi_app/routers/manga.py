@@ -6316,6 +6316,12 @@ async def mangadex_latest_feed(
             feed_snapshot=feed_snapshot,
         )
     except RuntimeError as error:
+        from fastapi_app.services.mangadex_release_index import IndexBuilding
+        if isinstance(error, IndexBuilding):
+            return JSONResponse(status_code=202, content={"data": {"items": [], "index_pending": True,
+                "params": {"pagination": {"totalItems": page * min(limit, 24),
+                    "totalItemsPerPage": min(limit, 24), "currentPage": page}}}},
+                headers={"Cache-Control": "no-store", "Retry-After": "3"})
         # A manga metadata search orders updates in ANY language. Returning it
         # here silently changes the requested chapter ordering and filters.
         raise _mangadex_upstream_http_exception(error) from error
