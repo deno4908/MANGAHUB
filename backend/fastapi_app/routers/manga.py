@@ -1827,6 +1827,8 @@ async def home(
 async def homepage(
     include_featured: bool = Query(False),
     attach_ratings: bool = Query(True),
+    lightweight: bool = False,
+    include_ongoing: bool = True,
     user=Depends(get_optional_user),
     db=Depends(get_supabase_public),
 ):
@@ -1843,7 +1845,7 @@ async def homepage(
     )
     latest, ongoing, hidden = await asyncio.gather(
         truyenqq_service.get_list("truyen-moi", 1),
-        truyenqq_service.get_list("dang-phat-hanh", 1),
+        truyenqq_service.get_list("dang-phat-hanh", 1) if include_ongoing else asyncio.sleep(0, result=_fallback_empty_list_payload(1)),
         _get_hidden_slugs(db),
         return_exceptions=True,
     )
@@ -1873,11 +1875,13 @@ async def homepage(
         if isinstance(item, dict)
     ]
     home_items_payload = {"data": {"items": home_items}}
-    reads = [_attach_overrides_to_otruyen_payload(home_items_payload, db)]
+    reads = [_attach_overrides_to_otruyen_payload(home_items_payload, db, attach_views=not lightweight)]
     if attach_ratings:
         reads.append(_async_attach_ratings_to_items(home_items_payload, db, user))
     await asyncio.gather(*reads)
     result = {"latest": latest, "ongoing": ongoing, "meta": {"unavailable_sections": source_errors}}
+    if not include_ongoing:
+        result['meta']['omitted_sections'] = ['ongoing']
     if featured_task is not None:
         try:
             result["featured"] = await featured_task
@@ -6054,6 +6058,7 @@ async def mangadex_home_banner(
     show_mature: bool = Query(False),
     filter_hidden: bool = Query(True),
     attach_ratings: bool = Query(True),
+    lightweight: bool = False,
     user=Depends(get_optional_user),
     db=Depends(get_supabase_public),
 ):
@@ -6087,7 +6092,8 @@ async def mangadex_home_banner(
             data.setdefault("data", {})["items"] = _filter_hidden(items, hidden)
 
     payload = {"mangas": ((data.get("data") or {}).get("items") or [])}
-    await _async_attach_local_views_to_mangadex_payload(payload, db)
+    if not lightweight:
+        await _async_attach_local_views_to_mangadex_payload(payload, db)
     data.setdefault("data", {})["items"] = payload.get("mangas") or []
     if attach_ratings:
         await _async_attach_ratings_to_items(data, db, user)

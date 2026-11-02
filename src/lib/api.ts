@@ -1001,12 +1001,14 @@ export const mangaApi = {
   getLatestCardChapters: (identifiers: string[]) => publicApi<{ items: Record<string, any> }>(
     '/api/manga/chapters/latest/batch', { method: 'POST', body: JSON.stringify({ identifiers }), timeoutMs: 6_000 }),
   getHome: () => publicApi<any>("/api/manga/home"),
-  getHomepage: (options: { includeFeatured?: boolean; attachRatings?: boolean; timeoutMs?: number; signal?: AbortSignal } = {}) => {
+  getHomepage: (options: { includeFeatured?: boolean; includeOngoing?: boolean; attachRatings?: boolean; lightweight?: boolean; timeoutMs?: number; signal?: AbortSignal } = {}) => {
     const params = new URLSearchParams();
     if (options.includeFeatured) params.set('include_featured', 'true');
     if (options.attachRatings === false) params.set('attach_ratings', 'false');
-    const query = params.size ? `?${params.toString()}` : '';
-    return publicApi<any>(`/api/manga/homepage${query}`, { timeoutMs: options.timeoutMs ?? 20_000, signal: options.signal });
+    if (options.lightweight) params.set('lightweight', 'true');
+    if (options.includeOngoing === false) params.set('include_ongoing', 'false');
+    const query = params.toString();
+    return publicApi<any>(`/api/manga/homepage${query ? `?${query}` : ''}`, { timeoutMs: options.timeoutMs ?? 20_000, signal: options.signal });
   },
   getFeatured: (limit = 12) => publicApi<any>(`/api/manga/featured?limit=${limit}`),
   getMangaDexHomeBanner: (
@@ -1015,6 +1017,7 @@ export const mangaApi = {
       showMature?: boolean;
       filterHidden?: boolean;
       attachRatings?: boolean;
+      lightweight?: boolean;
       timeoutMs?: number;
       signal?: AbortSignal;
     } = {},
@@ -1025,6 +1028,7 @@ export const mangaApi = {
       filter_hidden: String(options.filterHidden ?? true),
     });
     if (options.attachRatings === false) query.set('attach_ratings', 'false');
+    if (options.lightweight) query.set('lightweight', 'true');
     return publicApi<any>(`/api/manga/mangadex/home-banner?${query.toString()}`, {
       timeoutMs: options.timeoutMs ?? 15_000,
       signal: options.signal,

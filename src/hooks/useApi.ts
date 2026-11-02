@@ -171,6 +171,9 @@ type HomepageSnapshot = {
   mangadex: ReturnType<typeof adaptListData>;
   unavailableSources: HomepageSource[];
   recoveryAttempts: number;
+  // Only a complete latest feed may replace the visible cross-source list.
+  // Ongoing titles and a partial source recovery are not latest-feed fillers.
+  latestFeed?: Manga[];
 };
 
 function canRecoverHomepage(error: unknown): boolean {
@@ -189,7 +192,7 @@ function homepageNeedsRecovery(state: { data?: HomepageSnapshot; error: Error | 
 /** Publish one initial snapshot; recover missing sources without blocking it. */
 export function useHomepageCombined(maxChapters = 120, showMature = false) {
   const client = useQueryClient();
-  const queryKey = ["manga", "homepage", "synchronized-v2", maxChapters, showMature];
+  const queryKey = ["manga", "homepage", "complete-latest-v3", maxChapters, showMature];
   const featuredQuery = useQuery({
     queryKey: ["manga", "featured", 12],
     queryFn: async () => adaptListData(await mangaApi.getFeatured(12)),
@@ -208,7 +211,7 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
       const qq = async (sourceSignal: AbortSignal) => {
         try {
           // Index already hydrates aggregate/personal ratings in one deferred batch.
-          const payload = await mangaApi.getHomepage({ attachRatings: false, timeoutMs: 4_000, signal: sourceSignal });
+          const payload = await mangaApi.getHomepage({ attachRatings: false, lightweight: true, includeOngoing: false, timeoutMs: 6_000, signal: sourceSignal });
           const visible = [...adaptListData(payload.latest || {}).items, ...adaptListData(payload.ongoing || {}).items]
             .some(item => item.source !== 'mangadex' && !normalizeMangaDexId(item.id)
               && (showMature || !isMatureManga(item)));
@@ -217,37 +220,23 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
           if (sourceSignal.aborted || !canRecoverHomepage(error)) throw error;
         }
         if (sourceSignal.aborted) throw new DOMException('Homepage request cancelled', 'AbortError');
-        // Keep the previous catalog on transient errors/empty refreshes.
-        if (previous?.latest.items.length || previous?.ongoing.items.length) throw new Error('QQ home refresh unavailable');
-        const fallback = await mangaApi.getOTruyenFiltered({ page: 1, limit: 24, sort: 'latest',
-          showMature, attachRatings: false, timeoutMs: 2_000, signal: sourceSignal });
-        if (!adaptListData(fallback).items.length) throw new Error('QQ home data unavailable');
-        return { latest: fallback, ongoing: fallback };
+        throw new Error('QQ home data unavailable');
       };
-      // Keep one atomic snapshot, but do not hold a usable home screen for an
-      // unresponsive second source. Both still get the full cold-start budget
-      // until the first source succeeds.
+      // Give both sources their single bounded request. Never cancel a healthy
+      // cold source early just because the other one already returned.
       const sources = new AbortController();
       const cancel = () => sources.abort();
       signal.addEventListener('abort', cancel, { once: true });
       if (signal.aborted) cancel();
-      let graceTimer: ReturnType<typeof setTimeout> | undefined;
-      const ready = <T,>(value: T, usable = true): T => {
-        // Recovery has its own full budget. Reapplying the initial grace period
-        // would keep starving a source that normally takes two or three seconds.
-        if (!recovering && usable) graceTimer ??= setTimeout(cancel, 1_500);
-        return value;
-      };
       const results = await Promise.allSettled([
-        needsQQ ? readHomepageSource(qq, sources.signal).then(value => ready(value)) : Promise.resolve(undefined),
+        needsQQ ? readHomepageSource(qq, sources.signal) : Promise.resolve(undefined),
         needsMangaDex ? readHomepageSource(sourceSignal => mangaApi.getMangaDexHomeBanner({ limit: 24,
-          showMature, filterHidden: true, attachRatings: false, timeoutMs: 6_000, signal: sourceSignal }), sources.signal)
+          showMature, filterHidden: true, attachRatings: false, lightweight: true, timeoutMs: 6_000, signal: sourceSignal }), sources.signal)
           .then(value => {
             if (!adaptListData(value).items.length) throw new Error('MangaDex home data unavailable');
-            return ready(value);
+            return value;
           }) : Promise.resolve(undefined),
       ]).finally(() => {
-        clearTimeout(graceTimer);
         signal.removeEventListener('abort', cancel);
       });
       if (signal.aborted) throw new DOMException('Homepage request cancelled', 'AbortError');
@@ -265,17 +254,21 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
       const qqLatest = qqData ? adaptListData(qqData.latest || {}) : previous?.latest || adaptListData({});
       const qqOngoing = qqData ? adaptListData(qqData.ongoing || {}) : previous?.ongoing || adaptListData({});
       if (qqData && !qqLatest.items.length && !failedQQSections.includes('latest')) failedQQSections.push('latest');
-      if (qqData && !qqOngoing.items.length && !failedQQSections.includes('ongoing')) failedQQSections.push('ongoing');
+      if (qqData && !qqOngoing.items.length && !qqData.meta?.omitted_sections?.includes('ongoing')
+        && !failedQQSections.includes('ongoing')) failedQQSections.push('ongoing');
       const unavailableSources = (['truyenqq', 'mangadex'] as const)
         .filter((_, index) => results[index].status === 'rejected' || (index === 0 && failedQQSections.length > 0)
           || (index === 1 && mdxData?.data?.source_unavailable === true));
+      const mangadex = mdxData ? adaptListData(mdxData) : previous?.mangadex || adaptListData({});
+      const hasCompleteLatest = results.every(result => result.status === 'fulfilled')
+        && mdxData?.data?.source_unavailable !== true
+        && !failedQQSections.includes('latest') && qqLatest.items.length > 0 && mangadex.items.length > 0;
       return {
-        // /homepage can return HTTP 200 with only one QQ section available.
-        // Keep its last good section (or the other usable QQ list on first
-        // load) while recovering it, rather than replacing it with nothing.
-        latest: failedQQSections.includes('latest') ? (previous?.latest.items.length ? previous.latest : qqOngoing) : qqLatest,
-        ongoing: failedQQSections.includes('ongoing') ? (previous?.ongoing.items.length ? previous.ongoing : qqLatest) : qqOngoing,
-        mangadex: mdxData ? adaptListData(mdxData) : previous?.mangadex || adaptListData({}),
+        // Preserve only the same section's previous valid data on an outage.
+        latest: failedQQSections.includes('latest') ? (previous?.latest || adaptListData({})) : qqLatest,
+        ongoing: failedQQSections.includes('ongoing') ? (previous?.ongoing || adaptListData({})) : qqOngoing,
+        mangadex,
+        latestFeed: hasCompleteLatest ? [...qqLatest.items, ...mangadex.items] : previous?.latestFeed,
         unavailableSources,
         recoveryAttempts: unavailableSources.length ? (recovering ? previous.recoveryAttempts + 1 : 0) : 0,
       } satisfies HomepageSnapshot;

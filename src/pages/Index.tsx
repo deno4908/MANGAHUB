@@ -1487,9 +1487,10 @@ const Index = () => {
 
   const latestHomeDisplay = useMemo(() => {
     // Source and banner pinning must not outrank the actual chapter date.
-    return dedupeById([...latestMergedRated])
+    return dedupeById(applyBatchRatings(data?.latestFeed || []))
+      .filter(m => showMatureContent || !isMatureManga(m))
       .sort((a, b) => chapterRecencyTime(b) - chapterRecencyTime(a)).slice(0, 10);
-  }, [latestMergedRated]);
+  }, [data?.latestFeed, applyBatchRatings, showMatureContent]);
 
   const { data: trendingPayload, isLoading: isTrendingLoading, isError: isTrendingError,
     refetch: refetchTrending } = useQuery({
@@ -1741,10 +1742,16 @@ const Index = () => {
               <SkeletonHorizontal />
               <SkeletonHorizontal />
             </div>
+          ) : !data?.latestFeed ? (
+            <div className="py-8 text-center text-sm text-muted-foreground">
+              <p>Chưa tải đủ danh sách mới cập nhật. Vui lòng thử lại.</p>
+              <button className="mt-3 text-primary disabled:opacity-60" disabled={isHomepageFetching}
+                onClick={() => void refetchHomepageCombined()}>Thử lại mục mới cập nhật</button>
+            </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4">
-              <MangaGrid manga={latestHomeDisplay.slice(0, 5)} variant="horizontal" />
-              <MangaGrid manga={latestHomeDisplay.slice(5, 10)} variant="horizontal" />
+              <MangaGrid manga={latestHomeDisplay.slice(0, 5)} variant="horizontal" animateEntrance={false} />
+              <MangaGrid manga={latestHomeDisplay.slice(5, 10)} variant="horizontal" animateEntrance={false} />
             </div>
           )}
         </Section>
@@ -1763,11 +1770,11 @@ const Index = () => {
         <Section title="Đánh giá cao" link="/manga?sort=rating">
           {isTopRatedSectionLoading
             ? <SkeletonGrid />
-            : <MangaGrid manga={topRatedDisplay} maxItems={6} lazyBatch initialBatchSize={4} batchStep={2} batchDelayMs={220} />}
+            : <MangaGrid manga={topRatedDisplay} maxItems={6} lazyBatch={false} animateEntrance={false} />}
         </Section>
 
         <Section title="Mới thêm gần đây" link="/manga">
-          {isHomeSynchronizedLoading ? <SkeletonGrid /> : <MangaGrid manga={latestHomeDisplay.slice(0, 6)} lazyBatch initialBatchSize={4} batchStep={2} batchDelayMs={220} />}
+          {isHomeSynchronizedLoading ? <SkeletonGrid /> : <MangaGrid manga={latestHomeDisplay.slice(0, 6)} lazyBatch={false} animateEntrance={false} />}
         </Section>
 
         <section>
@@ -1785,12 +1792,7 @@ const Index = () => {
 };
 
 const Section = ({ title, link, children }: { title: string; link: string; children: React.ReactNode }) => (
-  <motion.section
-    initial={{ opacity: 0, y: 14 }}
-    whileInView={{ opacity: 1, y: 0 }}
-    viewport={{ once: true, margin: '-40px' }}
-    transition={{ duration: 0.4 }}
-  >
+  <section>
     <div className="flex items-center justify-between mb-5">
       <div className="flex items-center gap-3">
         <div className="accent-line" />
@@ -1801,7 +1803,7 @@ const Section = ({ title, link, children }: { title: string; link: string; child
       </Link>
     </div>
     {children}
-  </motion.section>
+  </section>
 );
 
 export default Index;

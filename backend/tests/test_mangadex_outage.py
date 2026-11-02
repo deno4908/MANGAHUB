@@ -166,7 +166,18 @@ def test_home_keeps_last_good_snapshot_across_source_failures_but_not_other_filt
     monkeypatch.setattr(mdx, "_get_indexed_vi_feed", live)
     assert asyncio.run(mdx.get_latest_vi_chapter_feed(snapshot=True)) == good
     live.side_effect = RuntimeError("source unavailable")
-    result = asyncio.run(mdx.get_latest_vi_chapter_feed(snapshot=True))
+    async def failed_refresh():
+        values, _ = stored
+        for key, value in list(values.items()):
+            if key.startswith('mangadex:home-feed:'):
+                envelope = json.loads(value)
+                envelope['fresh_until'] = 0
+                values[key] = json.dumps(envelope)
+        # The response is the real previous feed while the bounded job retries.
+        assert await mdx.get_latest_vi_chapter_feed(snapshot=True) == good
+        await asyncio.gather(*list(mdx._home_feed_jobs.values()))
+        return await mdx.get_latest_vi_chapter_feed(snapshot=True)
+    result = asyncio.run(failed_refresh())
     assert result["data"]["items"] == good["data"]["items"]
     assert result["data"]["source_unavailable"] is True
     for change in [{"content_ratings": ["safe"]}, {"excluded_manga_ids": [MANGA]}, {"snapshot": False}]:

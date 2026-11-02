@@ -2266,6 +2266,29 @@ async def _release_feed_chunk(
     return value if stored else (await asyncio.to_thread(_load_json_cache_payload, key) or value)
 
 
+_home_feed_jobs: dict[tuple, asyncio.Task] = {}
+
+
+@coalesce_reads
+async def _refresh_home_feed(key, options, revision, previous=None):
+    load = _get_indexed_vi_feed if options['translated_language'] == 'vi' else _get_latest_vi_chapter_feed_live
+    try:
+        result = await load(**options)
+        if not (result.get('data') or {}).get('items'):
+            raise RuntimeError('Empty home feed')
+    except RuntimeError:
+        if not previous or not (previous.get('data') or {}).get('items'):
+            raise
+        result = {**previous, 'data': {**previous['data'], 'source_unavailable': True}}
+        fresh_seconds = 10
+    else:
+        fresh_seconds = 45
+    await asyncio.to_thread(cache.set, key, json.dumps({
+        'payload': result, 'revision': revision, 'fresh_until': time.time() + fresh_seconds,
+    }, ensure_ascii=False), ttl=3600)
+    return result
+
+
 @coalesce_reads
 async def get_latest_vi_chapter_feed(
     page: int = 1, limit: int = 24, *,
@@ -2284,22 +2307,41 @@ async def get_latest_vi_chapter_feed(
         return await load(**options)
     # A home snapshot survives minute/revision changes. Keep filters (including
     # hidden IDs) in the key; never borrow another reader's content selection.
-    key = "mangadex:home-last-good:v1:" + hashlib.sha256(json.dumps([
+    key = "mangadex:home-feed:v2:" + hashlib.sha256(json.dumps([
         page, limit, sorted(content_ratings or ["safe", "suggestive"]),
         sorted(excluded_manga_ids or []), translated_language,
         sorted(included_tag_slugs or []), sorted(statuses or []), keyword,
     ]).encode()).hexdigest()
-    try:
-        result = await load(**options)
-    except RuntimeError:
-        previous = await asyncio.to_thread(_load_json_cache_payload, key)
-        if previous and (previous.get("data") or {}).get("items"):
-            previous["data"]["source_unavailable"] = True
-            return previous
-        raise
-    if (result.get("data") or {}).get("items"):
-        await asyncio.to_thread(cache.set, key, json.dumps(result, ensure_ascii=False), ttl=3600)
-    return result
+    # A home read needs at most 24 cards, not a multi-megabyte index download
+    # and a cover lookup on every cold Vercel worker. Serve the exact, qualified
+    # last-good feed while a finite request-scoped job updates it after response.
+    def read_snapshot():
+        values = cache.get_many([key, 'catalog:source-version:mangadex'])
+        try:
+            value = json.loads(values.get(key) or '{}')
+        except (ValueError, TypeError):
+            value = {}
+        revision = values.get('catalog:source-version:mangadex')
+        return value, revision if isinstance(revision, str) else ''
+    stored, revision = await asyncio.to_thread(read_snapshot)
+    previous = stored.get('payload')
+    if isinstance(previous, dict) and (previous.get('data') or {}).get('items'):
+        if stored.get('revision') != revision:
+            # An explicit catalog event must expose its new chapter on this
+            # response, not consume the event by returning the old snapshot.
+            return await _refresh_home_feed(key, options, revision, previous)
+        if stored.get('fresh_until', 0) < time.time():
+            job_key = (asyncio.get_running_loop(), key)
+            if job_key not in _home_feed_jobs:
+                task = create_task(_refresh_home_feed(key, options, revision, previous))
+                _home_feed_jobs[job_key] = task
+                def finished(done):
+                    _home_feed_jobs.pop(job_key, None)
+                    if not done.cancelled():
+                        done.exception()
+                task.add_done_callback(finished)
+        return previous
+    return await _refresh_home_feed(key, options, revision)
 
 
 async def _get_indexed_vi_feed(**options):

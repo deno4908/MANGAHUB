@@ -84,9 +84,11 @@ it.each(['truyenqq', 'mangadex'] as const)('does not show an early hero or cards
 it('uses QQ for the banner when the MangaDex home feed fails while retaining the independent ranking', async () => {
   show();
   expect(await screen.findByRole('heading', { level: 2, name: qq.name })).toBeInTheDocument();
-  for (const title of ['Mới cập nhật', 'Đánh giá cao', 'Mới thêm gần đây']) {
+  for (const title of ['Đánh giá cao']) {
     await waitFor(() => expect(within(section(title)).getAllByText(qq.name).length).toBeGreaterThan(0));
   }
+  expect(within(section('Mới cập nhật')).queryByText(qq.name)).not.toBeInTheDocument();
+  expect(within(section('Mới cập nhật')).getByRole('button', { name: 'Thử lại mục mới cập nhật' })).toBeInTheDocument();
   expect(within(section('Phổ biến nhất')).getByText(mdx.name)).toBeInTheDocument();
   expect(screen.queryByText(/Chưa tải được truyện/)).not.toBeInTheDocument();
   expect(mangaApi.getOTruyenFiltered).not.toHaveBeenCalled();
@@ -140,14 +142,13 @@ it('retains the real ranking when a background refresh fails, without catalog su
   expect(within(section('Phổ biến nhất')).queryByText(qq.name)).not.toBeInTheDocument();
 });
 
-it('requests QQ independently if the combined home catalog also fails or contains no items', async () => {
+it('does not fill latest with another catalog when the homepage contains no items', async () => {
   vi.mocked(mangaApi.getHomepage).mockResolvedValue({ latest: page([]), ongoing: page([]) });
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([mdx]));
   show();
-  expect(await screen.findByRole('heading', { level: 2, name: qq.name })).toBeInTheDocument();
-  expect(mangaApi.getOTruyenFiltered).toHaveBeenCalledTimes(1);
-  expect(mangaApi.getOTruyenFiltered).toHaveBeenCalledWith(expect.objectContaining({
-    showMature: false, attachRatings: false, page: 1, sort: 'latest',
-  }));
+  await screen.findByRole('heading', { level: 2, name: mdx.name });
+  expect(within(section('Mới cập nhật')).queryAllByRole('heading', { level: 3 })).toHaveLength(0);
+  expect(mangaApi.getOTruyenFiltered).not.toHaveBeenCalled();
 });
 
 it('keeps the MangaDex catalog when one image exhausts both cover sources', async () => {
@@ -177,11 +178,11 @@ it('keeps MangaDex when its fallback image succeeds and does not mistake a QQ im
   expect(mangaApi.getOTruyenFiltered).not.toHaveBeenCalled();
 });
 
-it('preserves mature-content filtering on the independent QQ fallback', async () => {
-  vi.mocked(mangaApi.getHomepage).mockResolvedValue({ latest: page([]), ongoing: page([]) });
-  vi.mocked(mangaApi.getOTruyenFiltered).mockResolvedValue(page([qq, row('qq-adult', 'Truyện người lớn QQ', { content_rating: 'pornographic' })]));
+it('preserves mature-content filtering on the complete latest feed', async () => {
+  vi.mocked(mangaApi.getHomepage).mockResolvedValue({ latest: page([qq, row('qq-adult', 'Truyện người lớn QQ', { content_rating: 'pornographic' })]), ongoing: page([]), meta: { omitted_sections: ['ongoing'] } });
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([mdx]));
   show();
-  expect(await screen.findByRole('heading', { level: 2, name: qq.name })).toBeInTheDocument();
+  expect(await within(section('Mới cập nhật')).findByRole('heading', { level: 3, name: qq.name })).toBeInTheDocument();
   expect(screen.queryByText('Truyện người lớn QQ')).not.toBeInTheDocument();
 });
 
@@ -238,14 +239,14 @@ it('orders recent sections by chapter time across sources, without promoting pin
   expect(columns.children).toHaveLength(2); // Preserve the existing two-column UI.
 });
 
-it('brings slow QQ back into the banner and both recent sections without a reload', async () => {
+it('publishes complete recent sections after QQ recovery without ever showing a partial latest list', async () => {
   let recover!: (value: any) => void;
   const recovery = new Promise(resolve => { recover = resolve; });
   const now = Date.now();
   const recoveredQQ = row('recovered-qq-12285', 'QQ tự phục hồi', { chaptersLatest: [{
     chapter_name: '91', chapter_api_data: 'qq--12285--91', publish_at: new Date(now - 60_000).toISOString(),
   }] });
-  vi.mocked(mangaApi.getHomepage).mockReturnValueOnce(new Promise(() => {})).mockReturnValueOnce(recovery);
+  vi.mocked(mangaApi.getHomepage).mockRejectedValueOnce(new Error('temporary outage')).mockReturnValueOnce(recovery);
   vi.mocked(mangaApi.getFeatured).mockResolvedValue(page([]));
   vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([{ ...mdx, is_featured: false,
     chaptersLatest: [{ chapter_name: '4', chapter_api_data: '11111111-1111-4111-8111-111111111111',
@@ -278,7 +279,7 @@ it('keeps loaded MangaDex cards and retries an empty source refresh', async () =
   vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([]));
   await act(async () => { await client.refetchQueries({ queryKey: ['manga', 'homepage'] }); });
   expect(screen.getByRole('heading', { level: 2, name: mdx.name })).toBeInTheDocument();
-  const state = client.getQueryData<any>(['manga', 'homepage', 'synchronized-v2', 120, false]);
+  const state = client.getQueryData<any>(['manga', 'homepage', 'complete-latest-v3', 120, false]);
   expect(state.unavailableSources).toContain('mangadex');
 });
 
@@ -289,7 +290,7 @@ it('keeps good QQ sections instead of swapping in a fallback list on refresh fai
   vi.mocked(mangaApi.getHomepage).mockRejectedValue(new Error('temporary QQ outage'));
   await act(async () => { await client.refetchQueries({ queryKey: ['manga', 'homepage'] }); });
   expect(mangaApi.getOTruyenFiltered).not.toHaveBeenCalled();
-  const state = client.getQueryData<any>(['manga', 'homepage', 'synchronized-v2', 120, false]);
+  const state = client.getQueryData<any>(['manga', 'homepage', 'complete-latest-v3', 120, false]);
   expect(state.latest.items[0].id).toBe(qq.slug);
   expect(state.unavailableSources).toContain('truyenqq');
 });
