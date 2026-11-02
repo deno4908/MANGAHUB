@@ -12,6 +12,23 @@ it('requests only the primary QQ home list and defers optional view hydration ex
   expect(url.searchParams.get('attach_ratings')).toBe('false');
 });
 
+it('recovers the real latest home page through the owned relay instead of accepting an empty replacement', async () => {
+  const fetcher = vi.fn().mockResolvedValueOnce(new Response('{}', { status: 502, headers: {
+    'Content-Type': 'application/json', 'X-TruyenQQ-Error': 'http-403',
+    'X-TruyenQQ-Source-Path': '/truyen-moi-cap-nhat',
+  } })).mockResolvedValueOnce(new Response('<div class="list_grid">real latest</div>', { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ latest: { data: { items: [{ slug: 'real-latest-12345' }] } },
+      ongoing: { data: { items: [] } }, meta: { omitted_sections: ['ongoing'] } }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+  vi.stubGlobal('fetch', fetcher);
+  const result = await mangaApi.getHomepage({ lightweight: true, includeOngoing: false, attachRatings: false, timeoutMs: 20_000 });
+  expect(result.latest.data.items).toEqual([{ slug: 'real-latest-12345' }]);
+  expect(fetcher.mock.calls).toHaveLength(3);
+  expect(new URL(fetcher.mock.calls[1][0]).pathname).toBe('/api/truyenqq-edge/truyen-moi-cap-nhat');
+  expect(fetcher.mock.calls[0][0]).toBe(fetcher.mock.calls[2][0]);
+});
+
 it.each([undefined, true, false])('only opts out of banner ratings when explicitly requested: %s', async attachRatings => {
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })));
   await mangaApi.getMangaDexHomeBanner({ attachRatings, filterHidden: true, showMature: false });

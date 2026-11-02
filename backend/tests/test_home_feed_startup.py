@@ -2,6 +2,7 @@ import asyncio
 import json
 import threading
 from unittest.mock import AsyncMock, Mock
+from fastapi import HTTPException
 
 import pytest
 
@@ -120,3 +121,25 @@ def test_light_mangadex_home_keeps_hidden_filter_without_waiting_for_view_enrich
     assert load.call_args.kwargs['excluded_manga_ids'] == [hidden_id]
     assert load.call_args.kwargs['content_ratings'] == ['safe', 'suggestive']
     manga._async_attach_local_views_to_mangadex_payload.assert_not_awaited()
+
+
+def test_failed_primary_home_section_exposes_exact_recovery_headers_instead_of_empty_http_200(monkeypatch):
+    isolate(monkeypatch)
+    headers = {'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/truyen-moi-cap-nhat',
+               'Cache-Control': 'no-store'}
+    monkeypatch.setattr(manga.truyenqq_service, 'get_list', AsyncMock(side_effect=HTTPException(
+        502, 'Source unavailable', headers=headers)))
+    with pytest.raises(HTTPException) as failed:
+        asyncio.run(manga.homepage(include_featured=False, include_ongoing=False,
+            attach_ratings=False, lightweight=True, db=EmptyDB(), user=None))
+    assert failed.value.status_code == 502
+    assert failed.value.headers == headers
+
+
+def test_unknown_primary_home_failure_is_a_retryable_error_not_an_empty_catalog(monkeypatch):
+    isolate(monkeypatch)
+    monkeypatch.setattr(manga.truyenqq_service, 'get_list', AsyncMock(side_effect=RuntimeError('internal source error')))
+    with pytest.raises(HTTPException) as failed:
+        asyncio.run(manga.homepage(include_featured=False, include_ongoing=False,
+            attach_ratings=False, lightweight=True, db=EmptyDB(), user=None))
+    assert failed.value.status_code == 503

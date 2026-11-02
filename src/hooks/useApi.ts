@@ -140,7 +140,7 @@ export function useHomepage(enabled = true) {
 }
 
 /** Include authentication/queue time in the source deadline, too. */
-async function readHomepageSource<T>(load: (signal: AbortSignal) => Promise<T>, parent: AbortSignal): Promise<T> {
+async function readHomepageSource<T>(load: (signal: AbortSignal) => Promise<T>, parent: AbortSignal, timeoutMs = 12_000): Promise<T> {
   if (parent.aborted) throw new DOMException('Homepage request cancelled', 'AbortError');
   const controller = new AbortController();
   let cancel!: () => void;
@@ -153,7 +153,7 @@ async function readHomepageSource<T>(load: (signal: AbortSignal) => Promise<T>, 
     timer = setTimeout(() => {
       controller.abort();
       reject(new Error('Homepage source timed out'));
-    }, 6_000);
+    }, timeoutMs);
   });
   parent.addEventListener('abort', cancel, { once: true });
   try {
@@ -211,7 +211,7 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
       const qq = async (sourceSignal: AbortSignal) => {
         try {
           // Index already hydrates aggregate/personal ratings in one deferred batch.
-          const payload = await mangaApi.getHomepage({ attachRatings: false, lightweight: true, includeOngoing: false, timeoutMs: 6_000, signal: sourceSignal });
+          const payload = await mangaApi.getHomepage({ attachRatings: false, lightweight: true, includeOngoing: false, timeoutMs: 20_000, signal: sourceSignal });
           const visible = [...adaptListData(payload.latest || {}).items, ...adaptListData(payload.ongoing || {}).items]
             .some(item => item.source !== 'mangadex' && !normalizeMangaDexId(item.id)
               && (showMature || !isMatureManga(item)));
@@ -229,9 +229,9 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
       signal.addEventListener('abort', cancel, { once: true });
       if (signal.aborted) cancel();
       const results = await Promise.allSettled([
-        needsQQ ? readHomepageSource(qq, sources.signal) : Promise.resolve(undefined),
+        needsQQ ? readHomepageSource(qq, sources.signal, 20_000) : Promise.resolve(undefined),
         needsMangaDex ? readHomepageSource(sourceSignal => mangaApi.getMangaDexHomeBanner({ limit: 24,
-          showMature, filterHidden: true, attachRatings: false, lightweight: true, timeoutMs: 6_000, signal: sourceSignal }), sources.signal)
+          showMature, filterHidden: true, attachRatings: false, lightweight: true, timeoutMs: 12_000, signal: sourceSignal }), sources.signal)
           .then(value => {
             if (!adaptListData(value).items.length) throw new Error('MangaDex home data unavailable');
             return value;

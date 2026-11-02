@@ -1849,6 +1849,13 @@ async def homepage(
         _get_hidden_slugs(db),
         return_exceptions=True,
     )
+    if not include_ongoing and not isinstance(latest, dict):
+        # The lightweight home request has only one QQ section. Do not turn
+        # its source failure into HTTP 200: the browser needs the bounded QQ
+        # error/path headers to warm the same source page through our relay.
+        if isinstance(latest, HTTPException):
+            raise latest
+        raise HTTPException(503, 'QQ latest feed unavailable')
     source_errors = []
     for name, value in (("latest", latest), ("ongoing", ongoing)):
         if not isinstance(value, dict):
