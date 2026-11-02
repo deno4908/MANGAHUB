@@ -334,6 +334,7 @@ def test_cold_source_refresh_finishes_after_the_bounded_popularity_response(monk
     source = local_popular.truyenqq_service
     monkeypatch.setattr(source, "get_filtered", isolated_popularity_snapshots)
     monkeypatch.setattr(source.cache, "get", store.get)
+    monkeypatch.setattr(source.cache, "get_many", lambda keys: {key: store.get(key) for key in keys})
     monkeypatch.setattr(source.cache, "set", lambda key, value, **kw: store.__setitem__(key, value))
     monkeypatch.setattr(source.cache, "set_many", lambda items, **kw: store.update(items))
     monkeypatch.setattr(source, "_catalog_jobs", {})

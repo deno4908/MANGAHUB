@@ -240,6 +240,7 @@ def _remember(key: str, payload: dict, ttl=60) -> dict:
     return payload
 
 
+@coalesce_reads
 async def get_home():
     payload = await _catalog_page("home")
     return await asyncio.to_thread(_remember, "truyenqq:home", payload)
@@ -251,18 +252,51 @@ def live_list_cache_key(list_type, page):
     return f"truyenqq:live-list:{list_type}:{page}:rev={revision}"
 
 
-def _json_cached(key):
-    raw = cache.get(key)
+def _decode_cached(raw):
     if isinstance(raw, str):
         try:
             return json.loads(raw)
         except ValueError:
-            cache.delete(key)
+            pass
     return None
 
 
-def _overlay_latest(payload, *, page=1, genres=(), status=None, latest_order=False):
-    latest = _json_cached("truyenqq:list:truyen-moi:1") or {}
+def _json_cached(key):
+    return _decode_cached(cache.get(key))
+
+
+def _fast_list_key(list_type, page):
+    return f"truyenqq:live-list:v2:{list_type}:{page}"
+
+
+def _read_list_cache(list_type, page):
+    values = cache.get_many(['catalog:source-version:truyenqq', _fast_list_key(list_type, page)])
+    revision = values.get('catalog:source-version:truyenqq')
+    revision = revision if isinstance(revision, str) else ''
+    stored = _decode_cached(values.get(_fast_list_key(list_type, page)))
+    if isinstance(stored, dict) and stored.get('revision') == revision and stored.get('fresh_until', 0) > time.time():
+        payload = stored.get('payload')
+        if isinstance(payload, dict):
+            return revision, payload
+    return revision, None
+
+
+def remember_list(list_type, page, payload, *, revision=None, fresh_seconds=8):
+    current = cache.get('catalog:source-version:truyenqq')
+    current = current if isinstance(current, str) else ''
+    # An in-flight old reader must not overwrite a newly published chapter.
+    if revision is not None and revision != current:
+        return payload
+    cache.set_many({
+        f'truyenqq:list:{list_type}:{page}': json.dumps(payload, ensure_ascii=False),
+        _fast_list_key(list_type, page): json.dumps({'revision': current, 'payload': payload,
+            'fresh_until': time.time() + fresh_seconds}, ensure_ascii=False),
+    }, ttl=max(60, fresh_seconds))
+    return payload
+
+
+def _overlay_latest(payload, *, page=1, genres=(), status=None, latest_order=False, latest_payload=None):
+    latest = latest_payload if latest_payload is not None else (_json_cached("truyenqq:list:truyen-moi:1") or {})
     incoming = {item["slug"]: item for item in latest.get("data", {}).get("items", [])}
     items = payload.get("data", {}).get("items", [])
     for item in items:
@@ -289,16 +323,28 @@ def _overlay_latest(payload, *, page=1, genres=(), status=None, latest_order=Fal
     return payload
 
 
-async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=None, **kwargs):
+async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=None, latest_overlay=None, **kwargs):
     digest = hashlib.sha256(json.dumps([method, args, kwargs], sort_keys=True).encode()).hexdigest()
     key = "truyenqq:page-snapshot:v3:" + digest
-    snapshot = await asyncio.to_thread(_json_cached, key)
+    def read():
+        if latest_overlay is None:
+            return _json_cached(key), None
+        values = cache.get_many([key, 'truyenqq:list:truyen-moi:1'])
+        return _decode_cached(values.get(key)), _decode_cached(values.get('truyenqq:list:truyen-moi:1'))
+    snapshot, latest = await asyncio.to_thread(read)
+    async def finish(payload, *, cold=False):
+        if latest_overlay is None:
+            return payload
+        # A live fetch may take seconds. Adopt chapters published while it was
+        # in flight; the batched pre-read is sufficient only on cached pages.
+        current = await asyncio.to_thread(_json_cached, 'truyenqq:list:truyen-moi:1') if cold else latest
+        return await asyncio.to_thread(_overlay_latest, payload, latest_payload=current or {}, **latest_overlay)
     if not isinstance(snapshot, dict) or not isinstance(snapshot.get("payload"), dict):
         snapshot = None
     if snapshot is not None and not background_refresh:
         # Interactive ranking reads can reuse this 30-minute source snapshot.
         # Do not attach an unrelated stale-page refresh to their Vercel invocation.
-        return snapshot["payload"]
+        return await finish(snapshot["payload"])
     if snapshot is None or snapshot.get("fresh_until", 0) < time.time():
         task_key = (asyncio.get_running_loop(), key)
         task = _catalog_jobs.get(task_key)
@@ -332,25 +378,27 @@ async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=
             read = asyncio.shield(task)
             # An existing refresh may belong to an unrelated, unbounded latest
             # request. Bound this reader without cancelling that shared work.
-            return deepcopy(await asyncio.wait_for(read, refresh_timeout) if refresh_timeout else await read)
-    return snapshot["payload"]
+            payload = deepcopy(await asyncio.wait_for(read, refresh_timeout) if refresh_timeout else await read)
+            return await finish(payload, cold=True)
+    return await finish(snapshot["payload"])
 
 
 async def get_list(list_type="truyen-moi", page=1):
     if list_type == "sap-ra-mat":
         return _page({"items": [], "page": page})
-    shared_key = await asyncio.to_thread(live_list_cache_key, list_type, page)
-    shared = await asyncio.to_thread(cache.get, shared_key)
-    if isinstance(shared, str):
-        try:
-            return json.loads(shared)
-        except ValueError:
-            await asyncio.to_thread(cache.delete, shared_key)
-    payload = await _catalog_page("collection", _COLLECTIONS.get(list_type, "latest"), page)
-    payload = await asyncio.to_thread(_overlay_latest, payload, page=page, latest_order=list_type == "truyen-moi")
-    payload = await asyncio.to_thread(_remember, f"truyenqq:list:{list_type}:{page}", payload)
-    await asyncio.to_thread(cache.set, shared_key, json.dumps(payload, ensure_ascii=False), ttl=8)
-    return payload
+    revision, shared = await asyncio.to_thread(_read_list_cache, list_type, page)
+    if shared is not None:
+        return shared
+    return await _load_list_page(list_type, page, revision)
+
+
+@coalesce_reads
+async def _load_list_page(list_type, page, revision):
+    # Revision is part of the shared-read identity, so a new chapter event
+    # cannot join an older in-flight request for the same page.
+    payload = await _catalog_page("collection", _COLLECTIONS.get(list_type, "latest"), page,
+        latest_overlay={'page': page, 'latest_order': list_type == 'truyen-moi'})
+    return await asyncio.to_thread(remember_list, list_type, page, payload, revision=revision)
 
 
 def invalidate_live_catalog(slugs, preserve_latest=False):
@@ -362,15 +410,16 @@ def invalidate_live_catalog(slugs, preserve_latest=False):
     _live.html_cache.invalidate_matching(lambda url: url in urls)
 
 
+@coalesce_reads
 async def get_categories():
-    raw = cache.get("truyenqq:genres:v1")
+    raw = await asyncio.to_thread(cache.get, "truyenqq:genres:v1")
     if isinstance(raw, str):
         try:
             return json.loads(raw)
         except ValueError:
-            cache.delete("truyenqq:genres:v1")
+            await asyncio.to_thread(cache.delete, "truyenqq:genres:v1")
     payload = {"status": "success", "data": {"items": [_genre(g) for g in await run_live("genres")]}}
-    cache.set("truyenqq:genres:v1", json.dumps(payload, ensure_ascii=False), ttl=3600)
+    await asyncio.to_thread(cache.set, "truyenqq:genres:v1", json.dumps(payload, ensure_ascii=False), ttl=3600)
     return payload
 
 
@@ -390,18 +439,17 @@ async def get_total_count():
 
 
 async def get_category_manga(slug, page=1):
-    value = await _catalog_page("genre_comics", slug, page)
-    value = await asyncio.to_thread(_overlay_latest, value, page=page, genres=[slug], latest_order=True)
+    value = await _catalog_page("genre_comics", slug, page,
+        latest_overlay={'page': page, 'genres': [slug], 'latest_order': True})
     return await asyncio.to_thread(_remember, f"truyenqq:category:{slug}:{page}", value)
 
 
 async def get_filtered(*, genres=(), page=1, sort="updated_desc", status=None, overlay_latest=True,
                        background_refresh=True, refresh_timeout=None):
     value = await _catalog_page("discover", page=page, genres=genres, sort=sort, status=status,
-                                background_refresh=background_refresh, refresh_timeout=refresh_timeout)
-    if not overlay_latest:
-        return value
-    return await asyncio.to_thread(_overlay_latest, value, page=page, genres=genres, status=status, latest_order=sort == "updated_desc")
+        background_refresh=background_refresh, refresh_timeout=refresh_timeout,
+        latest_overlay={'page': page, 'genres': genres, 'status': status, 'latest_order': sort == 'updated_desc'} if overlay_latest else None)
+    return value
 
 
 async def resolve_slug_from_id(manga_id):

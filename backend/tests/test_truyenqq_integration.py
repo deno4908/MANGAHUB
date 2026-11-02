@@ -57,6 +57,7 @@ def live(monkeypatch, tmp_path):
     service = LiveService(settings, client)
     monkeypatch.setattr(qq, "_live", service)
     monkeypatch.setattr(qq, "cache", Mock())
+    qq.cache.get_many.side_effect = lambda keys: {key: qq.cache.get(key) for key in keys}
     monkeypatch.setattr(truyenqq, "IMAGE_CACHE_DIR", tmp_path)
     yield service, calls
     service.close()

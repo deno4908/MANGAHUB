@@ -154,8 +154,7 @@ class CatalogUpdates:
         return event
 
     def _remember_qq(self):
-        qq._remember("truyenqq:list:truyen-moi:1", self._warm_qq)
-        cache_service.cache.set(qq.live_list_cache_key("truyen-moi", 1), json.dumps(self._warm_qq), ttl=max(15, POLL_SECONDS * 2))
+        qq.remember_list('truyen-moi', 1, self._warm_qq, fresh_seconds=max(15, POLL_SECONDS * 2))
 
     async def sync(self):
         for source in SOURCES:
