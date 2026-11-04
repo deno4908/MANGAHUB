@@ -142,7 +142,7 @@ const HeroSlider = ({ manga }: { manga: Manga[] }) => {
                 Nổi bật
               </span>
               <span className="flex items-center gap-1 text-xs font-bold text-manga-yellow">
-                <Star className="w-3 h-3 fill-manga-yellow" /> {Number(m.rating).toFixed(1)}
+                <Star className="w-3 h-3 fill-manga-yellow" /> {m.ratingPending ? '…' : Number(m.rating).toFixed(1)}
               </span>
             </div>
             <h2 className="ed-heading text-3xl md:text-5xl text-white mb-1 line-clamp-2 leading-[1.1]">{m.title}</h2>

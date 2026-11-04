@@ -330,7 +330,7 @@ const DEFAULT_CARD_COVER_FALLBACK = '/no-cover.svg';
 const GUEST_TOP_RATED_LIMIT = 24;
 const HOME_POPULAR_LIMIT = 12;
 const HOME_POPULAR_TRENDING_FETCH_LIMIT = 50;
-const RATING_BATCH_CHUNK_SIZE = 30;
+const RATING_BATCH_CHUNK_SIZE = 60;
 const RATING_BATCH_WAVE_SIZE = 2;
 const RATING_BATCH_TIMEOUT_MS = 4_500;
 const ANNOUNCEMENT_DISMISS_KEY_PREFIX = 'mb:home-announcement-dismissed:';
@@ -693,30 +693,32 @@ const hasReadableChapter = (chapters: Manga['chapters'] | undefined): boolean =>
   ));
 
 const mergeBatchRatingsPayload = (
-  target: { ratings: Record<string, any>; my_scores: Record<string, any> },
+  target: { ratings: Record<string, any>; my_scores: Record<string, any>; views: Record<string, number> },
   payload: any,
 ) => {
   const ratings = (payload?.ratings || {}) as Record<string, any>;
   const myScores = (payload?.my_scores || {}) as Record<string, any>;
   Object.assign(target.ratings, ratings);
   Object.assign(target.my_scores, myScores);
+  Object.assign(target.views, payload?.views || {});
 };
 
 const fetchBatchRatingsParallel = async (
   slugs: string[],
   timeoutMs = RATING_BATCH_TIMEOUT_MS,
-): Promise<{ ratings: Record<string, any>; my_scores: Record<string, any> }> => {
+): Promise<{ ratings: Record<string, any>; my_scores: Record<string, any>; views: Record<string, number> }> => {
   const uniqueSlugs = Array.from(
     new Set(slugs.map((slug) => String(slug || '').trim().toLowerCase()).filter(Boolean)),
   );
-  if (!uniqueSlugs.length) return { ratings: {}, my_scores: {} };
+  if (!uniqueSlugs.length) return { ratings: {}, my_scores: {}, views: {} };
 
   const chunks: string[][] = [];
   for (let i = 0; i < uniqueSlugs.length; i += RATING_BATCH_CHUNK_SIZE) {
     chunks.push(uniqueSlugs.slice(i, i + RATING_BATCH_CHUNK_SIZE));
   }
 
-  const merged = { ratings: {}, my_scores: {} } as {
+  const merged = { ratings: {}, my_scores: {}, views: {} } as {
+    views: Record<string, number>;
     ratings: Record<string, any>;
     my_scores: Record<string, any>;
   };
@@ -724,11 +726,12 @@ const fetchBatchRatingsParallel = async (
   for (let i = 0; i < chunks.length; i += RATING_BATCH_WAVE_SIZE) {
     const wave = chunks.slice(i, i + RATING_BATCH_WAVE_SIZE);
     const settled = await Promise.allSettled(
-      wave.map((chunk) => ratingApi.getBatchRatings(chunk, timeoutMs)),
+      wave.map((chunk) => ratingApi.getBatchRatings(chunk, timeoutMs, true)),
     );
 
     for (const result of settled) {
-      if (result.status !== 'fulfilled') continue;
+      if (result.status !== 'fulfilled') throw result.reason;
+      if (result.value?.incomplete) throw new Error('Home statistics temporarily unavailable');
       mergeBatchRatingsPayload(merged, result.value);
     }
   }
@@ -1224,38 +1227,60 @@ const Index = () => {
     return overlays.slice(0, MY_RATED_HOME_LIMIT);
   }, [myRatedHomeData, latestMerged, ongoingMerged, visibleMangaDexItems, isMangaDexUnavailable]);
 
+  const { data: guestTopRatedData } = useQuery({
+    queryKey: ['rating', 'top', 'guest', GUEST_TOP_RATED_LIMIT],
+    queryFn: async () => {
+      try {
+        return await ratingApi.getTopRatedManga(GUEST_TOP_RATED_LIMIT);
+      } catch {
+        return { items: [] };
+      }
+    },
+    staleTime: 2 * 60 * 1000,
+    retry: 1,
+    placeholderData: (previousData) => previousData,
+  });
+
+  const guestTopRatedRows = useMemo<TopRatedGlobalItem[]>(
+    () => (((guestTopRatedData as any)?.items || []) as TopRatedGlobalItem[]),
+    [guestTopRatedData],
+  );
+
   const ratingSlugs = useMemo(() => {
     const slugs = new Set<string>();
     [
       ...visibleFeatured.slice(0, 12),
       ...latestMerged.slice(0, 18),
+      ...homeBannerItems.slice(0, 5),
+      ...(data?.latestFeed || []).slice(0, 24),
       ...ongoingMerged.slice(0, 12),
       ...myRatedOverlayItems.slice(0, 24),
     ].forEach((m) => {
       const slug = String(m.id || '').trim();
       if (slug) slugs.add(slug);
     });
+    guestTopRatedRows.forEach(row => { if (row.manga_slug) slugs.add(row.manga_slug); });
     return Array.from(slugs);
-  }, [visibleFeatured, latestMerged, ongoingMerged, myRatedOverlayItems]);
+  }, [visibleFeatured, latestMerged, ongoingMerged, myRatedOverlayItems, homeBannerItems, data?.latestFeed, guestTopRatedRows]);
 
   const { data: homeBatchRatingData } = useQuery({
     queryKey: ['rating', 'batch', 'home', ratingViewerKey, ratingSlugs],
     queryFn: async () => {
       if (!ratingSlugs.length) return { ratings: {} };
-      try {
-        return await fetchBatchRatingsParallel(ratingSlugs);
-      } catch {
-        return { ratings: {}, my_scores: {} };
-      }
+      return fetchBatchRatingsParallel(ratingSlugs);
     },
-    enabled: canRunHomeDeferredQueries && ratingSlugs.length > 0,
-    staleTime: 2 * 60 * 1000,
+    enabled: isHomePrimaryReady && ratingSlugs.length > 0,
+    staleTime: 15_000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
+    refetchInterval: query => query.state.status === 'error' ? 15_000 : false,
+    refetchIntervalInBackground: false,
     retry: 1,
     placeholderData: (previousData) => previousData,
   });
 
   const applyBatchRatings = useMemo(() => {
-    return (items: Manga[]) => applyBatchRatingsPayload(items, homeBatchRatingData);
+    return (items: Manga[]) => applyBatchRatingsPayload(items, homeBatchRatingData, { pending: true });
   }, [homeBatchRatingData]);
 
   const latestMergedRated = useMemo(
@@ -1276,26 +1301,6 @@ const Index = () => {
   const myRatedOverlayRated = useMemo(
     () => applyBatchRatings(myRatedOverlayItems),
     [myRatedOverlayItems, applyBatchRatings],
-  );
-
-  const { data: guestTopRatedData } = useQuery({
-    queryKey: ['rating', 'top', 'guest', GUEST_TOP_RATED_LIMIT],
-    queryFn: async () => {
-      try {
-        return await ratingApi.getTopRatedManga(GUEST_TOP_RATED_LIMIT);
-      } catch {
-        return { items: [] };
-      }
-    },
-    enabled: canRunHomeDeferredQueries,
-    staleTime: 2 * 60 * 1000,
-    retry: 1,
-    placeholderData: (previousData) => previousData,
-  });
-
-  const guestTopRatedRows = useMemo<TopRatedGlobalItem[]>(
-    () => (((guestTopRatedData as any)?.items || []) as TopRatedGlobalItem[]),
-    [guestTopRatedData],
   );
 
   const topRatedKnownLookup = useMemo(() => {
@@ -1334,7 +1339,7 @@ const Index = () => {
     queryKey: ['rating', 'top', 'guest', 'card-metadata-v2', guestTopRatedMissingSlugs],
     queryFn: ({ queryKey }) => loadHomeCardMetadata(guestTopRatedMissingSlugs, queryClient,
       ready => queryClient.setQueryData(queryKey, ready)),
-    enabled: canRunHomeDeferredQueries && guestTopRatedMissingSlugs.length > 0,
+    enabled: guestTopRatedMissingSlugs.length > 0,
     staleTime: 10 * 60 * 1000,
     refetchInterval: query => guestTopRatedMissingSlugs.some(id => !(id in (query.state.data || {}))) ? 5000 : false,
     retry: 0,
@@ -1443,7 +1448,7 @@ const Index = () => {
   };
 
   const heroBannerItems = useMemo(() => {
-    const merged = dedupeById([...featuredRated, ...homeBannerItems, ...latestMergedRated, ...ongoingMergedRated]);
+    const merged = dedupeById([...featuredRated, ...applyBatchRatings(homeBannerItems), ...latestMergedRated, ...ongoingMergedRated]);
     const visibleForBanner = showMatureContent
       ? merged
       : merged.filter((m) => !isEcchiManga(m));
@@ -1483,7 +1488,7 @@ const Index = () => {
       if (updatedDiff !== 0) return updatedDiff;
       return compareByPopular(a, b);
     });
-  }, [featuredRated, homeBannerItems, latestMergedRated, ongoingMergedRated, showMatureContent]);
+  }, [featuredRated, homeBannerItems, latestMergedRated, ongoingMergedRated, showMatureContent, applyBatchRatings]);
 
   const latestHomeDisplay = useMemo(() => {
     // Source and banner pinning must not outrank the actual chapter date.
@@ -1607,13 +1612,9 @@ const Index = () => {
     queryKey: ['rating', 'batch', 'home-popular', ratingViewerKey, popularRatingSlugs],
     queryFn: async () => {
       if (!popularRatingSlugs.length) return { ratings: {}, my_scores: {} };
-      try {
-        return await fetchBatchRatingsParallel(popularRatingSlugs);
-      } catch {
-        return { ratings: {}, my_scores: {} };
-      }
+      return fetchBatchRatingsParallel(popularRatingSlugs);
     },
-    enabled: canRunHomeDeferredQueries && popularRatingSlugs.length > 0,
+    enabled: popularRatingSlugs.length > 0,
     staleTime: 30 * 1000,
     refetchInterval: 60 * 1000,
     refetchIntervalInBackground: false,
@@ -1622,7 +1623,7 @@ const Index = () => {
     placeholderData: (previousData) => previousData,
   });
   const popularRatedVisible = useMemo(
-    () => applyBatchRatingsPayload(popularVisible, popularBatchRatingData),
+    () => applyBatchRatingsPayload(popularVisible, popularBatchRatingData, { pending: true }),
     [popularVisible, popularBatchRatingData],
   );
   const popularMangaDexIds = useMemo(() => {
@@ -1706,8 +1707,8 @@ const Index = () => {
     const candidates = isMangaDexUnavailable
       ? dedupeById([...topRated, ...[...popular].sort((a, b) => b.rating - a.rating)])
       : topRated;
-    return syncMangaDexLatestChapters(candidates, topRatedMangaDexChapterMap as Record<string, MangaDexLatestChapterMeta>);
-  }, [topRated, topRatedMangaDexChapterMap, isMangaDexUnavailable, popular]);
+    return syncMangaDexLatestChapters(applyBatchRatings(candidates), topRatedMangaDexChapterMap as Record<string, MangaDexLatestChapterMeta>);
+  }, [topRated, topRatedMangaDexChapterMap, isMangaDexUnavailable, popular, applyBatchRatings]);
 
   const isHomeSynchronizedLoading = isInitialMergedLoading && !hasHomepageLoadFailed;
   const isTopRatedSectionLoading = isHomeSynchronizedLoading;

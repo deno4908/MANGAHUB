@@ -187,7 +187,7 @@ const MangaCard = ({ manga: originalManga, index = 0, variant = 'default', anima
   const coverMaxRetries = isMangaDexItem || isOTruyenItem ? 2 : 1;
   const detailLinkState = { previewManga: manga };
   const detailPath = getMangaDetailPath(manga.id);
-  const ratingLabel = Number(manga.rating).toFixed(1);
+  const ratingLabel = manga.ratingPending ? '…' : Number(manga.rating).toFixed(1);
   const rawViewCount = Math.max(0, Math.floor(Number(manga.views) || 0));
   const localMangaDexViewCount = Math.max(
     0,
@@ -209,8 +209,8 @@ const MangaCard = ({ manga: originalManga, index = 0, variant = 'default', anima
       : isMangaDexItem && rawViewCount >= 900_000
       ? localMangaDexViewCount
       : rawViewCount;
-  const viewCountLabel = formatCompactViews(viewCount);
-  const fullViewCountLabel = `${viewCount.toLocaleString('vi-VN')} lượt xem`;
+  const viewCountLabel = manga.viewsPending ? '…' : formatCompactViews(viewCount);
+  const fullViewCountLabel = manga.viewsPending ? 'Đang tải lượt xem' : `${viewCount.toLocaleString('vi-VN')} lượt xem`;
   const coverMetrics = (
     <div className="absolute top-2 right-2 flex flex-col items-end gap-1">
       <div className="flex items-center gap-0.5 bg-card/90 backdrop-blur-sm rounded px-1.5 py-0.5 border border-border">

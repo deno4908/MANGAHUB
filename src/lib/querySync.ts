@@ -171,6 +171,19 @@ export function incrementMangaViewsInQueryCache(
       view_count: 'view_count' in record ? next : record.view_count,
     };
   });
+  const ids = toIdentifierSet(identifiers);
+  queryClient.setQueriesData({ queryKey: ['rating', 'batch'] }, (old: any) => {
+    if (!old?.views || typeof old.views !== 'object') return old;
+    let changed = false;
+    const views = { ...old.views };
+    for (const key of Object.keys(views)) {
+      const normalized = normalizeIdentifier(key);
+      if (!ids.has(normalized) && !ids.has(normalizeMangaDexId(normalized) || '')) continue;
+      views[key] = Math.max(0, Number(views[key]) || 0) + increment;
+      changed = true;
+    }
+    return changed ? { ...old, views } : old;
+  });
 }
 
 export function invalidateMangaRealtimeQueries(queryClient: QueryClient) {

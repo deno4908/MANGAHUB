@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mangaApi } from '@/lib/api';
 import { useHomepageCombined } from './useApi';
 import { setSiteAccessRestricted } from '@/lib/siteAccessState';
+import * as covers from '@/lib/coverCache';
 
 const mdxId = 'f239fcd4-9f7f-4296-9e52-ee5a66a7e938';
 const page = (name: string, source = 'truyenqq') => ({ data: {
@@ -18,6 +19,7 @@ function deferred<T = any>() {
 }
 let client: QueryClient;
 beforeEach(() => {
+  vi.spyOn(covers, 'warmCovers').mockReturnValue(() => {});
   setSiteAccessRestricted(false);
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.spyOn(mangaApi, 'getHomepage').mockResolvedValue(home('QQ old'));
@@ -28,6 +30,22 @@ beforeEach(() => {
 afterEach(() => { cleanup(); client.clear(); setSiteAccessRestricted(false); vi.restoreAllMocks(); vi.useRealTimers(); });
 const wrapper = ({ children }: { children: React.ReactNode }) =>
   <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+
+it('starts fast-source covers before the slower catalog settles without publishing a partial feed', async () => {
+  vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+  const pending = deferred();
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockReturnValue(pending.promise);
+  const payload = home('QQ ready');
+  Object.assign(payload.latest.data.items[0], { thumb_url: '/api/manga/truyenqq/cover/book-123' });
+  vi.mocked(mangaApi.getHomepage).mockResolvedValue(payload);
+  const { result } = renderHook(() => useHomepageCombined(), { wrapper });
+  await waitFor(() => expect(covers.warmCovers).toHaveBeenCalledWith([
+    expect.stringContaining('/api/manga/truyenqq/cover/book-123'),
+  ]));
+  expect(result.current.data).toBeUndefined();
+  await act(async () => pending.resolve(page('MDX ready', 'mangadex')));
+  await waitFor(() => expect(result.current.data?.latestFeed).toHaveLength(2));
+});
 
 it.each(['truyenqq', 'mangadex'] as const)('waits for %s before publishing either source', async source => {
   const pending = deferred();

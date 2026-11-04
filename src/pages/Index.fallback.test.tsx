@@ -310,3 +310,52 @@ it('replaces an initially empty error screen with recovered catalogs without pre
   expect(within(section('Mới cập nhật')).getByRole('heading', { name: qq.name })).toBeInTheDocument();
   expect(within(section('Mới cập nhật')).getByRole('heading', { name: mdx.name })).toBeInTheDocument();
 });
+
+
+it('hydrates both latest sources with detail counters and ratings without waiting for idle work', async () => {
+  vi.stubGlobal('requestIdleCallback', vi.fn(() => 1));
+  vi.stubGlobal('cancelIdleCallback', vi.fn());
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([mdx]));
+  vi.mocked(ratingApi.getBatchRatings).mockResolvedValue({
+    views: { [mdxId]: 6, 'qq-readable': 90 },
+    ratings: { [mdxId]: { average: 4.5, count: 2 }, 'qq-readable': { average: 3.5, count: 4 } },
+    my_scores: {},
+  });
+  show();
+  await waitFor(() => {
+    const latest = within(section('Mới cập nhật'));
+    expect(latest.getByTitle('6 lượt xem')).toBeInTheDocument();
+    expect(latest.getByTitle('90 lượt xem')).toBeInTheDocument();
+    expect(latest.getByText('4.5')).toBeInTheDocument();
+    expect(latest.getByText('3.5')).toBeInTheDocument();
+  });
+  expect(ratingApi.getBatchRatings).toHaveBeenCalledWith(expect.arrayContaining([mdxId, 'qq-readable']), expect.any(Number), true);
+  expect(window.requestIdleCallback).toHaveBeenCalled(); // idle work has not run, but primary stats have
+});
+
+it('shows pending counters instead of zero while the home statistics request is in flight', async () => {
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([mdx]));
+  vi.mocked(ratingApi.getBatchRatings).mockReturnValue(new Promise(() => {}));
+  show();
+  await waitFor(() => expect(within(section('Mới cập nhật')).getAllByTitle('Đang tải lượt xem')).toHaveLength(2));
+  expect(within(section('Mới cập nhật')).queryByTitle('0 lượt xem')).not.toBeInTheDocument();
+});
+
+it('retains real home counters during a failed statistics refresh and adopts recovery without changing titles', async () => {
+  client.setDefaultOptions({ queries: { retryDelay: 1 } });
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page([mdx]));
+  const stats = (views: number) => ({ views: { [mdxId]: views, 'qq-readable': 90 },
+    ratings: { [mdxId]: { average: 4.5, count: 2 }, 'qq-readable': { average: 3.5, count: 4 } } });
+  vi.mocked(ratingApi.getBatchRatings).mockResolvedValue(stats(6));
+  show();
+  await waitFor(() => expect(within(section('Mới cập nhật')).getByTitle('6 lượt xem')).toBeInTheDocument());
+  const titles = within(section('Mới cập nhật')).getAllByRole('heading', { level: 3 }).map(node => node.textContent);
+  vi.mocked(ratingApi.getBatchRatings).mockRejectedValue(new Error('Temporary stats outage'));
+  await act(async () => { await client.invalidateQueries({ queryKey: ['rating', 'batch', 'home'] }); });
+  expect(within(section('Mới cập nhật')).getByTitle('6 lượt xem')).toBeInTheDocument();
+  expect(within(section('Mới cập nhật')).getByText('4.5')).toBeInTheDocument();
+  vi.mocked(ratingApi.getBatchRatings).mockResolvedValue(stats(7));
+  await act(async () => { await client.invalidateQueries({ queryKey: ['rating', 'batch', 'home'] }); });
+  await waitFor(() => expect(within(section('Mới cập nhật')).getByTitle('7 lượt xem')).toBeInTheDocument());
+  expect(within(section('Mới cập nhật')).getAllByRole('heading', { level: 3 }).map(node => node.textContent)).toEqual(titles);
+});

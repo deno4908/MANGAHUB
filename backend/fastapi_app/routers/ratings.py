@@ -469,6 +469,7 @@ class RateRequest(BaseModel):
 
 class BatchRatingsRequest(BaseModel):
     manga_slugs: list[str] = Field(default_factory=list, max_items=500)
+    include_views: bool = False
 
 
 @router.get("/manga/{manga_slug}")
@@ -1177,19 +1178,33 @@ async def get_batch_ratings(
                 query_slugs.append(candidate)
 
     epoch = _aggregate_epoch
-    succeeded = True
-    try:
-        rows = (
-            (await asyncio.to_thread(lambda: (db.table("ratings")
-            .select("user_id,manga_slug,score,updated_at")
-            .in_("manga_slug", query_slugs)
-            .execute())))
-            .data
-            or []
-        )
-    except Exception:
-        rows = []
-        succeeded = False
+    # Home cards need the same counters as detail, without N detail requests or
+    # a full-table ranking scan. Run these independent reads together.
+    def read_ratings():
+        return db.table("ratings").select("user_id,manga_slug,score,updated_at").in_("manga_slug", query_slugs).execute().data or []
+
+    def read_views():
+        return db.table("manga_views").select("manga_slug,views").in_("manga_slug", query_slugs).execute().data or []
+
+    def read_personal():
+        return (db.table("ratings").select("manga_slug,score,updated_at")
+                .eq("user_id", user["id"]).in_("manga_slug", query_slugs).execute().data or [])
+
+    results = await asyncio.gather(
+        asyncio.to_thread(read_ratings),
+        *([asyncio.to_thread(read_views)] if data.include_views else []),
+        *([asyncio.to_thread(read_personal)] if user else []),
+        return_exceptions=True,
+    )
+    succeeded = not isinstance(results[0], BaseException)
+    rows = results[0] if succeeded else []
+    views = None
+    if data.include_views and not isinstance(results[1], BaseException):
+        views = {slug: 0 for slug in requested}
+        for row in results[1]:
+            alias = str(row.get("manga_slug") or "").strip().lower()
+            for target in alias_to_requested.get(alias, []):
+                views[target] += max(0, int(row.get("views") or 0))
 
     per_slug_users: dict[str, dict[str, tuple[float, str]]] = {
         slug: {} for slug in requested
@@ -1221,42 +1236,32 @@ async def get_batch_ratings(
         if succeeded:
             _remember_aggregate(db, candidate_groups[slug], avg, count, epoch)
 
-    my_scores: dict[str, int] = {}
-    if user and query_slugs:
-        try:
-            my_rows = (
-                (await asyncio.to_thread(lambda: (db.table("ratings")
-                .select("manga_slug,score,updated_at")
-                .eq("user_id", user["id"])
-                .in_("manga_slug", query_slugs)
-                .execute())))
-                .data
-                or []
-            )
-        except Exception:
-            my_rows = []
-
-        latest_by_slug: dict[str, tuple[int, str]] = {}
-        for row in my_rows:
+    # Keep the personal query independent: PostgREST may cap the aggregate
+    # result before the viewer's row, even when their own score is available.
+    my_scores = {}
+    personal_succeeded = not user or not isinstance(results[-1], BaseException)
+    if user and personal_succeeded:
+        latest_by_slug = {}
+        for row in results[-1]:
             alias = str(row.get("manga_slug") or "").strip().lower()
-            targets = alias_to_requested.get(alias) or []
-            if not targets:
-                continue
-
             try:
                 score = int(row.get("score"))
             except (TypeError, ValueError):
                 continue
-
             updated_at = str(row.get("updated_at") or "")
-            for target in targets:
-                prev = latest_by_slug.get(target)
-                if prev is None or updated_at >= prev[1]:
+            for target in alias_to_requested.get(alias, []):
+                previous = latest_by_slug.get(target)
+                if previous is None or updated_at >= previous[1]:
                     latest_by_slug[target] = (score, updated_at)
-
         my_scores = {slug: score for slug, (score, _) in latest_by_slug.items()}
 
-    return {"ratings": ratings, "my_scores": my_scores}
+    result = {"ratings": ratings if succeeded else {}, "my_scores": my_scores}
+    if views is not None:
+        result["views"] = views
+    if not succeeded or not personal_succeeded or (data.include_views and views is None):
+        result["incomplete"] = True
+    return result
+
 
 
 @router.delete("/manga/{manga_slug}")

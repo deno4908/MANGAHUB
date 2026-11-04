@@ -3,6 +3,7 @@
  */
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { searchPageOptions } from '@/lib/searchQuery';
+import { warmCovers } from '@/lib/coverCache';
 import {
   mangaApi,
   bookmarkApi,
@@ -189,6 +190,17 @@ function homepageNeedsRecovery(state: { data?: HomepageSnapshot; error: Error | 
     && (state.status === 'error' || !!state.data?.unavailableSources.length);
 }
 
+// Fetch a few visible covers while the other catalog is still loading. This
+// shares the authenticated cover cache with cards; it never publishes a partial
+// latest list or starts another image download when the cards mount.
+function warmHomepageCovers(items: Manga[], signal: AbortSignal, showMature: boolean) {
+  const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
+  if (signal.aborted || document.hidden || connection?.saveData || /(^|-)2g$/.test(connection?.effectiveType || '')) return;
+  const release = warmCovers(items.filter(item => showMature || !isMatureManga(item)).slice(0, 3)
+    .map(item => item.source === 'mangadex' ? resolveSavedMangaCover(item.id, item.cover, item.coverProxy, 256).primary : item.cover));
+  signal.addEventListener('abort', release, { once: true });
+}
+
 /** Publish one initial snapshot; recover missing sources without blocking it. */
 export function useHomepageCombined(maxChapters = 120, showMature = false) {
   const client = useQueryClient();
@@ -215,7 +227,10 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
           const visible = [...adaptListData(payload.latest || {}).items, ...adaptListData(payload.ongoing || {}).items]
             .some(item => item.source !== 'mangadex' && !normalizeMangaDexId(item.id)
               && (showMature || !isMatureManga(item)));
-          if (visible) return payload;
+          if (visible) {
+            warmHomepageCovers(adaptListData(payload.latest || {}).items, sourceSignal, showMature);
+            return payload;
+          }
         } catch (error) {
           if (sourceSignal.aborted || !canRecoverHomepage(error)) throw error;
         }
@@ -234,6 +249,7 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
           showMature, filterHidden: true, attachRatings: false, lightweight: true, timeoutMs: 12_000, signal: sourceSignal }), sources.signal)
           .then(value => {
             if (!adaptListData(value).items.length) throw new Error('MangaDex home data unavailable');
+            warmHomepageCovers(adaptListData(value).items, sources.signal, showMature);
             return value;
           }) : Promise.resolve(undefined),
       ]).finally(() => {

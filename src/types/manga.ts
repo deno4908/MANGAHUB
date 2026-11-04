@@ -20,6 +20,9 @@ export interface Manga {
   myRating?: number | null;
   follows: number;
   views: number;
+  /** Lightweight home cards hydrate these counters separately from the catalog. */
+  viewsPending?: boolean;
+  ratingPending?: boolean;
   localViewCount?: number;
   local_view_count?: number;
   view_count?: number;

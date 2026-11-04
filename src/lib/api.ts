@@ -2088,10 +2088,10 @@ export const ratingApi = {
     api<any>(`/api/ratings/me?limit=${Math.max(1, Math.min(500, Math.floor(limit)))}`),
   getTopRatedManga: (limit = 24) =>
     api<any>(`/api/ratings/top?limit=${Math.max(1, Math.min(120, Math.floor(limit)))}`),
-  getBatchRatings: (slugs: string[], timeoutMs?: number) =>
+  getBatchRatings: (slugs: string[], timeoutMs?: number, includeViews = false) =>
     api<any>("/api/ratings/batch", {
       method: "POST",
-      body: JSON.stringify({ manga_slugs: slugs }),
+      body: JSON.stringify({ manga_slugs: slugs, ...(includeViews ? { include_views: true } : {}) }),
       ...(typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
         ? { timeoutMs }
         : {}),

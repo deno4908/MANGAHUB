@@ -202,9 +202,16 @@ VIEW_CHAPTER_INVALID_CACHE_TTL_SECONDS = 5 * 60
 
 async def _get_hidden_slugs(db) -> dict[str, str]:
     """Returns {slug: reason} for all admin-hidden manga. Cached in memory 3 min."""
-    global _hidden_cache, _hidden_cache_at
     if time.time() - _hidden_cache_at < _HIDDEN_CACHE_TTL:
         return _hidden_cache
+    return await _refresh_hidden_slugs(db)
+
+
+@coalesce_reads
+async def _refresh_hidden_slugs(db) -> dict[str, str]:
+    # Home, banner, featured and ranking start together. Share their cold read
+    # while preserving the existing moderation TTL and write invalidation.
+    global _hidden_cache, _hidden_cache_at
     try:
         res = await asyncio.wait_for(
             asyncio.to_thread(
