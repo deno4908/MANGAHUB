@@ -359,3 +359,21 @@ it('retains real home counters during a failed statistics refresh and adopts rec
   await waitFor(() => expect(within(section('Mới cập nhật')).getByTitle('7 lượt xem')).toBeInTheDocument());
   expect(within(section('Mới cập nhật')).getAllByRole('heading', { level: 3 }).map(node => node.textContent)).toEqual(titles);
 });
+
+it('hydrates a large MangaDex selection without producing oversized alias lookups or losing cards', async () => {
+  const ids = Array.from({ length: 48 }, (_, n) => `11111111-1111-4111-8111-${String(n + 1).padStart(12, '0')}`);
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(page(ids.slice(0, 24).map(id => ({ ...mdx, slug: id }))));
+  vi.mocked(ratingApi.getTopRatedManga).mockResolvedValue({ items: ids.slice(24).map(id => ({ manga_slug: id, average: 4, count: 1 })) });
+  vi.mocked(ratingApi.getBatchRatings).mockImplementation(async slugs => ({
+    ratings: Object.fromEntries(slugs.map(slug => [slug, { average: 4, count: 1 }])),
+    views: Object.fromEntries(slugs.map(slug => [slug, 1])),
+  }));
+  show();
+  await waitFor(() => {
+    const batches = vi.mocked(ratingApi.getBatchRatings).mock.calls.map(call => call[0]);
+    const requested = new Set(batches.flat());
+    expect(ids.slice(24).every(id => requested.has(id))).toBe(true);
+    expect(batches.every(batch => batch.filter(id => ids.includes(id)).length <= 30)).toBe(true);
+    expect(within(section('Mới cập nhật')).getAllByRole('heading', { level: 3 })).toHaveLength(10);
+  });
+});

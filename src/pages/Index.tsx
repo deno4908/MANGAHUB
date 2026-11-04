@@ -331,6 +331,7 @@ const GUEST_TOP_RATED_LIMIT = 24;
 const HOME_POPULAR_LIMIT = 12;
 const HOME_POPULAR_TRENDING_FETCH_LIMIT = 50;
 const RATING_BATCH_CHUNK_SIZE = 60;
+const RATING_BATCH_LOOKUP_BUDGET = 6_000;
 const RATING_BATCH_WAVE_SIZE = 2;
 const RATING_BATCH_TIMEOUT_MS = 4_500;
 const ANNOUNCEMENT_DISMISS_KEY_PREFIX = 'mb:home-announcement-dismissed:';
@@ -713,9 +714,18 @@ const fetchBatchRatingsParallel = async (
   if (!uniqueSlugs.length) return { ratings: {}, my_scores: {}, views: {} };
 
   const chunks: string[][] = [];
-  for (let i = 0; i < uniqueSlugs.length; i += RATING_BATCH_CHUNK_SIZE) {
-    chunks.push(uniqueSlugs.slice(i, i + RATING_BATCH_CHUNK_SIZE));
+  let chunk: string[] = [], lookupSize = 0;
+  for (const slug of uniqueSlugs) {
+    // Each MDX ID expands to four database aliases. Keep the backend's
+    // PostgREST lookup URL bounded even when every card is from MangaDex.
+    const size = normalizeMangaDexId(slug) ? 200 : encodeURIComponent(slug).length * 2 + 40;
+    if (chunk.length && (chunk.length >= RATING_BATCH_CHUNK_SIZE || lookupSize + size > RATING_BATCH_LOOKUP_BUDGET)) {
+      chunks.push(chunk);
+      chunk = []; lookupSize = 0;
+    }
+    chunk.push(slug); lookupSize += size;
   }
+  if (chunk.length) chunks.push(chunk);
 
   const merged = { ratings: {}, my_scores: {}, views: {} } as {
     views: Record<string, number>;
