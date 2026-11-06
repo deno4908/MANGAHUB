@@ -7,10 +7,14 @@ import { useQueryClient } from '@tanstack/react-query';
 import OptimizedImage from '@/components/ui/OptimizedImage';
 import { toast } from 'sonner';
 import { getMangaDetailPath } from '@/lib/mangaLinks';
+import { useReaderStore } from '@/store/readerStore';
+import { useUserStore } from '@/store/userStore';
+import { removeReadingHistoryCache } from '@/lib/readingHistory';
 
 const HistoryPage = () => {
   const { data: history = [], isLoading } = useHistory();
   const qc = useQueryClient();
+  const viewer = useUserStore(s => s.user?.id);
 
   const handleRemove = async (slug: string) => {
     const snapshots = qc.getQueriesData<any[]>({ queryKey: ['history'] });
@@ -21,6 +25,8 @@ const HistoryPage = () => {
 
     try {
       await historyApi.remove(slug);
+      if (viewer) useReaderStore.getState().removeProgress(viewer, [slug]);
+      if (viewer) removeReadingHistoryCache(qc, viewer, [slug]);
       toast.success('Đã xoá khỏi lịch sử');
     } catch (error) {
       snapshots.forEach(([key, value]) => qc.setQueryData(key, value));
@@ -40,6 +46,8 @@ const HistoryPage = () => {
 
     try {
       await historyApi.clear();
+      if (viewer) useReaderStore.getState().removeProgress(viewer);
+      if (viewer) removeReadingHistoryCache(qc, viewer);
       toast.success('Đã xoá toàn bộ lịch sử');
     } catch (error) {
       snapshots.forEach(([key, value]) => qc.setQueryData(key, value));

@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from fastapi_app.dependencies import get_current_user, get_supabase
 from fastapi_app.models.schemas import HistoryEntry
@@ -20,6 +20,27 @@ logger = logging.getLogger(__name__)
 HISTORY_UPDATE_LIMIT_PER_MINUTE = 90
 HISTORY_UPDATE_LIMIT_PER_10_MINUTES = 600
 READING_ACTIVITY_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+
+
+@router.get("/manga/{manga_slug}")
+async def get_manga_history(
+    manga_slug: str,
+    aliases: str = Query("", max_length=2048),
+    user=Depends(get_current_user), db=Depends(get_supabase),
+):
+    """Read one manga's checkpoint even beyond the 100-item library window."""
+    from fastapi_app.routers.ratings import _normalize_manga_slug, _slug_candidates
+    from fastapi_app.services.qq_statistics import cached_aliases
+
+    requested = list(dict.fromkeys(_normalize_manga_slug(value)
+        for value in [manga_slug, *aliases.split(",")[:12]] if value.strip()))
+    if not requested:
+        return {"history": None}
+    verified = await asyncio.to_thread(cached_aliases, requested)
+    candidates = list(dict.fromkeys(candidate for value in requested for candidate in _slug_candidates(value, verified)))
+    result = await asyncio.to_thread(lambda: db.table("reading_history").select("*")
+        .eq("user_id", user["id"]).in_("manga_slug", candidates).order("read_at", desc=True).limit(1).execute())
+    return {"history": (result.data or [None])[0]}
 
 
 def _parse_client_read_at(value: str | None) -> datetime | None:
@@ -110,6 +131,11 @@ async def add_or_update_history(
         detail="Cập nhật lịch sử đọc quá nhiều",
     )
 
+    return await asyncio.to_thread(_persist_history, data, user, db)
+
+
+def _persist_history(data: HistoryEntry, user: dict, db):
+    """Keep blocking database work off the API event loop while reading."""
     try:
         now_dt = datetime.now(timezone.utc)
         client_read_at = _parse_client_read_at(data.client_read_at)
@@ -146,17 +172,14 @@ async def add_or_update_history(
             "read_at": now_iso,
         }
 
-        await asyncio.to_thread(
-            _record_reading_activity_event,
-            db,
-            user["id"],
-            data,
-            read_at_dt,
-        )
+        _record_reading_activity_event(db, user["id"], data, read_at_dt)
 
         if rows:
             keep_id = rows[0]["id"]
-            db.table("reading_history").update(payload).eq("id", keep_id).execute()
+            updated = (db.table("reading_history").update(payload).eq("id", keep_id)
+                .or_(f"read_at.is.null,read_at.lte.{now_iso}").execute())
+            if not updated.data:
+                return {"message": "Bỏ qua cập nhật lịch sử cũ", "stale": True}
 
             dup_ids = [r["id"] for r in rows[1:]]
             if dup_ids:

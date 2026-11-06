@@ -2,6 +2,7 @@
  * React Query hooks for all API endpoints.
  */
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from 'react';
 import { searchPageOptions } from '@/lib/searchQuery';
 import { warmCovers } from '@/lib/coverCache';
 import {
@@ -34,6 +35,8 @@ import type { Manga } from "@/types/manga";
 import { isMatureManga } from "@/lib/contentFilter";
 import { MANGADEX_TAGS } from "@/lib/mangaDexTags";
 import { useSettingsStore } from "@/store/settingsStore";
+import { useReaderStore } from '@/store/readerStore';
+import { historyTime, historyMatches, latestReadingHistory, type ReadingHistory } from '@/lib/readingHistory';
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const LOCAL_COVER_FALLBACK = "/no-cover.svg";
@@ -835,12 +838,33 @@ type UseHistoryOptions = {
   enrichThumbs?: boolean;
 };
 
+export function useMangaReadingHistory(identifiers: string[], enabled = true) {
+  const client = useQueryClient();
+  const viewer = useUserStore(s => s.isLoggedIn && !s.isRestoringSession ? s.user?.id : undefined);
+  const localRecords = useReaderStore(s => s.readingProgress[viewer || '']);
+  const ids = [...new Set(identifiers.filter(Boolean))].sort();
+  const local = latestReadingHistory(Object.values(localRecords || {}), ids);
+  const query = useQuery({
+    queryKey: ['history', 'manga', viewer, ids],
+    queryFn: async () => (await historyApi.getManga(ids[0], ids.slice(1))).history as ReadingHistory | null,
+    enabled: enabled && !!viewer && ids.length > 0,
+    ...USER_DATA_QUERY_OPTIONS,
+    staleTime: 30_000,
+    retry: 0,
+    initialData: () => viewer && enabled ? latestReadingHistory(client.getQueriesData({ queryKey: ['history'] })
+      .flatMap(([, data]) => Array.isArray(data) ? data : []), ids) || undefined : undefined,
+  });
+  const data = local && historyTime(local) >= historyTime(query.data) ? local : query.data;
+  return { ...query, data: viewer && enabled ? data : undefined };
+}
+
 export function useHistory(options: UseHistoryOptions = {}) {
   const isLoggedIn = useUserStore((s) => s.isLoggedIn);
   const user = useUserStore((s) => s.user);
   const isRestoringSession = useUserStore((s) => s.isRestoringSession);
   const enabled = options.enabled ?? (isLoggedIn && !!user && !isRestoringSession);
   const enrichThumbs = options.enrichThumbs ?? true;
+  const localRecords = useReaderStore(s => s.readingProgress[user?.id || '']);
 
   const query = useQuery({
     queryKey: ["history", enrichThumbs ? "enriched" : "raw"],
@@ -863,7 +887,18 @@ export function useHistory(options: UseHistoryOptions = {}) {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
-  const data = useCanonicalMangaRecords(query.data, { enabled, fillMissingCovers: enrichThumbs, refreshMetadata: enrichThumbs, requireQQMatch: true });
+  const combined = useMemo(() => {
+    const rows = [...(query.data || [])];
+    for (const row of Object.values(localRecords || {})) {
+      const previous = latestReadingHistory(rows, [row.manga_slug]);
+      if (historyTime(previous) >= historyTime(row)) continue;
+      const index = rows.findIndex(item => historyMatches(item, [row.manga_slug]));
+      if (index >= 0) rows.splice(index, 1);
+      rows.push(row);
+    }
+    return rows.sort((a, b) => historyTime(b) - historyTime(a));
+  }, [query.data, localRecords]);
+  const data = useCanonicalMangaRecords(combined, { enabled, fillMissingCovers: enrichThumbs, refreshMetadata: enrichThumbs, requireQQMatch: true });
   return { ...query, data };
 }
 

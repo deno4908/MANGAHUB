@@ -1,5 +1,6 @@
 import { useParams, Link, useNavigate, useLocation } from 'react-router-dom';
-import { useMangaDetail, useIsBookmarked, useIsFollowing, useToggleBookmark, useToggleFollow, useHistory, useRateManga } from '@/hooks/useApi';
+import { useMangaDetail, useIsBookmarked, useIsFollowing, useToggleBookmark, useToggleFollow, useMangaReadingHistory, useRateManga } from '@/hooks/useApi';
+import { resolveResumeChapter } from '@/lib/readingHistory';
 import { useUserStore } from '@/store/userStore';
 import { useSettingsStore } from '@/store/settingsStore';
 import { ratingApi, uploadApi } from '@/lib/api';
@@ -324,10 +325,7 @@ const MangaDetail = () => {
   const showMatureContent = useSettingsStore((s) => s.settings.privacy.showMatureContent);
   const detailReadySlug = manga ? (manga.slug || manga.id || '') : '';
   const canUseUserMangaState = isLoggedIn && !!user && !isRestoringSession && !!detailReadySlug;
-  const { data: history = [] } = useHistory({
-    enabled: canUseUserMangaState && !!manga,
-    enrichThumbs: false,
-  });
+  const readingHistory = useMangaReadingHistory([detailReadySlug, manga?.id || '', normalizedSlug], canUseUserMangaState);
 
   // Fetch user-uploaded published chapters for this manga
   const { data: uploadedChaptersData } = useQuery({
@@ -783,13 +781,11 @@ const MangaDetail = () => {
     );
   }
 
-  const latestHistory = history
-    .filter((h: any) => h?.manga_slug === detailReadySlug)
-    .sort((a: any, b: any) => new Date(b.read_at || b.created_at || 0).getTime() - new Date(a.read_at || a.created_at || 0).getTime())[0];
-
-  const resumeChapter = latestHistory?.chapter_id
-    ? visibleChapters.find(ch => ch.id === latestHistory.chapter_id)
-    : undefined;
+  const latestHistory = readingHistory.data;
+  const resumeChapter = resolveResumeChapter(latestHistory, mergedChapters, detailReadySlug);
+  const waitingForHistory = canUseUserMangaState && !latestHistory && readingHistory.isPending;
+  const historyUnavailable = canUseUserMangaState && !latestHistory && readingHistory.isError;
+  const savedChapterUnavailable = !!latestHistory && !resumeChapter;
 
   // Deduplicate chapters by number (same logic as ChapterList) — keep first/primary per number
   const dedupedChapters = (() => {
@@ -924,7 +920,15 @@ const MangaDetail = () => {
                   <Loader2 className="w-4 h-4 animate-spin" /> Đang tải chương
                 </button>
               )}
-              {startChapter && (
+              {(waitingForHistory || historyUnavailable) && (
+                <button disabled={waitingForHistory} onClick={() => readingHistory.refetch()} className="px-5 py-2.5 rounded-xl bg-secondary text-sm font-bold">
+                  {waitingForHistory ? 'Đang tải tiến trình đọc…' : 'Thử lại tiến trình đọc'}
+                </button>
+              )}
+              {savedChapterUnavailable && (
+                <p className="text-sm text-muted-foreground">Chương đã lưu chưa có trong danh sách hiện tại. Bạn có thể chọn chương bên dưới.</p>
+              )}
+              {startChapter && !waitingForHistory && !historyUnavailable && !savedChapterUnavailable && (
                 <Link
                   to={`/chapter/${startChapter.id}`}
                   state={{
@@ -936,6 +940,8 @@ const MangaDetail = () => {
                     chapterTitle: startChapter.title,
                     chapters: mergedChapters.map(toReaderChapterState),
                     chapterSourceFilter: readerChapterSourceFilter,
+                    resume: resumeChapter ? latestHistory : undefined,
+                    resumeViewer: user?.id,
                   }}
                   className="px-5 py-2.5 rounded-xl bg-manga-red text-white font-bold text-sm hover:bg-manga-red/90 transition-colors shadow-lg flex items-center gap-2"
                 >

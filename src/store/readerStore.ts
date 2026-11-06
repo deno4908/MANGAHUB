@@ -1,6 +1,7 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { createJSONStorage, persist } from 'zustand/middleware';
 import { ReadingMode } from '@/types/manga';
+import { historyIdentity, historyMatches, historyTime, type ReadingHistory } from '@/lib/readingHistory';
 
 export type PageDirection = 'ltr' | 'rtl';
 export type ImageFit = 'width' | 'height' | 'original';
@@ -30,6 +31,9 @@ interface ReaderStore {
 
   // Progress tracking
   lastReadPositions: Record<string, { page: number; scrollY: number; chapterId: string }>;
+  readingProgress: Record<string, Record<string, ReadingHistory>>;
+  saveProgress: (viewer: string, entry: ReadingHistory) => void;
+  removeProgress: (viewer: string, identifiers?: string[]) => void;
 
   // Actions
   setMode: (mode: ReadingMode) => void;
@@ -68,6 +72,22 @@ export const useReaderStore = create<ReaderStore>()(
       autoScroll: false,
       autoScrollSpeed: 2,
       lastReadPositions: {},
+      readingProgress: {},
+      saveProgress: (viewer, entry) => {
+        if (!viewer || !entry.manga_slug || !entry.chapter_id) return;
+        set(state => {
+          const records = state.readingProgress[viewer] || {};
+          const key = historyIdentity(entry.manga_slug);
+          if (historyTime(records[key]) > historyTime(entry)) return state;
+          const next = { ...records, [key]: entry };
+          const bounded = Object.fromEntries(Object.entries(next).sort((a, b) => historyTime(b[1]) - historyTime(a[1])).slice(0, 200));
+          return { readingProgress: { ...state.readingProgress, [viewer]: bounded } };
+        });
+      },
+      removeProgress: (viewer, identifiers) => set(state => ({ readingProgress: {
+        ...state.readingProgress, [viewer]: identifiers
+          ? Object.fromEntries(Object.entries(state.readingProgress[viewer] || {}).filter(([, row]) => !historyMatches(row, identifiers))) : {},
+      } })),
 
       setMode: (mode) => set({ mode }),
       setCurrentPage: (page) => set({ currentPage: page }),
@@ -97,6 +117,11 @@ export const useReaderStore = create<ReaderStore>()(
     }),
     {
       name: 'reader-settings',
+      storage: createJSONStorage(() => ({
+        getItem: key => { try { return localStorage.getItem(key); } catch { return null; } },
+        setItem: (key, value) => { try { localStorage.setItem(key, value); } catch { /* Keep in-memory progress and server sync usable. */ } },
+        removeItem: key => { try { localStorage.removeItem(key); } catch { /* Storage can be disabled by the browser. */ } },
+      })),
       partialize: (state) => ({
         mode: state.mode,
         pageDirection: state.pageDirection,
@@ -109,6 +134,7 @@ export const useReaderStore = create<ReaderStore>()(
         showProgressBar: state.showProgressBar,
         autoScrollSpeed: state.autoScrollSpeed,
         lastReadPositions: state.lastReadPositions,
+        readingProgress: state.readingProgress,
       }),
     }
   )

@@ -4,7 +4,9 @@ import { useChapter } from '@/hooks/useApi';
 import { useReaderStore } from '@/store/readerStore';
 import { useSettingsStore } from '@/store/settingsStore';
 import { useUserStore } from '@/store/userStore';
-import { historyApi, mangaApi } from '@/lib/api';
+import { mangaApi } from '@/lib/api';
+import { useReaderProgress } from '@/hooks/useReaderProgress';
+import type { ReadingHistory } from '@/lib/readingHistory';
 import { adaptChapterPages, adaptMangaDetail, getChapterPageFallback } from '@/lib/adapters';
 import { getMangaDetailPath, normalizeMangaDexId } from '@/lib/mangaLinks';
 import { loadMangaDexChapterPages, getMangaDexImageFallback } from '@/lib/mangaDexImages';
@@ -44,6 +46,8 @@ interface ChapterState {
   chapterTitle?: string;
   chapters?: ReaderChapter[];
   chapterSourceFilter?: string;
+  resume?: ReadingHistory;
+  resumeViewer?: string;
 }
 
 interface ReaderChapter {
@@ -415,7 +419,6 @@ const ChapterReader = () => {
   const mobileReaderRef = useRef(detectedMobile);
   if (detectedMobile) mobileReaderRef.current = true;
   const isMobile = mobileReaderRef.current;
-  const lastHistorySentAtRef = useRef(0);
   const viewTrackedRef = useRef(false);
   const viewSessionStartedRef = useRef(false);
   const readSessionIdRef = useRef('');
@@ -681,7 +684,6 @@ const ChapterReader = () => {
     setHorizontalRetryCount(0);
     setHorizontalUseFallback(false);
     setHorizontalLoaded(false);
-    lastHistorySentAtRef.current = 0;
     viewTrackedRef.current = false;
     viewSessionStartedRef.current = false;
     readSessionIdRef.current = createReadSessionId();
@@ -796,120 +798,13 @@ const ChapterReader = () => {
     };
   }, []);
 
-  const upsertHistoryCache = useCallback((entry: {
-    manga_slug: string;
-    manga_title: string;
-    manga_thumb: string;
-    chapter_id: string;
-    chapter_name: string;
-    page: number;
-    progress: number;
-    client_read_at: string;
-  }) => {
-    queryClient.setQueryData(['history'], (old: any) => {
-      const current = Array.isArray(old) ? old : [];
-      const filtered = current.filter((it: any) => it.manga_slug !== entry.manga_slug);
-      return [{ ...entry, read_at: entry.client_read_at }, ...filtered];
-    });
-  }, [queryClient]);
-
-  const hasMeaningfulHistoryProgress = useCallback((progress: number, page: number) => {
-    if (totalPages <= 0) return false;
-    const elapsedSeconds = readSessionStartedAtRef.current
-      ? Math.floor((Date.now() - readSessionStartedAtRef.current) / 1000)
-      : 0;
-    const pageSeen = Math.max(0, page) + 1;
-    const minProgress = totalPages <= 2 ? 1 : 5;
-    return elapsedSeconds >= 8 || progress >= minProgress || pageSeen >= 2;
-  }, [totalPages]);
-
-  // ─── Update progress periodically ───
-  useEffect(() => {
-    if (!isLoggedIn || !id || !safeMangaSlug || totalPages === 0) return;
-    const progress = store.mode === 'horizontal'
-      ? Math.round(((store.currentPage + 1) / totalPages) * 100)
-      : Math.round(scrollProgress);
-    const page = store.mode === 'horizontal' ? store.currentPage : visiblePage;
-
-    const timer = setTimeout(() => {
-      if (!hasMeaningfulHistoryProgress(progress, page)) return;
-      const clientReadAt = new Date().toISOString();
-      const sentAt = Date.parse(clientReadAt);
-      if (sentAt - lastHistorySentAtRef.current < 2500) return;
-      lastHistorySentAtRef.current = sentAt;
-      const entry = {
-        manga_slug: safeMangaSlug,
-        manga_title: mangaTitle,
-        manga_thumb: mangaThumb,
-        chapter_id: id,
-        chapter_name: chapterHistoryName,
-        page,
-        progress: Math.min(progress, 100),
-        client_read_at: clientReadAt,
-      };
-      historyApi.add(entry)
-        .then((result) => {
-          if (result?.stale) return;
-          upsertHistoryCache(entry);
-        })
-        .catch(() => {});
-    }, 3000); // debounce 3s
-
-    return () => clearTimeout(timer);
-  }, [isLoggedIn, id, safeMangaSlug, visiblePage, store.currentPage, scrollProgress, totalPages, store.mode, mangaTitle, mangaThumb, chapterHistoryName, upsertHistoryCache, hasMeaningfulHistoryProgress]);
-
-  useEffect(() => {
-    if (!isLoggedIn || !id || !safeMangaSlug || totalPages === 0) return;
-
-    const flushHistory = () => {
-      const progress = store.mode === 'horizontal'
-        ? Math.round(((store.currentPage + 1) / totalPages) * 100)
-        : Math.round(scrollProgress);
-      const page = store.mode === 'horizontal' ? store.currentPage : visiblePage;
-      if (!hasMeaningfulHistoryProgress(progress, page)) return;
-      const entry = {
-        manga_slug: safeMangaSlug,
-        manga_title: mangaTitle,
-        manga_thumb: mangaThumb,
-        chapter_id: id,
-        chapter_name: chapterHistoryName,
-        page,
-        progress: Math.min(Math.max(progress, 0), 100),
-        client_read_at: new Date().toISOString(),
-      };
-      historyApi.add(entry, { keepalive: true, timeoutMs: 5_000 })
-        .then((result) => {
-          if (result?.stale) return;
-          upsertHistoryCache(entry);
-        })
-        .catch(() => {});
-    };
-
-    const onVisibilityChange = () => {
-      if (document.hidden) flushHistory();
-    };
-
-    window.addEventListener('pagehide', flushHistory);
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => {
-      window.removeEventListener('pagehide', flushHistory);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
-  }, [
-    isLoggedIn,
-    id,
-    safeMangaSlug,
-    totalPages,
-    store.mode,
-    store.currentPage,
-    visiblePage,
-    scrollProgress,
-    mangaTitle,
-    mangaThumb,
-    chapterHistoryName,
-    upsertHistoryCache,
-    hasMeaningfulHistoryProgress,
-  ]);
+  useReaderProgress({
+    chapter: currentChapterId, manga: safeMangaSlug, mangaId: mangaDetailId,
+    title: mangaTitle, thumb: mangaThumb, chapterName: chapterHistoryName,
+    totalPages, mode: store.mode, currentPage: store.currentPage,
+    container: readerRef, resume: chapterState.resume,
+    resumeViewer: chapterState.resumeViewer,
+  });
 
   useEffect(() => {
     if (store.autoScroll && store.mode !== 'horizontal') {

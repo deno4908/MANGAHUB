@@ -1,5 +1,7 @@
 import type { LucideIcon } from "lucide-react";
 import { useUserStore } from '@/store/userStore';
+import { useReaderStore } from '@/store/readerStore';
+import { removeReadingHistoryCache } from '@/lib/readingHistory';
 import { useBookmarks, useFollows, useHistory, useToggleFollow, useToggleBookmark } from '@/hooks/useApi';
 import { historyApi, commentApi, mangaApi, ratingApi, userApi } from '@/lib/api';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -237,11 +239,19 @@ const Profile = () => {
   };
   const removeHistoryItem = async (slug: string) => {
     await historyApi.remove(slug);
+    if (user?.id) {
+      useReaderStore.getState().removeProgress(user.id, [slug]);
+      removeReadingHistoryCache(qc, user.id, [slug]);
+    }
     qc.invalidateQueries({ queryKey: ['history'], refetchType: 'active' });
   };
   const clearHistory = async () => {
     if (!confirm('Xoá tất cả lịch sử đọc?')) return;
     await historyApi.clear();
+    if (user?.id) {
+      useReaderStore.getState().removeProgress(user.id);
+      removeReadingHistoryCache(qc, user.id);
+    }
     qc.invalidateQueries({ queryKey: ['history'], refetchType: 'active' });
   };
   const [customizeOpen, setCustomizeOpen] = useState(false);

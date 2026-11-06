@@ -1568,6 +1568,7 @@ export const followApi = {
 // ─── History API ───
 export const historyApi = {
   getAll: () => api<any>("/api/history/"),
+  getManga: (slug: string, aliases: string[] = []) => api<any>(`/api/history/manga/${encodeURIComponent(slug)}?aliases=${encodeURIComponent(aliases.join(','))}`, { timeoutMs: 5_000 }),
   add: (entry: {
     manga_slug: string;
     manga_title?: string;

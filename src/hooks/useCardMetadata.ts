@@ -77,8 +77,8 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
         }) as unknown as T;
       }
       const next: MangaRecord = { ...record };
+      next.manga_source_slug = item.slug;
       if (refreshMetadata) {
-        next.manga_source_slug = item.slug;
         next.source = item.source;
         next.genres = item.genres || record.genres || [];
         next.status = item.status || record.status;

@@ -118,7 +118,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
   };
 
   return (
-    <div ref={imgRef} style={containerStyle} className="relative w-full min-w-0 max-w-full overflow-hidden">
+    <div ref={imgRef} data-reader-page={index} style={containerStyle} className="relative w-full min-w-0 max-w-full overflow-hidden">
       {!loaded && !error && (
         <div className={`flex w-full items-center justify-center bg-secondary/50 ${inView || priority ? 'animate-pulse' : ''}`} style={placeholderStyle}>
           <div className="text-muted-foreground text-xs font-medium">Trang {index + 1}</div>
