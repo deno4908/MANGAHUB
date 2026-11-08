@@ -1,6 +1,7 @@
 """
 Bookmarks & Follows router.
 """
+import asyncio
 import logging
 import re
 from urllib.parse import quote
@@ -52,9 +53,9 @@ def _enforce_library_write_limit(user_id: str) -> None:
 @router.get("/")
 async def get_bookmarks(user=Depends(get_current_user), db=Depends(get_supabase)):
     """Lấy danh sách bookmark."""
-    result = db.table("bookmarks").select("*").eq(
+    result = await asyncio.to_thread(lambda: db.table("bookmarks").select("*").eq(
         "user_id", user["id"]
-    ).order("created_at", desc=True).execute()
+    ).order("created_at", desc=True).execute())
     items = result.data or []
     for it in items:
         it["manga_thumb"] = _thumb_from_slug(it.get("manga_slug", ""), it.get("manga_thumb", ""))
@@ -121,9 +122,9 @@ async def check_bookmark(
 @router.get("/follows")
 async def get_follows(user=Depends(get_current_user), db=Depends(get_supabase)):
     """Lấy danh sách theo dõi."""
-    result = db.table("follows").select("*").eq(
+    result = await asyncio.to_thread(lambda: db.table("follows").select("*").eq(
         "user_id", user["id"]
-    ).order("created_at", desc=True).execute()
+    ).order("created_at", desc=True).execute())
     items = result.data or []
     for it in items:
         it["manga_thumb"] = _thumb_from_slug(it.get("manga_slug", ""), it.get("manga_thumb", ""))

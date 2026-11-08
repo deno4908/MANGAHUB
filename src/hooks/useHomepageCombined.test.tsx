@@ -445,3 +445,29 @@ it('still recovers for an approved reader when the website requires whitelist ac
   expect(mangaApi.getHomepage).toHaveBeenCalledTimes(2);
   expect(mangaApi.getMangaDexHomeBanner).toHaveBeenCalledTimes(2);
 });
+
+
+it('warms the small cards and correctly sized banner before the other source resolves', async () => {
+  vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+  const pending = deferred();
+  vi.mocked(mangaApi.getHomepage).mockReturnValue(pending.promise);
+  const payload = page('MangaDex ready', 'mangadex');
+  const original = `https://uploads.mangadex.org/covers/${mdxId}/large.png`;
+  Object.assign(payload.data.items[0], { thumb_url: original });
+  vi.mocked(mangaApi.getMangaDexHomeBanner).mockResolvedValue(payload);
+  const { result } = renderHook(() => useHomepageCombined(), { wrapper });
+  await waitFor(() => expect(covers.warmCovers).toHaveBeenCalledWith([
+    expect.stringContaining(encodeURIComponent(original + '.512.jpg')),
+    expect.stringContaining(encodeURIComponent(original + '.256.jpg')),
+  ]));
+  expect(result.current.data).toBeUndefined();
+  await act(async () => pending.resolve(home('QQ ready')));
+  await waitFor(() => expect(result.current.data?.latestFeed).toHaveLength(2));
+});
+
+it('avoids speculative cover work in hidden tabs', async () => {
+  vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+  const { result } = renderHook(() => useHomepageCombined(), { wrapper });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(covers.warmCovers).not.toHaveBeenCalled();
+});

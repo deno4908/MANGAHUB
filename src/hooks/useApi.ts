@@ -59,8 +59,18 @@ function assertOTruyenPayload(data: any) {
   throw new Error(String(data?.message || "TruyenQQ unavailable"));
 }
 
-function resolveThumbSources(slug?: string, thumb?: string): { primary: string; fallback?: string } {
-  return resolveSavedMangaCover(String(slug || ''), thumb);
+function resolveThumbSources(slug?: string, thumb?: string, size?: 256 | 512): { primary: string; fallback?: string } {
+  return resolveSavedMangaCover(String(slug || ''), thumb, undefined, size);
+}
+
+// Overlap bounded cover downloads with metadata refresh; source matching still
+// decides which records are displayed, including legacy QQ migrations.
+function warmLibraryCovers(items: Array<Record<string, any>>, signal: AbortSignal) {
+  const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
+  if (signal.aborted || document.hidden || connection?.saveData || /(^|-)2g$/.test(connection?.effectiveType || '')) return;
+  const release = warmCovers(items.filter(item => normalizeMangaDexId(item.manga_slug) || /^[a-z0-9]+(?:-+[a-z0-9]+)*-\d+$/.test(String(item.manga_slug || '')))
+    .slice(0, 4).map(item => item.manga_thumb));
+  signal.addEventListener('abort', release, { once: true });
 }
 
 function fallbackThumb(slug?: string, thumb?: string) {
@@ -196,11 +206,16 @@ function homepageNeedsRecovery(state: { data?: HomepageSnapshot; error: Error | 
 // Fetch a few visible covers while the other catalog is still loading. This
 // shares the authenticated cover cache with cards; it never publishes a partial
 // latest list or starts another image download when the cards mount.
-function warmHomepageCovers(items: Manga[], signal: AbortSignal, showMature: boolean) {
+function warmHomepageCovers(items: Manga[], signal: AbortSignal, showMature: boolean, hero = false) {
   const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
   if (signal.aborted || document.hidden || connection?.saveData || /(^|-)2g$/.test(connection?.effectiveType || '')) return;
-  const release = warmCovers(items.filter(item => showMature || !isMatureManga(item)).slice(0, 3)
-    .map(item => item.source === 'mangadex' ? resolveSavedMangaCover(item.id, item.cover, item.coverProxy, 256).primary : item.cover));
+  const visible = items.filter(item => showMature || !isMatureManga(item));
+  // Warm the same bounded hero/card URLs that will render, including the
+  // 512px banner. Source requests still publish only a complete latest feed.
+  const urls = hero ? visible.slice(0, 2).map(item => resolveSavedMangaCover(item.id, item.cover, item.coverProxy, 512).primary)
+    : [...visible.slice(0, 1).map(item => resolveSavedMangaCover(item.id, item.cover, item.coverProxy, 512).primary),
+       ...visible.slice(0, 3).map(item => item.source === 'mangadex' ? resolveSavedMangaCover(item.id, item.cover, item.coverProxy, 256).primary : item.cover)];
+  const release = warmCovers([...new Set(urls)]);
   signal.addEventListener('abort', release, { once: true });
 }
 
@@ -210,7 +225,11 @@ export function useHomepageCombined(maxChapters = 120, showMature = false) {
   const queryKey = ["manga", "homepage", "complete-latest-v3", maxChapters, showMature];
   const featuredQuery = useQuery({
     queryKey: ["manga", "featured", 12],
-    queryFn: async () => adaptListData(await mangaApi.getFeatured(12)),
+    queryFn: async ({ signal }) => {
+      const featured = adaptListData(await mangaApi.getFeatured(12));
+      warmHomepageCovers(featured.items, signal, showMature, true);
+      return featured;
+    },
     staleTime: 60 * 1000,
     gcTime: 15 * 60 * 1000,
     retry: 1,
@@ -617,22 +636,24 @@ export function useBookmarks() {
   const isRestoringSession = useUserStore((s) => s.isRestoringSession);
   const query = useQuery({
     queryKey: ["bookmarks"],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const data = await bookmarkApi.getAll();
-      return (data.bookmarks || []).map((item: any) => {
-        const resolvedThumb = resolveThumbSources(item.manga_slug, item.manga_thumb);
+      const items = (data.bookmarks || []).map((item: any) => {
+        const resolvedThumb = resolveThumbSources(item.manga_slug, item.manga_thumb, 256);
         return {
           ...item,
           manga_thumb: resolvedThumb.primary,
           manga_thumb_fallback: resolvedThumb.fallback || "",
         };
       });
+      warmLibraryCovers(items, signal);
+      return items;
     },
     enabled: isLoggedIn && !!user && !isRestoringSession,
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
-  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true });
+  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true, coverSize: 256 });
   return { ...query, data };
 }
 
@@ -728,22 +749,24 @@ export function useFollows() {
   const isRestoringSession = useUserStore((s) => s.isRestoringSession);
   const query = useQuery({
     queryKey: ["follows"],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const data = await followApi.getAll();
-      return (data.follows || []).map((item: any) => {
-        const resolvedThumb = resolveThumbSources(item.manga_slug, item.manga_thumb);
+      const items = (data.follows || []).map((item: any) => {
+        const resolvedThumb = resolveThumbSources(item.manga_slug, item.manga_thumb, 256);
         return {
           ...item,
           manga_thumb: resolvedThumb.primary,
           manga_thumb_fallback: resolvedThumb.fallback || "",
         };
       });
+      warmLibraryCovers(items, signal);
+      return items;
     },
     enabled: isLoggedIn && !!user && !isRestoringSession,
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
-  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true });
+  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true, coverSize: 256 });
   return { ...query, data };
 }
 
@@ -876,20 +899,22 @@ export function useHistory(options: UseHistoryOptions = {}) {
 
   const query = useQuery({
     queryKey: ["history", enrichThumbs ? "enriched" : "raw"],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const data = await historyApi.getAll();
       const historyItems = (data.history || []) as Array<any>;
 
-      return historyItems.map((item: any) => {
+      const items = historyItems.map((item: any) => {
         const mangaSlug = String(item?.manga_slug || "");
         const preferredThumb = String(item?.manga_thumb || "").trim();
-        const resolvedThumb = resolveThumbSources(mangaSlug, preferredThumb);
+        const resolvedThumb = resolveThumbSources(mangaSlug, preferredThumb, enrichThumbs ? 256 : undefined);
         return {
           ...item,
           manga_thumb: resolvedThumb.primary,
           manga_thumb_fallback: resolvedThumb.fallback || "",
         };
       });
+      if (enrichThumbs) warmLibraryCovers(items, signal);
+      return items;
     },
     enabled,
     ...USER_DATA_QUERY_OPTIONS,
@@ -906,7 +931,7 @@ export function useHistory(options: UseHistoryOptions = {}) {
     }
     return rows.sort((a, b) => historyTime(b) - historyTime(a));
   }, [query.data, localRecords]);
-  const data = useCanonicalMangaRecords(combined, { enabled, fillMissingCovers: enrichThumbs, refreshMetadata: enrichThumbs, requireQQMatch: true });
+  const data = useCanonicalMangaRecords(combined, { enabled, fillMissingCovers: enrichThumbs, refreshMetadata: enrichThumbs, requireQQMatch: true, coverSize: enrichThumbs ? 256 : undefined });
   return { ...query, data };
 }
 

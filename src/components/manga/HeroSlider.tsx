@@ -5,63 +5,9 @@ import { ArrowRight, ChevronLeft, ChevronRight, Star } from 'lucide-react';
 import { Manga } from '@/types/manga';
 import OptimizedImage from '@/components/ui/OptimizedImage';
 import { getMangaDetailPath, normalizeMangaDexId } from '@/lib/mangaLinks';
+import { resolveSavedMangaCover } from '@/lib/savedManga';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const DEFAULT_COVER_FALLBACK = '/no-cover.svg';
-
-const isImageProxyUrl = (value: string): boolean => {
-  const raw = String(value || '').trim();
-  if (!raw) return false;
-  try {
-    return new URL(raw, API_BASE).pathname === '/api/images/img';
-  } catch {
-    return false;
-  }
-};
-
-const isMangaDexImageUrl = (value: string): boolean => {
-  const raw = String(value || '').trim();
-  if (!/^https?:\/\//i.test(raw)) return false;
-  try {
-    const host = new URL(raw).hostname.toLowerCase();
-    return host.endsWith('uploads.mangadex.org') || host.endsWith('mangadex.network');
-  } catch {
-    return false;
-  }
-};
-
-const toMangaDexProxyImageUrl = (value: string): string => {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  if (isImageProxyUrl(raw)) return raw;
-  if (!isMangaDexImageUrl(raw)) return '';
-  return `${API_BASE}/api/images/img?url=${encodeURIComponent(raw)}`;
-};
-
-const resolveMangaDexHeroCover = (cover?: string, fallback?: string): string => {
-  const candidates = [cover, fallback].map((value) => String(value || '').trim()).filter(Boolean);
-  const proxied = candidates.find(isImageProxyUrl);
-  if (proxied) return proxied;
-
-  for (const candidate of candidates) {
-    const proxiedCandidate = toMangaDexProxyImageUrl(candidate);
-    if (proxiedCandidate) return proxiedCandidate;
-  }
-
-  return candidates[0] || DEFAULT_COVER_FALLBACK;
-};
-
-const resolveMangaDexCurrentCover = (mangaId?: string): string => {
-  const normalized = normalizeMangaDexId(String(mangaId || '').trim());
-  if (!normalized) return '';
-  return `${API_BASE}/api/manga/mangadex-cover/${encodeURIComponent(normalized)}`;
-};
-
-const isUsableCoverSrc = (value?: string): boolean => {
-  const raw = String(value || '').trim().toLowerCase();
-  if (!raw) return false;
-  return !raw.includes('/no-cover.svg') && !raw.includes('/no-cover-dark.svg');
-};
 
 const HeroSlider = ({ manga }: { manga: Manga[] }) => {
   const [current, setCurrent] = useState(0);
@@ -79,13 +25,9 @@ const HeroSlider = ({ manga }: { manga: Manga[] }) => {
 
   const mangaDexId = normalizeMangaDexId(m.id);
   const isMangaDexManga = !!mangaDexId;
-  const mangaDexFallbackCover = resolveMangaDexHeroCover(m.cover, m.coverProxy);
-  const mangaDexCurrentCover = resolveMangaDexCurrentCover(m.id);
-  const heroCoverSrc = isMangaDexManga
-    ? (isUsableCoverSrc(mangaDexFallbackCover) ? mangaDexFallbackCover : (mangaDexCurrentCover || DEFAULT_COVER_FALLBACK))
-    : m.cover;
-  const heroCoverFallbackSrc = isMangaDexManga
-    ? (mangaDexCurrentCover || (isUsableCoverSrc(mangaDexFallbackCover) ? mangaDexFallbackCover : DEFAULT_COVER_FALLBACK))
+  const mangaDexCover = resolveSavedMangaCover(m.id, m.cover, m.coverProxy, 512);
+  const heroCoverSrc = isMangaDexManga ? mangaDexCover.primary : m.cover;
+  const heroCoverFallbackSrc = isMangaDexManga ? mangaDexCover.fallback
     : (String(m.coverProxy || '').trim() || DEFAULT_COVER_FALLBACK);
   const chapterCandidates = (m.chapters || []).filter((chapter) => {
     const chapterId = String(chapter?.id || '').trim();

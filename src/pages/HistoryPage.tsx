@@ -94,11 +94,11 @@ const HistoryPage = () => {
               key={item.manga_slug}
               initial={{ opacity: 0, x: -10 }}
               animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: i * 0.03 }}
+              transition={{ delay: Math.min(i, 5) * 0.03 }}
               className="flex items-center gap-3 p-3 rounded-xl bg-card border border-border/50 hover:border-primary/20 transition-all group"
             >
               <Link to={getMangaDetailPath(item.manga_slug)} className="shrink-0">
-                <OptimizedImage src={item.manga_thumb || ''} fallbackSrc={item.manga_thumb_fallback || undefined} alt="" className="w-12 h-16 rounded-lg object-cover border border-border" />
+                <OptimizedImage src={item.manga_thumb || ''} fallbackSrc={item.manga_thumb_fallback || undefined} alt="" priority={i < 4} className="w-12 h-16 rounded-lg object-cover border border-border" />
               </Link>
               <div className="flex-1 min-w-0">
                 <Link to={getMangaDetailPath(item.manga_slug)} className="text-sm font-bold line-clamp-1 hover:text-primary transition-colors">

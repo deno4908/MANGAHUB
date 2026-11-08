@@ -84,3 +84,13 @@ it.each(['original.jpg', 'original.png', 'original.webp', 'original.png.256.jpg'
     expect(new URL(resolveSavedMangaCover(mdx, source).primary).searchParams.get('url')).toBe(source);
   },
 );
+
+
+it('bounds original hero covers to 512px and shares the identical URL with prefetch and rendering', () => {
+  const original = `https://uploads.mangadex.org/covers/${mdx}/large-original.png`;
+  const banner = resolveSavedMangaCover(mdx, original, undefined, 512);
+  expect(new URL(banner.primary).searchParams.get('url')).toBe(original + '.512.jpg');
+  expect(resolveSavedMangaCover(mdx, banner.primary, banner.fallback, 512)).toEqual(banner);
+  expect(resolveSavedMangaCover(mdx, resolveSavedMangaCover(mdx, original, undefined, 256).primary, undefined, 512)).toEqual(banner);
+  expect(new URL(banner.fallback).pathname).toBe(`/api/manga/mangadex-cover/${mdx}`);
+});

@@ -19,6 +19,11 @@ vi.mock('@/hooks/useCatalogUpdates', () => ({ CatalogUpdates: () => null }));
 vi.mock('./components/manga/Navbar', () => ({ default: () => null }));
 vi.mock('./components/manga/Footer', () => ({ default: () => null }));
 vi.mock('./pages/Index', () => ({ default: () => <div data-testid="home-content" /> }));
+const libraryImports = vi.hoisted(() => ({ following: vi.fn(), history: vi.fn(), bookmarks: vi.fn() }));
+vi.mock('./pages/FollowingPage', () => { libraryImports.following(); return { default: () => <div data-testid="private-library" /> }; });
+vi.mock('./pages/HistoryPage', () => { libraryImports.history(); return { default: () => <div data-testid="private-library" /> }; });
+vi.mock('./pages/BookmarksPage', () => { libraryImports.bookmarks(); return { default: () => <div data-testid="private-library" /> }; });
+
 
 function deferred<T = any>() {
   let resolve!: (value: T) => void;
@@ -70,4 +75,17 @@ it('keeps maintenance enabled even when access is allowed', async () => {
   start();
   await screen.findByText('Scheduled work');
   expect(screen.queryByTestId('home-content')).toBeNull();
+});
+
+
+it.each(['following', 'history', 'bookmarks'] as const)('downloads only the requested %s page code while access remains pending', async page => {
+  const pending = deferred();
+  vi.mocked(systemApi.getMaintenance).mockReturnValue(pending.promise);
+  vi.mocked(siteAccessApi.getStatus).mockReturnValue(pending.promise);
+  render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/' + page]}><AppRouter /></MemoryRouter></QueryClientProvider>);
+  await waitFor(() => expect(libraryImports[page]).toHaveBeenCalledTimes(1));
+  expect(screen.queryByTestId('private-library')).toBeNull();
+  for (const other of ['following', 'history', 'bookmarks'] as const) {
+    if (other !== page) expect(libraryImports[other]).not.toHaveBeenCalled();
+  }
 });

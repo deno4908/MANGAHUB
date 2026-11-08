@@ -86,14 +86,14 @@ def _record_reading_activity_event(db, user_id: str, data: HistoryEntry, read_at
 @router.get("/")
 async def get_history(user=Depends(get_current_user), db=Depends(get_supabase)):
     """Get reading history, newest first."""
-    result = (
+    result = await asyncio.to_thread(lambda: (
         db.table("reading_history")
         .select("*")
         .eq("user_id", user["id"])
         .order("read_at", desc=True)
         .limit(100)
         .execute()
-    )
+    ))
 
     seen = set()
     deduped = []

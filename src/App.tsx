@@ -25,8 +25,8 @@ const ChapterReader = lazyPage(() => import("./pages/ChapterReader"));
 const SearchPage = lazyPage(() => import("./pages/SearchPage"));
 const Profile = lazy(() => import("./pages/Profile"));
 const PublicProfilePage = lazy(() => import("./pages/PublicProfilePage"));
-const BookmarksPage = lazy(() => import("./pages/BookmarksPage"));
-const HistoryPage = lazy(() => import("./pages/HistoryPage"));
+const BookmarksPage = lazyPage(() => import("./pages/BookmarksPage"));
+const HistoryPage = lazyPage(() => import("./pages/HistoryPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const NotificationsPage = lazy(() => import("./pages/NotificationsPage"));
 const UploadDashboard = lazy(() => import("./pages/UploadDashboard"));
@@ -42,7 +42,7 @@ const SupportPage = lazy(() => import("./pages/SupportPage"));
 const ContactPage = lazy(() => import("./pages/ContactPage"));
 const DisclaimerPage = lazy(() => import("./pages/DisclaimerPage"));
 const AuthCallbackPage = lazy(() => import("./pages/AuthCallbackPage"));
-const FollowingPage = lazy(() => import("./pages/FollowingPage"));
+const FollowingPage = lazyPage(() => import("./pages/FollowingPage"));
 const ReportPage = lazy(() => import("./pages/ReportPage"));
 const AboutPage = lazy(() => import("./pages/AboutPage"));
 const FaqPage = lazy(() => import("./pages/FaqPage"));
@@ -662,14 +662,17 @@ const AppContent = () => {
   const allowWhenLocked = ['/banned', '/forbidden', '/login', '/register', '/forgot-password', '/auth/callback', '/support'];
 
   useEffect(() => {
-    // Download only the requested public page while the maintenance check runs.
+    // Download only the requested page code while the maintenance check runs.
     // Rendering and API queries still wait for the existing access checks.
     const path = location.pathname;
     const page = path === '/' ? Index
       : path === '/manga' ? BrowseManga
         : path.startsWith('/manga/') ? MangaDetail
           : path.startsWith('/chapter/') ? ChapterReader
-            : path === '/search' ? SearchPage : undefined;
+            : path === '/search' ? SearchPage
+              : path === '/following' ? FollowingPage
+                : path === '/history' ? HistoryPage
+                  : path === '/bookmarks' ? BookmarksPage : undefined;
     void page?.preload().catch(() => { /* React.lazy can retry on navigation. */ });
   }, [location.pathname]);
 

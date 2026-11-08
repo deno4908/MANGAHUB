@@ -35,13 +35,13 @@ const BookmarksPage = () => {
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 md:gap-4">
           {bookmarks.map((bm: any, i: number) => {
-            const cover = resolveSavedMangaCover(bm.manga_source_slug || bm.manga_slug, bm.manga_thumb, bm.manga_thumb_fallback);
+            const cover = resolveSavedMangaCover(bm.manga_source_slug || bm.manga_slug, bm.manga_thumb, bm.manga_thumb_fallback, 256);
             return (
             <motion.div
               key={bm.manga_slug}
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: i * 0.05 }}
+              transition={{ delay: Math.min(i, 3) * 0.05 }}
               className="group relative"
             >
               <Link to={getSavedMangaDetailPath(bm)} className="block">
@@ -50,6 +50,7 @@ const BookmarksPage = () => {
                     src={cover.primary}
                     fallbackSrc={cover.fallback}
                     alt={bm.manga_title}
+                    priority={i < 4}
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                   />
                 </div>

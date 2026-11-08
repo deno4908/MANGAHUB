@@ -1,11 +1,13 @@
-import { renderHook, waitFor, cleanup } from '@testing-library/react';
+import { act, renderHook, waitFor, cleanup } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { bookmarkApi, followApi, historyApi, mangaApi } from '@/lib/api';
 import { useBookmarks, useFollows, useHistory } from './useApi';
+import * as covers from '@/lib/coverCache';
 import { getSavedMangaDetailPath } from '@/lib/savedManga';
 vi.mock('@/store/userStore', () => ({ useUserStore: (select: (value: any) => any) =>
   select({ isLoggedIn: true, isRestoringSession: false, user: { id: 'library-reader' } }) }));
+beforeEach(() => { vi.spyOn(covers, 'warmCovers').mockReturnValue(() => {}); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const mdx = '5272da37-6c69-4ecc-a1e0-d25db7b3e80f';
 const legacy = 'toi-tro-thanh-nguoi-duoc-nu-phan-dien-yeu-thich-nhat';
@@ -92,5 +94,48 @@ it('rechecks an earlier negative lookup when the saved library supplies a verifi
   });
   await waitFor(() => expect(result.current.data?.[0].manga_thumb).toContain('one-piece-1-128'));
   expect(request).toHaveBeenCalledWith(['dao-hai-tac'], { 'dao-hai-tac': 'Đảo Hải Tặc' });
+  client.clear();
+});
+
+
+it('starts bounded small-cover downloads while exact QQ matching and stale cover refresh remain pending', async () => {
+  vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+  const client = new QueryClient();
+  const rows = [
+    { manga_slug: `mdx-${mdx}`, manga_title: 'Saved MangaDex', manga_thumb: `https://uploads.mangadex.org/covers/${mdx}/original.png`, chapter_id: 'chapter', page: 7, progress: 62 },
+    ...Array.from({ length: 6 }, (_, index) => ({ manga_slug: `native-book-${index + 100}`, manga_title: `Native ${index}`, manga_thumb: `/api/manga/truyenqq/cover/native-book-${index + 100}` })),
+    { manga_slug: 'old-legacy-slug', manga_title: 'Legacy', manga_thumb: 'old.jpg' },
+  ];
+  vi.spyOn(bookmarkApi, 'getAll').mockResolvedValue({ bookmarks: rows });
+  vi.spyOn(followApi, 'getAll').mockResolvedValue({ follows: rows });
+  vi.spyOn(historyApi, 'getAll').mockResolvedValue({ history: rows });
+  let finish!: () => void;
+  const pending = new Promise<void>(resolve => { finish = resolve; });
+  const metadata = vi.spyOn(mangaApi, 'getCardMetadata').mockImplementation(async ids => {
+    await pending;
+    return { items: Object.fromEntries(ids.map(id => [id, id === 'old-legacy-slug' ? null : {
+      id, slug: id, title: 'Source title', source: id === mdx ? 'mangadex' : 'truyenqq',
+      cover_url: id === mdx ? `https://uploads.mangadex.org/covers/${mdx}/fresh.jpg` : `/api/manga/truyenqq/cover/${id}`,
+    }])) };
+  });
+  const { result } = renderHook(() => [useBookmarks(), useFollows(), useHistory()], {
+    wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+  });
+  await waitFor(() => expect(metadata).toHaveBeenCalledTimes(2));
+  expect(covers.warmCovers).toHaveBeenCalledTimes(3);
+  for (const [urls] of vi.mocked(covers.warmCovers).mock.calls) {
+    expect(urls).toHaveLength(4);
+    expect(new URL(urls[0]).searchParams.get('url')).toContain('original.png.256.jpg');
+    expect(urls).not.toContain(expect.stringContaining('old-legacy-slug'));
+  }
+  // Prefetch does not weaken source matching or change stored progress.
+  for (const query of result.current) {
+    expect(query.data).toHaveLength(1);
+    expect(query.data?.[0]).toMatchObject({ manga_slug: `mdx-${mdx}`, chapter_id: 'chapter', page: 7, progress: 62 });
+  }
+  await act(async () => finish());
+  await waitFor(() => { for (const query of result.current) expect(query.data).toHaveLength(7); });
+  for (const query of result.current) expect(new URL(query.data![0].manga_thumb).searchParams.get('url')).toContain('fresh.jpg.256.jpg');
+  expect(rows[0].manga_thumb).toContain('original.png');
   client.clear();
 });

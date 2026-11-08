@@ -35,13 +35,13 @@ const FollowingPage = () => {
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 md:gap-4">
           {follows.map((f: any, i: number) => {
-            const cover = resolveSavedMangaCover(f.manga_source_slug || f.manga_slug, f.manga_thumb, f.manga_thumb_fallback);
+            const cover = resolveSavedMangaCover(f.manga_source_slug || f.manga_slug, f.manga_thumb, f.manga_thumb_fallback, 256);
             return (
               <motion.div
                 key={f.manga_slug}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.05 }}
+                transition={{ delay: Math.min(i, 3) * 0.05 }}
                 className="group relative"
               >
                 <Link to={getSavedMangaDetailPath(f)} className="block">
@@ -50,6 +50,7 @@ const FollowingPage = () => {
                       src={cover.primary}
                       fallbackSrc={cover.fallback}
                       alt={f.manga_title}
+                      priority={i < 4}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                     />
                   </div>

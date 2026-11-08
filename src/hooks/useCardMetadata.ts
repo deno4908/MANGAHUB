@@ -34,11 +34,19 @@ export function useCardMetadata(manga: Manga): Manga {
 }
 
 type MangaRecord = Record<string, any>;
+type SavedMetadataOptions = {
+  enabled?: boolean;
+  fillMissingCovers?: boolean;
+  requireQQMatch?: boolean;
+  refreshMetadata?: boolean;
+  retainUnavailable?: boolean;
+  coverSize?: 256 | 512;
+};
 const recordId = savedMangaId;
 
 /** Saved cards share the same batched metadata and never rewrite saved IDs or reading progress. */
 export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | undefined,
-  { enabled = true, fillMissingCovers = false, requireQQMatch = false, refreshMetadata = false, retainUnavailable = false } = {}): T[] | undefined {
+  { enabled = true, fillMissingCovers = false, requireQQMatch = false, refreshMetadata = false, retainUnavailable = false, coverSize }: SavedMetadataOptions = {}): T[] | undefined {
   const client = useQueryClient();
   const ids = useMemo(() => enabled ? [...new Set((records || []).filter(record => {
     const id = savedMangaLookupId(record);
@@ -90,7 +98,7 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
         if (field in record && needsCanonicalTitle(savedMangaLookupId(record), record[field])) next[field] = item.title;
       }
       if (fillMissingCovers && 'manga_slug' in record) {
-        const covers = resolveSavedMangaCover(item.id, item.cover_url || record.manga_thumb, record.manga_thumb_fallback);
+        const covers = resolveSavedMangaCover(item.id, item.cover_url || record.manga_thumb, record.manga_thumb_fallback, coverSize);
         next.manga_thumb = covers.primary;
         next.manga_thumb_fallback = covers.fallback;
       }
@@ -99,5 +107,5 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
       }
       return next as T;
     });
-  }, [records, ids, metadata, fillMissingCovers, requireQQMatch, enabled, refreshMetadata, retainUnavailable]);
+  }, [records, ids, metadata, fillMissingCovers, requireQQMatch, enabled, refreshMetadata, retainUnavailable, coverSize]);
 }
