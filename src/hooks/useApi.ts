@@ -851,6 +851,14 @@ export function useMangaReadingHistory(identifiers: string[], enabled = true) {
     ...USER_DATA_QUERY_OPTIONS,
     staleTime: 30_000,
     retry: 0,
+    // Recover quietly while the page stays open. Back off during an outage
+    // and stop polling as soon as the lookup succeeds or access is denied.
+    refetchInterval: query => {
+      const status = (query.state.error as { status?: number } | null)?.status;
+      if (query.state.status !== 'error' || status === 401 || status === 403) return false;
+      return Math.min(1_000 * 2 ** Math.min(Math.max(0, query.state.errorUpdateCount - 1), 5), 30_000);
+    },
+    refetchIntervalInBackground: false,
     initialData: () => viewer && enabled ? latestReadingHistory(client.getQueriesData({ queryKey: ['history'] })
       .flatMap(([, data]) => Array.isArray(data) ? data : []), ids) || undefined : undefined,
   });

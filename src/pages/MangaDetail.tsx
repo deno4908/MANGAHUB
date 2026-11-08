@@ -783,8 +783,6 @@ const MangaDetail = () => {
 
   const latestHistory = readingHistory.data;
   const resumeChapter = resolveResumeChapter(latestHistory, mergedChapters, detailReadySlug);
-  const waitingForHistory = canUseUserMangaState && !latestHistory && readingHistory.isPending;
-  const historyUnavailable = canUseUserMangaState && !latestHistory && readingHistory.isError;
   const savedChapterUnavailable = !!latestHistory && !resumeChapter;
 
   // Deduplicate chapters by number (same logic as ChapterList) — keep first/primary per number
@@ -920,15 +918,10 @@ const MangaDetail = () => {
                   <Loader2 className="w-4 h-4 animate-spin" /> Đang tải chương
                 </button>
               )}
-              {(waitingForHistory || historyUnavailable) && (
-                <button disabled={waitingForHistory} onClick={() => readingHistory.refetch()} className="px-5 py-2.5 rounded-xl bg-secondary text-sm font-bold">
-                  {waitingForHistory ? 'Đang tải tiến trình đọc…' : 'Thử lại tiến trình đọc'}
-                </button>
-              )}
               {savedChapterUnavailable && (
                 <p className="text-sm text-muted-foreground">Chương đã lưu chưa có trong danh sách hiện tại. Bạn có thể chọn chương bên dưới.</p>
               )}
-              {startChapter && !waitingForHistory && !historyUnavailable && !savedChapterUnavailable && (
+              {startChapter && !savedChapterUnavailable && (
                 <Link
                   to={`/chapter/${startChapter.id}`}
                   state={{
