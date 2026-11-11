@@ -21,7 +21,7 @@ test('healthy Vercel requests never wait for a routing-control fetch', async()=>
  const ctx=context();let release;
  const w=createStandbyWorker(async r=>typeof r==='string'?new Promise(resolve=>{release=resolve}):new Response('primary'));
  const response=await w.fetch(request(),env,ctx);
- assert.equal(await response.text(),'primary');assert.equal(response.headers.get('x-mangahub-origin'),'vercel');
+ assert.equal(await response.text(),'primary');assert.equal(response.headers.get('x-mangahub-origin'),null);
  release(state(Object.fromEntries(hosts.map(h=>[h,'primary']))));await ctx.done();
 });
 test('safe reads fail over on gateway failure and retain auth, query, cookies and public hostname',async()=>{
@@ -80,7 +80,7 @@ test('timed client drill routes only the selected client to VPS while activation
  const drillEnv={...env,FAILOVER_ENABLED:'false',DRILL_CLIENT_IP:'203.0.113.9',DRILL_EXPIRES_AT:String(Date.now()/1000+600)};
  const target=request(undefined,{headers:{'CF-Connecting-IP':'203.0.113.9'}});
  const response=await worker.fetch(target,drillEnv,ctx);
- assert.equal(await response.text(),'standby.mangahub.art');assert.equal(response.headers.get('x-mangahub-origin'),'vps');
+ assert.equal(await response.text(),'standby.mangahub.art');assert.equal(response.headers.get('x-mangahub-origin'),null);
  assert.equal(calls.length,1);
  const other=await worker.fetch(request(undefined,{headers:{'CF-Connecting-IP':'203.0.113.10'}}),drillEnv,ctx);
  assert.equal(await other.text(),'api.mangahub.art');assert.equal(calls.length,2);
@@ -120,5 +120,15 @@ test('client drill preserves standby failures without replaying writes or hiding
   calls.length=0;
   const r=await worker.fetch(request(undefined,{method,headers:{'CF-Connecting-IP':'203.0.113.9'},...(method==='POST'?{body:'drill'}:{})}),drillEnv,ctx);
   assert.equal(r.status,503);assert.equal(calls.length,1);assert.match(calls[0].url,/standby/);
+ }
+});
+
+test('public responses never disclose an origin marker supplied by either upstream',async()=>{
+ for(const enabled of ['false','true']){
+  const {worker,ctx}=fixture(async()=>new Response('body',{headers:{'X-MangaHub-Origin':'private-origin','Set-Cookie':'session=fixture; Secure; Path=/'}}));
+  const response=await worker.fetch(request(),{...env,FAILOVER_ENABLED:enabled},ctx);
+  assert.equal(response.headers.get('X-MangaHub-Origin'),null);
+  assert.equal(await response.text(),'body');assert.match(response.headers.get('Set-Cookie'),/session=fixture/);
+  await ctx.done();
  }
 });

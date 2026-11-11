@@ -45,9 +45,9 @@ export function createStandbyWorker(send = fetch) {
       redirect: "manual", signal: request.signal, duplex: "half",
     }));
   }
-  function stamp(response, backup) {
+  function publicResponse(response) {
     const result = new Response(response.body, response);
-    result.headers.set("X-MangaHub-Origin", backup ? "vps" : "vercel");
+    result.headers.delete("X-MangaHub-Origin");
     return result;
   }
   return {
@@ -56,23 +56,23 @@ export function createStandbyWorker(send = fetch) {
       if (!HOSTS.includes(host)) return new Response("Not found", { status: 404 });
       if (host === HOSTS[0]) { const denied = denyOutsideVietnam(request); if (denied) return denied; }
       const drill = isDrill(request, env);
-      if ((!drill && env.FAILOVER_ENABLED !== "true") || !env.STANDBY_ORIGIN_SECRET || !env.BACKUP_ORIGIN) return send(request);
+      if ((!drill && env.FAILOVER_ENABLED !== "true") || !env.STANDBY_ORIGIN_SECRET || !env.BACKUP_ORIGIN) return publicResponse(await send(request));
       // A timed single-client drill exercises the full VPS without masking failures
       // with a Vercel retry, touching other readers, or changing shared routing state.
-      if (drill) return stamp(await proxy(request, env, true), true);
+      if (drill) return publicResponse(await proxy(request, env, true));
       // A background state read never delays the healthy Vercel path.
       if (Date.now() >= expires && !refresh) { refresh = refreshModes(env); ctx.waitUntil(refresh); }
       let backup = modes[host] === "backup";
       try {
         const response = await proxy(request, env, backup);
         // Writes might already have committed; never replay a mutation.
-        if (!safe(request.method) || !failed(response.status)) return stamp(response, backup);
+        if (!safe(request.method) || !failed(response.status)) return publicResponse(response);
         await response.body?.cancel();
       } catch (error) { if (!safe(request.method)) throw error; }
       backup = !backup;
       const response = await proxy(request, env, backup);
       if (response.ok) { modes[host] = backup ? "backup" : "primary"; expires = Date.now() + 30_000; }
-      return stamp(response, backup);
+      return publicResponse(response);
     },
     async scheduled(event, env, ctx) {
       const enabled = env.FAILOVER_ENABLED === "true";
