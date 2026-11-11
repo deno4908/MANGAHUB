@@ -1,6 +1,7 @@
 import { fetchWithTimeout } from "./http";
 import { fetchWithTruyenQQRelay } from "./truyenqqRelay";
 import { isSiteAccessRestricted, setSiteAccessRestricted } from './siteAccessState';
+import { sharedSessionHint, setSharedSessionHint } from './sessionHint';
 export { isSiteAccessRestricted, setSiteAccessRestricted } from './siteAccessState';
 /**
  * API client — centralized HTTP calls to backend.
@@ -140,6 +141,7 @@ getAuthTokenChannel();
 
 export function setTokens(access: string, _refresh?: string, options: { broadcast?: boolean } = {}) {
   accessToken = access;
+  setSharedSessionHint(true);
   refreshBlockedUntil = 0;
   lastRefreshFailureHard = false;
   lastRefreshFailureMessage = "";
@@ -164,6 +166,7 @@ export function clearTokens(
   } = {},
 ) {
   accessToken = null;
+  setSharedSessionHint(false);
   refreshBlockedUntil = 0;
   lastRefreshFailureHard = false;
   lastRefreshFailureMessage = "";
@@ -186,6 +189,7 @@ export function clearTokens(
 }
 
 export function hasSessionHint() {
+  if (sharedSessionHint()) return true;
   try {
     return Boolean(localStorage.getItem(SESSION_HINT_KEY));
   } catch {
