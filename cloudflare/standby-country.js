@@ -161,7 +161,7 @@ export function denyOutsideVietnam(request) {
   if (request.cf?.country === "VN") return null;
   const wantsHtml = (request.headers.get("accept") || "").toLowerCase().includes("text/html");
   return new Response(request.method === "HEAD" ? null : wantsHtml ? blockedPage : JSON.stringify({
-    code: "COUNTRY_NOT_SUPPORTED", detail: "Hi?n ch? h? tr? truy c?p t? Vi?t Nam.",
+    code: "COUNTRY_NOT_SUPPORTED", detail: "Hi\u1ec7n ch\u1ec9 h\u1ed7 tr\u1ee3 truy c\u1eadp t\u1eeb Vi\u1ec7t Nam.",
   }), { status: 403, headers: {
     "Content-Type": wantsHtml ? "text/html; charset=utf-8" : "application/json; charset=utf-8",
     "Cache-Control": "private, no-store", "Cloudflare-CDN-Cache-Control": "no-store",
