@@ -208,7 +208,8 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
       const navigation = frontend && SAFE(request.method) && request.headers.get('accept')?.includes('text/html') &&
         !incoming.pathname.startsWith('/assets/') && !incoming.pathname.startsWith('/api/');
       let target = host === STANDBY ? (s.backup.ok === false && s.primary[FRONT]?.ok ? 'primary' : 'backup') : choose(s,host,b,env);
-      if ([API, AUTH].includes(host) && request.headers.get('Origin') === 'https://' + STANDBY && s.backup.ok) target='backup';
+      if ([API, AUTH].includes(host) && request.headers.get('Origin') === 'https://' + STANDBY &&
+          s.backup.ok && (s.backup.capacity || s.primary[host]?.ok === false)) target='backup';
       function navigationRedirect(to) {
         const destination = new URL(incoming); destination.hostname=to;
         return publicResponse(new Response(null,{status:307,headers:{Location:destination.href,'Cache-Control':'private, no-store'}}),request,b);

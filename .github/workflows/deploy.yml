@@ -19,6 +19,9 @@ jobs:
         run: npx wrangler@4 deploy --config cloudflare/wrangler.toml
 
   deploy:
+    # This is the old deploy-user host, not the native standby service.
+    # Keep it opt-in so an unconfigured legacy target cannot fail production CI.
+    if: vars.LEGACY_VPS_DEPLOY == 'true'
     runs-on: ubuntu-latest
 
     steps:
