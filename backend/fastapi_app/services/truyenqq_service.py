@@ -358,7 +358,7 @@ async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=
         # Do not attach an unrelated stale-page refresh to their Vercel invocation.
         return await finish(snapshot["payload"])
     if snapshot is None or snapshot.get("fresh_until", 0) < time.time():
-        task_key = (asyncio.get_running_loop(), key)
+        task_key = (asyncio.get_running_loop(), key, _source_read_scope())
         task = _catalog_jobs.get(task_key)
         if task is None:
             async def refresh():
