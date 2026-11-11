@@ -10,7 +10,3 @@ routes = [
 # Keep browser and backend fetches on the same local source cache.
 [placement]
 region = "aws:ap-southeast-1"
-
-[[services]]
-binding = "SITE_ACCESS_ROUTER"
-service = "mangahub-standby-router"

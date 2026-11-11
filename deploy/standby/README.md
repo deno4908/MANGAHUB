@@ -58,6 +58,8 @@ Cloudflare Workers Free has a daily request quota shared with the account's othe
 
 ## Operations
 
+To restore the pre-standby public serving path, dispatch `restore-vercel.yml`. It restores the existing `mangahub-vn-only` frontend route without replacing that script, detaches API/auth from the standby router, redeploys the source relay without its standby binding, and removes all standby Cron schedules and drills. Other source routes are verified unchanged. It restores API/auth to DNS-only Vercel CNAMEs if the token permits DNS edits; otherwise it reports the two dashboard changes required. The standby record remains proxied to protect its origin address. Keep standby app services stopped after rollback if no longer testing, without deleting their configuration or data.
+
 - Status: `sudo systemctl status mangahub redis-server nginx`.
 - Resource use: `free -m`; `sudo systemctl show mangahub -p MemoryCurrent -p NRestarts`.
 - Logs: `sudo journalctl -u mangahub --since '10 minutes ago'` (redact before sharing).
