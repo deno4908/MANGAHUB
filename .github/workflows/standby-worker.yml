@@ -10,6 +10,10 @@ on:
         description: "Optional public client IP for a one-hour VPS drill; other readers stay on Vercel"
         type: string
         default: ""
+      inspect_only:
+        description: "Inspect routing and API challenge configuration without deploying"
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -22,6 +26,7 @@ jobs:
       STANDBY_ORIGIN_SECRET: ${{ secrets.STANDBY_ORIGIN_SECRET }}
       ACTIVATE: ${{ inputs.activate }}
       DRILL_CLIENT_IP: ${{ inputs.drill_client_ip }}
+      INSPECT_ONLY: ${{ inputs.inspect_only }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,7 +39,7 @@ jobs:
       - name: Inspect existing route ownership
         run: |
           python3 - <<'PY'
-          import json, os, urllib.request
+          import json, os, urllib.request, urllib.error
           def get(path):
               request = urllib.request.Request('https://api.cloudflare.com/client/v4/' + path,
                   headers={'Authorization': 'Bearer ' + os.environ['CLOUDFLARE_API_TOKEN']})
@@ -45,9 +50,21 @@ jobs:
           zone = get('zones?name=mangahub.art')[0]['id']
           print(json.dumps([{'pattern': route['pattern'], 'script': route.get('script')}
               for route in get('zones/' + zone + '/workers/routes')]))
+          if os.environ.get('INSPECT_ONLY') == 'true':
+              for label, path in [('security_level', 'settings/security_level'), ('configuration_rules', 'rulesets/phases/http_config_settings/entrypoint')]:
+                  try:
+                      result = get('zones/' + zone + '/' + path)
+                      if label == 'security_level':
+                          print(json.dumps({'setting': label, 'value': result.get('value')}))
+                      else:
+                          print(json.dumps({'setting': label, 'rules': [
+                              {key: rule.get(key) for key in ['id', 'ref', 'expression', 'enabled', 'action', 'action_parameters']}
+                              for rule in result.get('rules', [])]}))
+                  except urllib.error.HTTPError as error:
+                      print(json.dumps({'setting': label, 'http_status': error.code}))
           PY
       - name: Check standby readiness before activation
-        if: inputs.activate || inputs.drill_client_ip != ''
+        if: '!inputs.inspect_only && (inputs.activate || inputs.drill_client_ip != '''')'
         run: |
           python3 - <<'PY'
           import ipaddress, json, os, urllib.request
@@ -63,6 +80,7 @@ jobs:
               assert response.status == 200 and json.load(response)['status'] == 'ready'
           PY
       - name: Configure routes
+        if: '!inputs.inspect_only'
         run: |
           python3 - <<'PY'
           import json, os, time
@@ -84,6 +102,7 @@ jobs:
           p.write_text(text)
           PY
       - name: Deploy router with its private origin secret
+        if: '!inputs.inspect_only'
         run: |
           test -n "$CLOUDFLARE_API_TOKEN"
           test -n "$CLOUDFLARE_ACCOUNT_ID"
