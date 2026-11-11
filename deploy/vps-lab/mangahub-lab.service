@@ -1,0 +1,33 @@
+[Unit]
+Description=MangaHub isolated VPS web on port 8443
+After=network-online.target redis-server.service
+Wants=network-online.target
+Requires=redis-server.service
+
+[Service]
+Type=simple
+User=mangahub
+Group=mangahub
+WorkingDirectory=/opt/mangahub/lab/backend
+EnvironmentFile=/etc/mangahub/lab.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+ExecStart=/opt/mangahub/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8001 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1 --timeout-keep-alive 10 --timeout-graceful-shutdown 30
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+MemoryHigh=480M
+MemoryMax=600M
+MemorySwapMax=512M
+TasksMax=128
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mangahub/lab/backend
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

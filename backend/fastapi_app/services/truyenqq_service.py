@@ -29,6 +29,14 @@ from truyenapi.truyenapi.updates import update_interval
 from fastapi_app.services.cache_service import cache
 from fastapi_app.services.request_coalescing import coalesce_reads
 from fastapi_app.services.truyenqq_transport import TruyenQQTransport
+from site_access import source_authorization
+
+
+def _source_read_scope():
+    # Native lifespan warmups have no reader credentials. Their denied relay
+    # call must never become the in-flight result for an approved reader.
+    # Approved readers can still share public QQ data without retaining tokens.
+    return bool(source_authorization.get())
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +248,7 @@ def _remember(key: str, payload: dict, ttl=60) -> dict:
     return payload
 
 
-@coalesce_reads
+@coalesce_reads(scope=_source_read_scope)
 async def get_home():
     payload = await _catalog_page("home")
     return await asyncio.to_thread(_remember, "truyenqq:home", payload)
@@ -392,7 +400,7 @@ async def get_list(list_type="truyen-moi", page=1):
     return await _load_list_page(list_type, page, revision)
 
 
-@coalesce_reads
+@coalesce_reads(scope=_source_read_scope)
 async def _load_list_page(list_type, page, revision):
     # Revision is part of the shared-read identity, so a new chapter event
     # cannot join an older in-flight request for the same page.
@@ -410,7 +418,7 @@ def invalidate_live_catalog(slugs, preserve_latest=False):
     _live.html_cache.invalidate_matching(lambda url: url in urls)
 
 
-@coalesce_reads
+@coalesce_reads(scope=_source_read_scope)
 async def get_categories():
     raw = await asyncio.to_thread(cache.get, "truyenqq:genres:v1")
     if isinstance(raw, str):
@@ -482,7 +490,7 @@ def _cached_detail_identifier(slug):
     return slug
 
 
-@coalesce_reads
+@coalesce_reads(scope=_source_read_scope)
 async def get_manga_detail(slug):
     cached = await asyncio.to_thread(_json_cached, f"truyenqq:detail:{slug}")
     item = ((cached or {}).get("data") or {}).get("item") if isinstance(cached, dict) else None
@@ -507,7 +515,7 @@ async def get_manga_detail(slug):
     return payload
 
 
-@coalesce_reads
+@coalesce_reads(scope=_source_read_scope)
 async def search_manga(keyword, page=1):
     # The source AJAX search is a single limited result set, without fake pages.
     if page > 1:
@@ -520,7 +528,7 @@ async def search_manga(keyword, page=1):
     return await asyncio.to_thread(_remember, key, payload, 60)
 
 
-@coalesce_reads
+@coalesce_reads(scope=_source_read_scope)
 async def get_chapter_manifest(slug, number):
     """Share source-provided page URLs across Vercel instances, never image bytes."""
     key = f"truyenqq:chapter-manifest:v1:{slug}:{number}"
