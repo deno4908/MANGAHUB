@@ -7,7 +7,7 @@ const SAFE = method => ['GET', 'HEAD'].includes(method);
 const FAILED = status => [500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526].includes(status);
 const TTL = 30_000;
 
-export function createStandbyWorker(send = fetch, now = Date.now) {
+export function createStandbyWorker(send = fetch, now = Date.now, countryGate = denyOutsideVietnam) {
   const regions = new Map();
   function state(request) {
     const colo = request.cf?.colo || 'unknown';
@@ -187,19 +187,35 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
           // Exercise the real routing implementation with only the primary
           // network leg failing. State is private to this one health drill;
           // no public reader or application mutation is affected.
-          const drill=createStandbyWorker(async(input, options) => {
-            const url=new URL(typeof input==='string'?input:input.url);
-            if ([FRONT,API,AUTH].includes(url.hostname)) throw new Error('operator outage drill');
-            return send(input,options);
-          },now);
-          const jobs=[], results=[];
-          for (const [host,path] of [[API,'/health'],[AUTH,'/auth/health']]) {
-            const response=await drill.fetch(new Request('https://'+host+path,{headers:{Cookie:'mh_route=00000063'}}),
-              {...env,FAILOVER_ENABLED:'true',BALANCE_ENABLED:'false'},{waitUntil:p=>jobs.push(p)});
-            results.push({service:host===API?'api':'auth',status:response.status});
-            await response.body?.cancel();
+          const results=[];
+          for (const failed of ['primary','backup']) {
+            const drill=createStandbyWorker(async(input, options) => {
+              const url=new URL(typeof input==='string'?input:input.url);
+              const isPrimary=[FRONT,API,AUTH].includes(url.hostname);
+              if (isPrimary===(failed==='primary')) throw new Error('operator outage drill');
+              return send(input,options);
+            },now,()=>null); // Operator reads fixed public HTML, never account data.
+            const jobs=[], drillEnv={...env,FAILOVER_ENABLED:'true',BALANCE_ENABLED:'false'};
+            const context={waitUntil:p=>jobs.push(p)};
+            for (const [host,path] of [[API,'/health'],[AUTH,'/auth/health']]) {
+              const response=await drill.fetch(new Request('https://'+host+path,{headers:{Cookie:'mh_route=00000063'}}),drillEnv,context);
+              results.push({failed,service:host===API?'api':'auth',status:response.status});
+              await response.body?.cancel();
+            }
+            const navigation=await drill.fetch(new Request('https://'+(failed==='primary'?FRONT:STANDBY)+'/',
+              {headers:{Accept:'text/html',Cookie:'mh_route=00000063'}}),drillEnv,context);
+            const expected='https://'+(failed==='primary'?STANDBY:FRONT)+'/';
+            const redirected=navigation.status===307 && navigation.headers.get('Location')===expected;
+            await navigation.body?.cancel();
+            let status=503;
+            if (redirected) {
+              const page=await drill.fetch(new Request(expected,{headers:{Accept:'text/html',Cookie:'mh_route=00000063'}}),drillEnv,context);
+              status=page.status;
+              await page.body?.cancel();
+            }
+            results.push({failed,service:'frontend',redirected,status});
+            await Promise.all(jobs);
           }
-          await Promise.all(jobs);
           return Response.json({recovered:results.every(r=>r.status===200),results},{headers:{'Cache-Control':'no-store'}});
         }
         const canonical = kind === 'api' ? API : kind === 'auth' ? AUTH : FRONT;
@@ -222,7 +238,7 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
         incoming.port='';
         return new Response(null,{status:308,headers:{Location:incoming.href,'Cache-Control':'no-store'}});
       }
-      if ([FRONT, STANDBY].includes(host)) { const denied = denyOutsideVietnam(request); if (denied) return denied; }
+      if ([FRONT, STANDBY].includes(host)) { const denied = countryGate(request); if (denied) return denied; }
       if (env.FAILOVER_ENABLED !== 'true') return publicResponse(await send(request), request);
       if (!env.STANDBY_ORIGIN_SECRET || !env.BACKUP_ORIGIN) return publicResponse(await send(request), request);
       const s = state(request), b = bucket(request);

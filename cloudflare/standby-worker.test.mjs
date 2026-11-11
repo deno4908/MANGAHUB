@@ -207,7 +207,12 @@ test('untrusted origins never receive the additional frontend trust',async()=>{
 test('private outage drill uses the standby without poisoning public health state',async()=>{
   const f=setup();
   const r=await f.worker.fetch(request(undefined,'/internal/router-probe?kind=drill',{headers:{'X-MangaHub-Probe-Secret':env.STANDBY_ORIGIN_SECRET}}),env,f.ctx);
-  assert.deepEqual(await r.json(),{recovered:true,results:[{service:'api',status:200},{service:'auth',status:200}]});
+  const value=await r.json();
+  assert.equal(value.recovered,true);assert.equal(value.results.length,6);
+  for (const failed of ['primary','backup']) {
+    assert.equal(value.results.filter(r=>r.failed===failed).length,3);
+    assert.equal(value.results.find(r=>r.failed===failed && r.service==='frontend').redirected,true);
+  }
   assert.equal(await(await f.worker.fetch(request(),env,f.ctx)).text(),'primary');await f.done();
 });
 

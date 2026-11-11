@@ -2,11 +2,14 @@
 
 Users normally enter `https://mangahub.art`. A failed frontend navigation is
 redirected temporarily (307) to `https://standby.mangahub.art`, preserving its
-path and query. The old `:8443` lab redirects to the primary domain.
+path and query. The old `:8443` lab redirects to the standard HTTPS port.
 
 The standby serves the same deployed frontend assets. Its frontend still calls
-the canonical `api` and `auth` hosts, retaining their secure cookies and OAuth
-callback. The router recognizes only the two exact, application-owned frontend
+the canonical `api` and `auth` hosts, retaining their secure cookies. OAuth
+returns to the frontend where login began; both callback URLs must be allowed
+in Supabase. A shared, noncredential cookie hints that the frontend should
+restore a session from the canonical auth host's HttpOnly cookie. The router
+recognizes only the two exact, application-owned frontend
 origins when adapting credentialed CORS and CSRF origin headers. It does not
 trust arbitrary subdomains. Application authentication, whitelist checks,
 reCAPTCHA, rate limits and the Vietnam frontend policy remain enabled.
