@@ -171,9 +171,14 @@ export default {
     }
     if (request.method !== 'OPTIONS' && (url.pathname.startsWith(QQ_PREFIX + '/') || url.pathname.startsWith('/api/mangadex-edge/chapter/'))) {
       const denied = await checkSiteAccess(request, env);
+      if (env?.LAB_PROBE_SECRET) console.log(JSON.stringify({kind:'qq-lab',phase:'access',path:url.pathname,authorized:!denied,status:denied?.status || 200}));
       if (denied) return denied;
     }
-    if (url.pathname.startsWith(QQ_PREFIX + "/")) return qqSource(request, url);
+    if (url.pathname.startsWith(QQ_PREFIX + "/")) {
+      const result = await qqSource(request, url);
+      if (env?.LAB_PROBE_SECRET) console.log(JSON.stringify({kind:'qq-lab',phase:'source',path:url.pathname,status:result.status,cache:result.headers.get('X-TruyenQQ-Cache'),block:result.headers.get('X-TruyenQQ-Block')}));
+      return result;
+    }
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,

@@ -43,3 +43,5 @@ jobs:
           Path('/tmp/mh-lab-secret.json').write_text(json.dumps({'LAB_PROBE_SECRET':os.environ['LAB_PROBE_SECRET']}))
           PY
           npx --yes wrangler@4 secret bulk /tmp/mh-lab-secret.json --config cloudflare/wrangler-vps-lab.toml
+      - name: Observe bounded lab source diagnostics
+        run: python3 cloudflare/observe-lab.py
