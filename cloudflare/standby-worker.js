@@ -159,8 +159,27 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
         if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
         const kind = incoming.searchParams.get('kind') || 'api';
         const target = incoming.searchParams.get('target') || 'primary';
-        if (!['api','auth','frontend','readiness'].includes(kind) || !['primary','backup'].includes(target)) return new Response('Invalid probe', { status: 400 });
+        if (!['api','auth','frontend','readiness','drill'].includes(kind) || !['primary','backup'].includes(target)) return new Response('Invalid probe', { status: 400 });
         if (kind === 'readiness') return Response.json(await backupProbe(env, true), { headers: { 'Cache-Control':'no-store' } });
+        if (kind === 'drill') {
+          // Exercise the real routing implementation with only the primary
+          // network leg failing. State is private to this one health drill;
+          // no public reader or application mutation is affected.
+          const drill=createStandbyWorker(async(input, options) => {
+            const url=new URL(typeof input==='string'?input:input.url);
+            if ([FRONT,API,AUTH].includes(url.hostname)) throw new Error('operator outage drill');
+            return send(input,options);
+          },now);
+          const jobs=[], results=[];
+          for (const [host,path] of [[API,'/health'],[AUTH,'/auth/health']]) {
+            const response=await drill.fetch(new Request('https://'+host+path,{headers:{Cookie:'mh_route=00000063'}}),
+              {...env,FAILOVER_ENABLED:'true',BALANCE_ENABLED:'false'},{waitUntil:p=>jobs.push(p)});
+            results.push({service:host===API?'api':'auth',status:response.status});
+            await response.body?.cancel();
+          }
+          await Promise.all(jobs);
+          return Response.json({recovered:results.every(r=>r.status===200),results},{headers:{'Cache-Control':'no-store'}});
+        }
         const canonical = kind === 'api' ? API : kind === 'auth' ? AUTH : FRONT;
         const path = kind === 'api' ? '/health' : kind === 'auth' ? '/auth/health' : '/';
         try {

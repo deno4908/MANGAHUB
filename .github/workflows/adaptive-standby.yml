@@ -53,13 +53,20 @@ jobs:
         if: inputs.operation == 'prepare' || inputs.operation == 'activate'
         run: |
           python3 - <<'PY'
-          import os,json,urllib.request
+          import os,json,urllib.request,time
           base='https://standby.mangahub.art/internal/router-probe'
-          for query in ['kind=readiness','kind=frontend&target=primary','kind=frontend&target=backup','kind=api&target=primary','kind=api&target=backup','kind=auth&target=primary','kind=auth&target=backup']:
+          for query in ['kind=readiness','kind=frontend&target=primary','kind=frontend&target=backup','kind=api&target=primary','kind=api&target=backup','kind=auth&target=primary','kind=auth&target=backup','kind=drill']:
               request=urllib.request.Request(base+'?'+query,headers={'X-MangaHub-Probe-Secret':os.environ['STANDBY_ORIGIN_SECRET'],'User-Agent':'MangaHub-Standby-Operator/1.0'})
-              with urllib.request.urlopen(request,timeout=20) as response:result=json.load(response)
+              result={'status':'unreachable'}
+              for attempt in range(5):
+                  try:
+                      with urllib.request.urlopen(request,timeout=20) as response:result=json.load(response)
+                      valid=result.get('ok') if query=='kind=readiness' else result.get('recovered') if query=='kind=drill' else result.get('status')==200
+                      if valid:break
+                  except (OSError,ValueError):valid=False
+                  if attempt<4:time.sleep(5)
               print(json.dumps({'probe':query,'result':result}))
-              assert result.get('ok') if query=='kind=readiness' else result.get('status')==200
+              assert valid,'Origin verification failed: '+query
           PY
       - name: Activate verified routes
         if: inputs.operation == 'activate'

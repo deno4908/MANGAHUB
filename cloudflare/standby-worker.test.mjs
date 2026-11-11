@@ -203,3 +203,10 @@ test('untrusted origins never receive the additional frontend trust',async()=>{
   const r=await f.worker.fetch(request('auth.mangahub.art','/auth/refresh',{method:'POST',body:'once',headers:{Origin:'https://untrusted.invalid'}}),env,f.ctx);
   assert.equal(r.status,403);assert.equal(r.headers.get('Access-Control-Allow-Origin'),null);
 });
+
+test('private outage drill uses the standby without poisoning public health state',async()=>{
+  const f=setup();
+  const r=await f.worker.fetch(request(undefined,'/internal/router-probe?kind=drill',{headers:{'X-MangaHub-Probe-Secret':env.STANDBY_ORIGIN_SECRET}}),env,f.ctx);
+  assert.deepEqual(await r.json(),{recovered:true,results:[{service:'api',status:200},{service:'auth',status:200}]});
+  assert.equal(await(await f.worker.fetch(request(),env,f.ctx)).text(),'primary');await f.done();
+});
