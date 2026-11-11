@@ -76,7 +76,7 @@ export function createStandbyWorker(send = fetch) {
     },
     async scheduled(event, env, ctx) {
       const enabled = env.FAILOVER_ENABLED === "true";
-      if (!enabled && !drillActive(env)) return;
+      if (!enabled && env.MONITOR_ONLY !== "true" && !drillActive(env)) return;
       // Exercise the real Cloudflare scheduled origin probes during the timed
       // drill, while public routing still requires separate full activation.
       const ready = await control(env, enabled ? "/internal/standby-health" : "/internal/standby-drill-health");
@@ -85,6 +85,15 @@ export function createStandbyWorker(send = fetch) {
       const health = Object.fromEntries(await Promise.all(HOSTS.map(async host => {
         const path = host === HOSTS[0] ? "/" : host === HOSTS[1] ? "/health" : "/auth/health";
         try {
+          if (host === HOSTS[0]) {
+            // The public frontend intentionally retains Under Attack. Probe its
+            // Vercel TLS origin privately, rather than treating that challenge
+            // or a protected *.vercel.app login redirect as an origin outage.
+            const response = await control(env, "/internal/standby-primary-health");
+            if (!response.ok) { await response.body?.cancel(); return [host, false]; }
+            const result = await response.json();
+            return [host, result.healthy === true];
+          }
           const response = await send(`https://${host}${path}`, { redirect: "manual", signal: AbortSignal.timeout(8000), cf: { cacheTtl: 0 }, headers: { "Cache-Control": "no-cache" } });
           const ok = response.status === 200 && (host !== HOSTS[0] || response.headers.get("content-type")?.includes("text/html"));
           await response.body?.cancel(); return [host, Boolean(ok)];

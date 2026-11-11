@@ -12,6 +12,7 @@ routes = []
 # ]
 [vars]
 FAILOVER_ENABLED = "false"
+MONITOR_ONLY = "false"
 BACKUP_ORIGIN = "https://standby.mangahub.art"
 DRILL_CLIENT_IP = ""
 DRILL_EXPIRES_AT = "0"

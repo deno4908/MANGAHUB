@@ -14,6 +14,10 @@ on:
         description: "Inspect routing and API challenge configuration without deploying"
         type: boolean
         default: false
+      monitor_only:
+        description: "Run private origin monitoring while public traffic remains on Vercel"
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -28,6 +32,7 @@ jobs:
       ACTIVATE: ${{ inputs.activate }}
       DRILL_CLIENT_IP: ${{ inputs.drill_client_ip }}
       INSPECT_ONLY: ${{ inputs.inspect_only }}
+      MONITOR_ONLY: ${{ inputs.monitor_only }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,7 +70,7 @@ jobs:
                       print(json.dumps({'setting': label, 'http_status': error.code}))
           PY
       - name: Check standby readiness before activation
-        if: '!inputs.inspect_only && (inputs.activate || inputs.drill_client_ip != '''')'
+        if: '!inputs.inspect_only && (inputs.activate || inputs.monitor_only || inputs.drill_client_ip != '''')'
         run: |
           python3 - <<'PY'
           import http.client, ipaddress, json, os, socket, ssl, urllib.request, urllib.error
@@ -73,7 +78,7 @@ jobs:
           if drill_ip:
               assert ipaddress.ip_address(drill_ip).is_global, 'Drill requires a public IP'
               assert os.environ['ACTIVATE'] != 'true', 'Use a drill before full activation'
-          path = 'standby-drill-health' if drill_ip else 'standby-health'
+          path = 'standby-health' if os.environ['ACTIVATE'] == 'true' else 'standby-drill-health'
           request = urllib.request.Request('https://standby.mangahub.art/internal/' + path, headers={
               'X-MangaHub-Origin-Secret': os.environ['STANDBY_ORIGIN_SECRET'],
               'X-MangaHub-Public-Host': 'api.mangahub.art'})
@@ -115,6 +120,9 @@ jobs:
           text = text.replace('routes = []', routes, 1)
           if os.environ['ACTIVATE'] == 'true':
               text = text.replace('FAILOVER_ENABLED = \"false\"', 'FAILOVER_ENABLED = \"true\"')
+          if os.environ.get('MONITOR_ONLY') == 'true':
+              assert os.environ['ACTIVATE'] != 'true' and not os.environ.get('DRILL_CLIENT_IP', '').strip(), 'Monitor-only does not route client traffic'
+              text = text.replace('MONITOR_ONLY = "false"', 'MONITOR_ONLY = "true"')
           drill_ip = os.environ.get('DRILL_CLIENT_IP', '').strip()
           if drill_ip:
               text = text.replace('DRILL_CLIENT_IP = ""', 'DRILL_CLIENT_IP = ' + json.dumps(drill_ip))

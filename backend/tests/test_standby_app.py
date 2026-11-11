@@ -33,9 +33,27 @@ def standby(monkeypatch, tmp_path):
 def test_control_is_private_while_normal_app_requests_keep_working(standby):
     module, client = standby
     assert client.get("/api/plain").json() == {"normal": True}
-    for path in ("/internal/standby-control", "/internal/standby-health", "/internal/standby-drill-health"):
+    for path in ("/internal/standby-control", "/internal/standby-health", "/internal/standby-drill-health", "/internal/standby-primary-health"):
         assert client.get(path).status_code == 404
         assert client.get(path, headers={"x-mangahub-origin-secret": "wrong"}).status_code == 404
+    assert not module.STATE_FILE.exists()
+
+
+def test_primary_probe_is_private_read_only_and_does_not_advertise_standby_readiness(standby, monkeypatch):
+    module, client = standby
+    calls = []
+    monkeypatch.setattr(module, "frontend_healthy", lambda: calls.append(True) or True)
+    headers = {"x-mangahub-origin-secret": "test-origin-secret"}
+    assert client.get("/internal/standby-primary-health").status_code == 404
+    assert not calls
+    response = client.get("/internal/standby-primary-health", headers=headers)
+    assert response.json() == {"healthy": True}
+    assert response.headers["Cache-Control"] == "private, no-store"
+    assert len(calls) == 1
+    assert client.post("/internal/standby-primary-health", headers=headers).status_code == 405
+    assert len(calls) == 1
+    monkeypatch.setattr(module, "frontend_healthy", lambda: False)
+    assert client.get("/internal/standby-primary-health", headers=headers).json() == {"healthy": False}
     assert not module.STATE_FILE.exists()
 
 

@@ -17,6 +17,7 @@ from app import app
 from flask_app.auth.credentials import get_private_key
 from redis_runtime import client_for, security_client
 from config import config
+from standby_primary import frontend_healthy
 
 HOSTS = ("mangahub.art", "api.mangahub.art", "auth.mangahub.art")
 _guard = threading.Lock()
@@ -76,13 +77,17 @@ def ready(*, drill=False):
 
 @app.middleware("http")
 async def standby_control(request: Request, call_next):
-    if request.url.path not in {"/internal/standby-health", "/internal/standby-drill-health", "/internal/standby-control"}:
+    if request.url.path not in {"/internal/standby-health", "/internal/standby-drill-health", "/internal/standby-primary-health", "/internal/standby-control"}:
         return await call_next(request)
     secret = os.getenv("STANDBY_ORIGIN_SECRET", "")
     supplied = request.headers.get("x-mangahub-origin-secret", "")
     if not secret or not hmac.compare_digest(secret.encode(), supplied.encode()):
         return JSONResponse({"detail": "Not found"}, status_code=404)
     headers = {"Cache-Control": "private, no-store"}
+    if request.url.path == "/internal/standby-primary-health":
+        if request.method not in {"GET", "HEAD"}:
+            return JSONResponse({"detail": "Method not allowed"}, status_code=405, headers=headers)
+        return JSONResponse({"healthy": await asyncio.to_thread(frontend_healthy)}, headers=headers)
     if request.url.path.endswith("health"):
         if request.method not in {"GET", "HEAD"}:
             return JSONResponse({"detail": "Method not allowed"}, status_code=405, headers=headers)

@@ -57,11 +57,51 @@ test('country restriction keeps the existing blocked frontend page',async()=>{
 });
 test('probes each original hostname and updates private routing control only after backup readiness',async()=>{
  const calls=[];
- const worker=createStandbyWorker(async(r,init)=>{calls.push({url:r,init});if(r.endsWith('standby-health'))return new Response('{"status":"ready"}');if(init?.method==='POST')return new Response('{}');return new Response('ok',{headers:{'content-type':'text/html'}})});
+ const worker=createStandbyWorker(async(r,init)=>{calls.push({url:r,init});if(r.endsWith('standby-primary-health'))return Response.json({healthy:true});if(r.endsWith('standby-health'))return new Response('{"status":"ready"}');if(init?.method==='POST')return new Response('{}');return new Response('ok',{headers:{'content-type':'text/html'}})});
  await worker.scheduled({},env,context());
  assert.equal(calls.length,5);assert.equal(calls[4].init.method,'POST');
  assert.deepEqual(JSON.parse(calls[4].init.body).health,Object.fromEntries(hosts.map(h=>[h,true])));
  assert.equal(calls[4].init.headers['X-MangaHub-Origin-Secret'],'test-secret');
+});
+
+test('frontend monitor uses private origin probe while public Under Attack remains enabled',async()=>{
+ for(const result of [true,false,'true',null]){
+  const calls=[];
+  const worker=createStandbyWorker(async(r,init)=>{
+   calls.push({r,init});
+   assert.notEqual(r,'https://mangahub.art/');
+   if(r.endsWith('/internal/standby-primary-health'))return Response.json({healthy:result});
+   if(r.endsWith('/internal/standby-health'))return Response.json({status:'ready'});
+   return Response.json({status:'ok'});
+  });
+  await worker.scheduled({},env,context());
+  const update=calls.find(call=>call.init?.method==='POST');
+  assert.deepEqual(JSON.parse(update.init.body).health,{
+   'mangahub.art':result===true,'api.mangahub.art':true,'auth.mangahub.art':true,
+  });
+  const probe=calls.find(call=>call.r.endsWith('/internal/standby-primary-health'));
+  assert.equal(probe.init.headers['X-MangaHub-Origin-Secret'],'test-secret');
+ }
+});
+
+test('monitor-only records real health without routing readers to the standby',async()=>{
+ const calls=[],ctx=context();
+ const worker=createStandbyWorker(async(r,init)=>{
+  const url=typeof r==='string'?r:r.url;calls.push({url,init});
+  if(url.endsWith('/internal/standby-drill-health'))return Response.json({status:'ready'});
+  if(url.endsWith('/internal/standby-primary-health'))return Response.json({healthy:true});
+  return Response.json({status:'ok'});
+ });
+ const monitorEnv={...env,FAILOVER_ENABLED:'false',MONITOR_ONLY:'true'};
+ await worker.scheduled({},monitorEnv,ctx);
+ assert.equal(calls.length,5);
+ assert.deepEqual(JSON.parse(calls.at(-1).init.body).health,Object.fromEntries(hosts.map(h=>[h,true])));
+ calls.length=0;
+ for(const method of ['GET','POST']){
+  await worker.fetch(request(undefined,{method,...(method==='POST'?{body:'one-write'}:{})}),monitorEnv,ctx);
+ }
+ assert.equal(calls.length,2);
+ assert.ok(calls.every(call=>call.url.startsWith('https://api.mangahub.art/')));
 });
 test('does not switch traffic to an unready backup',async()=>{
  let count=0;const worker=createStandbyWorker(async()=>{count++;return new Response('not ready',{status:503})});
