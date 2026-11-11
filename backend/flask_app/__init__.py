@@ -91,7 +91,7 @@ def create_app() -> Flask:
     def enforce_maintenance_mode():
         if request.method == "OPTIONS":
             return None
-        if request.path == "/health":
+        if request.path in {"/health", "/auth/health"}:
             return None
         state = get_maintenance_state()
         if not state.get("enabled"):

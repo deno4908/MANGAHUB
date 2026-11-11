@@ -64,3 +64,30 @@ def test_cancelled_reader_releases_its_capacity_slot(standby):
             await wrapper({'type':'http','path':'/api/manga/chapter/fixture'},None,None)
         assert wrapper.active == 0
     asyncio.run(scenario())
+
+
+def test_readiness_keeps_running_when_default_database_threads_are_busy(standby, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    release, started = threading.Event(), threading.Event()
+    monkeypatch.setattr(standby, 'verify_ready', lambda: True)
+    async def scenario():
+        loop=asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        def blocked():
+            started.set()
+            release.wait(2)
+        busy=loop.run_in_executor(None,blocked)
+        while not started.is_set():await asyncio.sleep(.001)
+        monitor=asyncio.create_task(standby.app._monitor())
+        try:
+            async def ready():
+                while not standby.app.ready_at:await asyncio.sleep(.001)
+            await asyncio.wait_for(ready(),.5)
+        finally:
+            release.set()
+            monitor.cancel()
+            await asyncio.gather(monitor,return_exceptions=True)
+            await busy
+            standby.app.probe_pool.shutdown(wait=False,cancel_futures=True)
+    asyncio.run(scenario())

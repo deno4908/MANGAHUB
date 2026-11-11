@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from config import config
-from supabase import create_client
+import httpx
+from fastapi_app.services.supabase_client import create_client
 
 SETTING_KEY = "maintenance_mode"
 DEFAULT_TITLE = "Website \u0111ang b\u1ea3o tr\u00ec"
@@ -57,7 +58,8 @@ def _get_supabase_admin():
     if _supabase_admin is None:
         if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
             raise RuntimeError("Supabase service key is not configured")
-        _supabase_admin = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
+        _supabase_admin = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY,
+                                       database_timeout=httpx.Timeout(2.5, connect=1.5, pool=1))
     return _supabase_admin
 
 

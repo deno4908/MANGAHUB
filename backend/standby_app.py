@@ -10,6 +10,7 @@ import os
 import time
 from pathlib import Path
 from uuid import uuid4
+from concurrent.futures import ThreadPoolExecutor
 
 from config import config
 from redis_runtime import client_for, security_client
@@ -55,11 +56,15 @@ class OriginStatusMiddleware:
         self.active = 0
         self.ready_at = 0
         self.monitor = None
+        # Policy/database reads may fill the application's default I/O pool.
+        # Redis readiness must still run and stop assigning excess traffic.
+        self.probe_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='standby-readiness')
 
     async def _monitor(self):
         while True:
             try:
-                valid = await asyncio.wait_for(asyncio.to_thread(verify_ready), timeout=4)
+                future = asyncio.get_running_loop().run_in_executor(self.probe_pool, verify_ready)
+                valid = await asyncio.wait_for(future, timeout=4)
                 self.ready_at = time.monotonic() if valid else 0
             except Exception:
                 self.ready_at = 0
@@ -93,6 +98,7 @@ class OriginStatusMiddleware:
                 elif message['type'].startswith('lifespan.shutdown') and self.monitor:
                     self.monitor.cancel()
                     await asyncio.gather(self.monitor, return_exceptions=True)
+                    self.probe_pool.shutdown(wait=False, cancel_futures=True)
                 await send(message)
             return await self.app(scope, receive, lifecycle)
         if scope['type'] != 'http':

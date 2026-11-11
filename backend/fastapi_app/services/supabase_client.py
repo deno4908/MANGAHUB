@@ -6,6 +6,7 @@ Only PostgREST's HTTP transport changes; Auth, Storage and Realtime are intact.
 import httpx
 from postgrest import SyncPostgrestClient
 from supabase._sync.client import SyncClient
+from supabase.lib.client_options import SyncClientOptions
 
 
 class _DatabaseClient(SyncPostgrestClient):
@@ -21,5 +22,6 @@ class _SupabaseClient(SyncClient):
                                verify=verify, proxy=proxy)
 
 
-def create_client(url, key):
-    return _SupabaseClient.create(url, key)
+def create_client(url, key, *, database_timeout=None):
+    options = None if database_timeout is None else SyncClientOptions(postgrest_client_timeout=database_timeout)
+    return _SupabaseClient.create(url, key, options=options)
