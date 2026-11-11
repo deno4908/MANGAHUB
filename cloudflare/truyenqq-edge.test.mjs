@@ -24,6 +24,8 @@ test('lab operator probe is private and returns metadata without source pages or
   const env = {LAB_PROBE_SECRET:'operator-fixture'};
   assert.equal((await worker.fetch(new Request('https://worker.example/internal/qq-probe'), env)).status, 404);
   assert.equal(calls, 0);
+  assert.equal((await worker.fetch(new Request('https://worker.example/internal/qq-probe?target=https://other.invalid', {headers:{'X-MangaHub-Probe-Secret':'operator-fixture'}}), env)).status, 400);
+  assert.equal(calls, 0);
   const result = await worker.fetch(new Request('https://worker.example/internal/qq-probe', {headers:{'X-MangaHub-Probe-Secret':'operator-fixture'}}), env);
   const value = await result.json();
   assert.equal(value.status, 200);assert.equal(value.valid, true);assert.equal(calls, 1);

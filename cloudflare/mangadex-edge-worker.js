@@ -149,15 +149,19 @@ export default {
       if (request.method !== 'GET') return json({ error: 'Method not allowed' }, 405);
       const mode = url.searchParams.get('mode') || 'origin';
       if (!['origin', 'cache'].includes(mode)) return json({ error: 'Invalid mode' }, 400);
+      const targets = { latest: '/truyen-moi-cap-nhat', page: '/truyen-moi-cap-nhat/trang-1', genres: '/doc-truyen',
+        comic: '/truyen-tranh/vo-trong-game-cua-toi-la-idol-noi-tieng-ngoai-doi-18078' };
+      const target = url.searchParams.get('target') || 'latest';
+      if (!Object.hasOwn(targets, target)) return json({ error: 'Invalid target' }, 400);
       const started = Date.now();
       try {
-        const path = '/truyen-moi-cap-nhat';
+        const path = targets[target];
         const response = mode === 'cache'
           ? await qqSource(new Request(new URL(QQ_PREFIX + path, url), request), new URL(QQ_PREFIX + path, url))
           : await fetchQQOrigin(path, '', undefined).then(result => new Response(result.body, { status: result.status, headers: result.headers }));
         const html = await response.text();
         // Operator-only metadata. Never return source pages, cookies or tokens.
-        return json({ mode, status: response.status, valid: response.status === 200 && /list_grid/.test(html),
+        return json({ mode, target, status: response.status, valid: response.status === 200 && /list_grid|book_info|chapter_content/.test(html),
           cache: response.headers.get('X-TruyenQQ-Cache'), colo: request.cf?.colo || '-',
           challenge: /cf-chl-|challenge-platform|Just a moment/i.test(html), milliseconds: Date.now() - started,
         }, 200, { 'Cache-Control': 'no-store' });
