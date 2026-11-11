@@ -98,6 +98,13 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
     const share = faster || congested ? 25 : host === FRONT ? 0 : 10;
     return b.value < share ? 'backup' : 'primary';
   }
+  function standbyFrontendEligible(s,b,env) {
+    if (!s.backup.ok) return false;
+    if ([FRONT,API,AUTH].some(host=>s.primary[host]?.ok===false) || b.test) return true;
+    if (env.BALANCE_ENABLED!=='true' || !s.backup.capacity) return false;
+    const primary=s.primary[FRONT]?.milliseconds, backup=s.backup.frontendMilliseconds;
+    return Number.isFinite(primary) && Number.isFinite(backup) && backup+100<primary*.8;
+  }
   async function proxy(request, env, target) {
     const headers = new Headers(request.headers), source = new URL(request.url);
     for (const name of ['X-MangaHub-Origin-Secret', 'X-MangaHub-Public-Host', 'X-MangaHub-Client-IP',
@@ -249,13 +256,21 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
         const job = refresh(s, env);
         // Check readiness before selecting an origin for a mutation. Never
         // repeat a submitted write, even after a network error or a 5xx.
-        if (!SAFE(request.method) || b.test) await job;
+        if (!SAFE(request.method) || b.test || host===STANDBY) await job;
         else ctx.waitUntil(job);
       }
       const frontend = [FRONT, STANDBY].includes(host);
       const navigation = frontend && SAFE(request.method) && request.headers.get('accept')?.includes('text/html') &&
-        !incoming.pathname.startsWith('/assets/') && !incoming.pathname.startsWith('/api/') && incoming.pathname!=='/auth/callback';
-      let target = host === STANDBY ? (s.backup.ok === false && s.primary[FRONT]?.ok ? 'primary' : 'backup') : choose(s,host,b,env);
+        !incoming.pathname.startsWith('/assets/') && !incoming.pathname.startsWith('/api/');
+      let target = host === STANDBY ? (standbyFrontendEligible(s,b,env)?'backup':'primary') : choose(s,host,b,env);
+      if (host===FRONT) {
+        if (!standbyFrontendEligible(s,b,env)) target='primary';
+        else if ([FRONT,API,AUTH].some(host=>s.primary[host]?.ok===false)) target='backup';
+        // Finish a primary OAuth callback on its original frontend unless an
+        // outage requires the other host. Both frontends use the same auth
+        // host's protected PKCE cookie, including a standby-to-primary return.
+        if (incoming.pathname==='/auth/callback' && s.primary[FRONT]?.ok!==false) target='primary';
+      }
       if ([API, AUTH].includes(host) && request.headers.get('Origin') === 'https://' + STANDBY &&
           s.backup.ok && (s.backup.capacity || s.primary[host]?.ok === false)) target='backup';
       const image = incoming.pathname.startsWith('/api/images/') ||

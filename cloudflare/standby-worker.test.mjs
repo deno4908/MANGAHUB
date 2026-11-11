@@ -170,14 +170,39 @@ test('failed primary navigation redirects to standby preserving path and query',
   assert.equal(r.headers.get('Location'),'https://standby.mangahub.art/chapter/fixture?page=8');
 });
 
-test('direct standby navigation serves the VPS with canonical identity',async()=>{
-  const f=setup({handle:r=>{
+test('direct standby navigation serves the VPS with canonical identity during an outage',async()=>{
+  const f=setup({primary:false,handle:r=>{
     assert.equal(new URL(r.url).hostname,'standby.example');
     assert.equal(r.headers.get('X-MangaHub-Public-Host'),'mangahub.art');
     return new Response('<html>full site</html>',{headers:{'Content-Type':'text/html'}});
   }});
   const r=await f.worker.fetch(request('standby.mangahub.art','/manga/fixture',{headers:{accept:'text/html'}}),env,f.ctx);
   assert.equal(r.status,200);await f.done();
+});
+
+test('direct standby returns to a healthy primary when it offers no latency advantage',async()=>{
+  const f=setup();
+  const r=await f.worker.fetch(request('standby.mangahub.art','/chapter/fixture?page=5',{headers:{accept:'text/html'}}),env,f.ctx);
+  assert.equal(r.status,307);
+  assert.equal(r.headers.get('Location'),'https://mangahub.art/chapter/fixture?page=5');await f.done();
+});
+
+test('standby OAuth callback returns to the preferred primary with its code intact',async()=>{
+  const f=setup();
+  const r=await f.worker.fetch(request('standby.mangahub.art','/auth/callback?code=fixture',{headers:{accept:'text/html'}}),env,f.ctx);
+  assert.equal(r.status,307);assert.equal(r.headers.get('Location'),'https://mangahub.art/auth/callback?code=fixture');await f.done();
+});
+
+test('a direct reader stays on a measured faster standby without needing a spare-share bucket',async()=>{
+  const f=setup({latency:{primary:1000,backup:1}});
+  const r=await f.worker.fetch(request('standby.mangahub.art','/manga/fixture',{headers:{accept:'text/html',cookie:'mh_route=00000063'}}),env,f.ctx);
+  assert.equal(r.status,200);assert.equal(await r.text(),'backup');await f.done();
+});
+
+test('a faster but saturated standby returns a direct reader to the healthy primary',async()=>{
+  const f=setup({capacity:false,latency:{primary:1000,backup:1}});
+  const r=await f.worker.fetch(request('standby.mangahub.art','/manga/fixture',{headers:{accept:'text/html'}}),env,f.ctx);
+  assert.equal(r.status,307);assert.equal(r.headers.get('Location'),'https://mangahub.art/manga/fixture');await f.done();
 });
 
 test('standby failure redirects navigation back to the healthy primary',async()=>{

@@ -3,6 +3,9 @@
 Users normally enter `https://mangahub.art`. A failed frontend navigation is
 redirected temporarily (307) to `https://standby.mangahub.art`, preserving its
 path and query. The old `:8443` lab redirects to the standard HTTPS port.
+Direct standby navigation also returns to the primary when it is healthy and
+the standby offers no measured latency advantage. An outage takes precedence;
+proactive standby selection additionally requires available VPS capacity.
 
 The standby serves the same deployed frontend assets. Its frontend still calls
 the canonical `api` and `auth` hosts, retaining their secure cookies. OAuth
