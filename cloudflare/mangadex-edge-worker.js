@@ -3,14 +3,19 @@ const QQ_PREFIX = "/api/truyenqq-edge";
 const QQ_SOURCE = "https://truyenqqko.com";
 const SITE_ACCESS_URL = "https://api.mangahub.art/api/site-access";
 
-async function checkSiteAccess(request) {
+async function checkSiteAccess(request, env) {
   let failure = 'network';
   try {
     const authorization = request.headers.get('Authorization');
-    const response = await fetch(SITE_ACCESS_URL, {
+    const options = {
       headers: { Accept: 'application/json', 'User-Agent': 'MangaHub-Access-Relay/1.0', ...(authorization ? { Authorization: authorization } : {}) },
       redirect: 'manual', signal: AbortSignal.timeout(6000),
-    });
+    };
+    // A same-zone network fetch can bypass another Worker's Route. The binding
+    // retains access checks and lets the router reach the VPS during a Vercel outage.
+    const response = env?.SITE_ACCESS_ROUTER
+      ? await env.SITE_ACCESS_ROUTER.fetch(SITE_ACCESS_URL, options)
+      : await fetch(SITE_ACCESS_URL, options);
     if (response.status === 401 || response.status === 403) {
       return json({ code: 'WHITELIST_REQUIRED', detail: 'Bạn không nằm trong whitelist của website.' }, 403, { 'Cache-Control': 'no-store' });
     }
@@ -140,10 +145,10 @@ function json(payload, status = 200, extraHeaders = {}) {
 }
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method !== 'OPTIONS' && (url.pathname.startsWith(QQ_PREFIX + '/') || url.pathname.startsWith('/api/mangadex-edge/chapter/'))) {
-      const denied = await checkSiteAccess(request);
+      const denied = await checkSiteAccess(request, env);
       if (denied) return denied;
     }
     if (url.pathname.startsWith(QQ_PREFIX + "/")) return qqSource(request, url);

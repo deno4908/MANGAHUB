@@ -21,12 +21,14 @@ map $http_user_agent $mh_preview {
 server {
     listen 80;
     server_name standby.mangahub.art;
+    include /etc/nginx/mangahub-origin-rules/*.conf;
     location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
     location / { return 301 https://standby.mangahub.art$request_uri; }
 }
 server {
     listen 443 ssl;
     server_name standby.mangahub.art;
+    include /etc/nginx/mangahub-origin-rules/*.conf;
     ssl_certificate /etc/letsencrypt/live/standby.mangahub.art/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/standby.mangahub.art/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -53,6 +55,18 @@ server {
     }
     location @retained_assets { root /opt/mangahub; try_files $uri =404; }
     location / { add_header Cache-Control "private, no-store" always; try_files $uri /index.html; }
+    # The private CI readiness check can connect directly with its origin secret
+    # when Cloudflare challenges datacenter clients. No application route is exempt.
+    location ~ ^/internal/standby-(?:drill-)?health$ {
+        allow all;
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $mh_public_host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-MangaHub-Origin-Secret $http_x_mangahub_origin_secret;
+        proxy_buffering off;
+        proxy_read_timeout 20s;
+    }
     location ~ ^/(api/|auth/|health$|internal/standby-) {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;

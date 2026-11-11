@@ -20,6 +20,10 @@ This setup survives a Vercel origin outage. It does not independently recover a 
 
 AWS inbound: TCP 22 from the administrator's IP; TCP 80 and 443 for web/ACME. Never expose 6379, 8000 or 5000. Create a DNS-only `standby.mangahub.art` A record for the server and obtain a valid HTTPS certificate. Run `setup-web.sh` after the first release exists; it obtains HTTPS and configures automatic renewal plus Nginx reload.
 
+After HTTPS provisioning, proxy the standby DNS record through Cloudflare and include its hostname alongside API/auth in the Configuration Rule that disables Under Attack for service traffic. Run `protect-origin.sh` to allow only Cloudflare and loopback web ingress. It checks the published Cloudflare network list and proxied DNS before reloading Nginx; SSH rules are untouched. Public responses do not contain `X-MangaHub-Origin`. Previously published IP addresses may remain in historical DNS records, so DNS proxying is not a promise to erase past disclosure.
+
+Private readiness paths still require the origin secret and can be reached directly by CI if Cloudflare challenges its datacenter IP. This exception does not include application routes or routing control. Store the address only in the encrypted `STANDBY_ORIGIN_ADDRESS` Actions secret, never in frontend assets or repository configuration; HTTPS must still verify `standby.mangahub.art`.
+
 Keep private environment settings in `/etc/mangahub/backend.env` (root:mangahub, 0640). See `backend.env.example`. Copy ALL current production settings and override only the VPS-local paths, bind settings and content Redis URL. Do not import old cached env as proof that current production secrets match. Preserve reCAPTCHA/SMTP/OpenRouter and all enabled integrations.
 
 Build the frontend in CI with the production public env. For the initial deployment, the exact currently deployed production HTML and its 94 public asset files were mirrored, retaining production API/auth URLs and the public reCAPTCHA site key. Local developer builds point at localhost and are unsuitable. Future releases must install matching frontend and backend revisions before declaring readiness.
@@ -31,6 +35,8 @@ Use `nginx.conf.template`, replacing only `ORIGIN_SECRET_PLACEHOLDER` with the g
 ## Worker behavior
 
 The healthy request path streams directly to Vercel. A bounded background routing-state read does not delay that response. Cron probes each original Vercel hostname every minute, checks the VPS including Redis reads/writes, and records private routing state on the VPS disk, outside the evictable content cache. Three successful probes are required before returning a failed origin to primary. During an active client drill, the same monitor runs using the private drill-readiness gate so its real Cloudflare origin checks and recovery can be verified before global activation. Its recorded state cannot divert other readers while `FAILOVER_ENABLED=false`.
+
+The source relay uses a service binding to the router for site-access checks. This avoids same-zone network fetches bypassing the router and depending on Vercel during an outage. It preserves the caller's authorization and never forwards it to QQ. The optional `standby-source.yml` workflow deploys an isolated relay without primary placement settings for testing the Sydney backend's source egress; deploy it and verify authorized content before changing the standby's `TRUYENQQ_EDGE_URL`. Deploying a relay is not evidence that QQ accepts its network egress.
 
 GET/HEAD can retry a failed origin on the other host. POST/PUT/PATCH/DELETE are NEVER replayed after any error because they may already have committed. Once the health monitor selects the standby, new writes start there. An in-flight write at the beginning of an outage can still fail and require the client's normal retry. HTTP 401/403/404/429 are preserved. Country restrictions on the frontend keep the existing denial page; API/auth keep the application access checks.
 

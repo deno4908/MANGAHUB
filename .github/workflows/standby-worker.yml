@@ -24,6 +24,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       STANDBY_ORIGIN_SECRET: ${{ secrets.STANDBY_ORIGIN_SECRET }}
+      STANDBY_ORIGIN_ADDRESS: ${{ secrets.STANDBY_ORIGIN_ADDRESS }}
       ACTIVATE: ${{ inputs.activate }}
       DRILL_CLIENT_IP: ${{ inputs.drill_client_ip }}
       INSPECT_ONLY: ${{ inputs.inspect_only }}
@@ -67,7 +68,7 @@ jobs:
         if: '!inputs.inspect_only && (inputs.activate || inputs.drill_client_ip != '''')'
         run: |
           python3 - <<'PY'
-          import ipaddress, json, os, urllib.request
+          import http.client, ipaddress, json, os, socket, ssl, urllib.request, urllib.error
           drill_ip = os.environ.get('DRILL_CLIENT_IP', '').strip()
           if drill_ip:
               assert ipaddress.ip_address(drill_ip).is_global, 'Drill requires a public IP'
@@ -76,8 +77,29 @@ jobs:
           request = urllib.request.Request('https://standby.mangahub.art/internal/' + path, headers={
               'X-MangaHub-Origin-Secret': os.environ['STANDBY_ORIGIN_SECRET'],
               'X-MangaHub-Public-Host': 'api.mangahub.art'})
-          with urllib.request.urlopen(request, timeout=15) as response:
-              assert response.status == 200 and json.load(response)['status'] == 'ready'
+          try:
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  assert response.status == 200 and json.load(response)['status'] == 'ready'
+          except urllib.error.HTTPError as error:
+              # Keep private readiness available when the zone challenges CI's IP.
+              # The address is an encrypted Actions secret; TLS still verifies the
+              # public hostname and Nginx requires the separate origin secret.
+              if error.code != 403 or error.headers.get('CF-Mitigated') != 'challenge' or not os.environ.get('STANDBY_ORIGIN_ADDRESS'):
+                  raise
+              address = str(ipaddress.ip_address(os.environ['STANDBY_ORIGIN_ADDRESS']))
+              class OriginConnection(http.client.HTTPSConnection):
+                  def connect(self):
+                      connection = socket.create_connection((address, 443), timeout=15)
+                      self.sock = ssl.create_default_context().wrap_socket(connection, server_hostname='standby.mangahub.art')
+              connection = OriginConnection('standby.mangahub.art', timeout=15)
+              try:
+                  connection.request('GET', '/internal/' + path, headers={
+                      'X-MangaHub-Origin-Secret': os.environ['STANDBY_ORIGIN_SECRET'],
+                      'X-MangaHub-Public-Host': 'api.mangahub.art'})
+                  response = connection.getresponse()
+                  assert response.status == 200 and json.load(response)['status'] == 'ready'
+              finally:
+                  connection.close()
           PY
       - name: Configure routes
         if: '!inputs.inspect_only'
