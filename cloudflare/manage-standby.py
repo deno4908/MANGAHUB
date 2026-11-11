@@ -23,6 +23,13 @@ def main(operation):
     zone = api('zones?name=mangahub.art')[0]['id']
     route_path = f'zones/{zone}/workers/routes'
     previous = api(route_path)
+    if operation=='probe':
+        pattern='standby.mangahub.art/internal/router-probe*'
+        row=next((r for r in previous if r['pattern']==pattern),None)
+        assert not row or row.get('script') in {None,ROUTER}
+        api(route_path+('/'+row['id'] if row else ''),{'pattern':pattern,'script':ROUTER},'PUT' if row else 'POST')
+        print('Installed credential-protected operator probe only')
+        return
     dns = {}
     for host in ('mangahub.art','api.mangahub.art','auth.mangahub.art','standby.mangahub.art'):
         path = '/health' if host=='api.mangahub.art' else '/auth/health' if host=='auth.mangahub.art' else '/'

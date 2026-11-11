@@ -48,14 +48,15 @@ jobs:
           PY
           npx --yes wrangler@4 secret bulk /tmp/mh-standby-secret.json --config cloudflare/standby-runtime.toml
           npx --yes wrangler@4 deploy --config cloudflare/standby-runtime.toml
+          python3 cloudflare/manage-standby.py probe
       - name: Check actual standby dependencies and both origins
         if: inputs.operation == 'prepare' || inputs.operation == 'activate'
         run: |
           python3 - <<'PY'
           import os,json,urllib.request
-          base='https://mangahub-standby-router.vinhytb3010.workers.dev/internal/router-probe'
+          base='https://standby.mangahub.art/internal/router-probe'
           for query in ['kind=readiness','kind=frontend&target=primary','kind=frontend&target=backup','kind=api&target=primary','kind=api&target=backup','kind=auth&target=primary','kind=auth&target=backup']:
-              request=urllib.request.Request(base+'?'+query,headers={'X-MangaHub-Probe-Secret':os.environ['STANDBY_ORIGIN_SECRET']})
+              request=urllib.request.Request(base+'?'+query,headers={'X-MangaHub-Probe-Secret':os.environ['STANDBY_ORIGIN_SECRET'],'User-Agent':'MangaHub-Standby-Operator/1.0'})
               with urllib.request.urlopen(request,timeout=20) as response:result=json.load(response)
               print(json.dumps({'probe':query,'result':result}))
               assert result.get('ok') if query=='kind=readiness' else result.get('status')==200
