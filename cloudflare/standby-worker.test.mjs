@@ -236,3 +236,23 @@ test('public standby never receives origin credentials for '+path,async()=>{
   const f=setup();const r=await f.worker.fetch(request('standby.mangahub.art',path),env,f.ctx);
   assert.equal(r.status,404);assert.equal(f.calls.length,0);
 });
+
+for(const provider of ['google','discord'])test(provider+' login from standby returns to its exact callback, preserving PKCE and cookies',async()=>{
+  const f=setup({handle:()=>Response.json({url:'https://project.supabase.co/auth/v1/authorize?provider='+provider+'&redirect_to=https%3A%2F%2Fmangahub.art%2Fauth%2Fcallback&code_challenge=fixture-challenge&code_challenge_method=s256'},
+    {headers:{'Set-Cookie':'mh_oauth_code_verifier=fixture; Secure; HttpOnly; Path=/auth'}})});
+  const r=await f.worker.fetch(request('auth.mangahub.art','/auth/'+provider,{method:'POST',body:'{}',headers:{Origin:'https://standby.mangahub.art','X-MangaHub-CSRF':'1'}}),env,f.ctx);
+  const link=new URL((await r.json()).url);
+  assert.equal(link.origin,'https://project.supabase.co');
+  assert.equal(link.searchParams.get('redirect_to'),'https://standby.mangahub.art/auth/callback');
+  assert.equal(link.searchParams.get('code_challenge'),'fixture-challenge');
+  assert.equal(link.searchParams.get('code_challenge_method'),'s256');
+  assert.match(r.headers.get('Set-Cookie'),/mh_oauth_code_verifier=fixture; Secure; HttpOnly; Path=\/auth/);
+  assert.equal(r.headers.get('Access-Control-Allow-Origin'),null);assert.equal(f.calls.length,1);
+});
+
+test('a primary callback stays on its starting frontend even when standby is preferred',async()=>{
+  const f=setup();
+  const pinned={...env,STANDBY_TEST_IP:'192.0.2.10',STANDBY_TEST_UNTIL:'61000'};
+  const r=await f.worker.fetch(request('mangahub.art','/auth/callback?code=fixture',{headers:{accept:'text/html','CF-Connecting-IP':'192.0.2.10'}}),pinned,f.ctx);
+  assert.equal(r.status,200);assert.equal(r.headers.get('Location'),null);
+});

@@ -124,8 +124,30 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeout);
     const signal = AbortSignal.any([controller.signal, request.signal]);
     try {
-      return await send(new Request(url, { method: request.method, headers,
+      const response = await send(new Request(url, { method: request.method, headers,
         body: SAFE(request.method) ? undefined : request.body, redirect: 'manual', signal, duplex: 'half' }));
+      // Supabase's authorize URL carries an explicit, allowlisted redirect_to.
+      // Change only that fixed callback for a login begun on our standby UI;
+      // PKCE, provider URL, protected verifier cookie and errors stay intact.
+      if (source.hostname===AUTH && request.method==='POST' && ['/auth/google','/auth/discord'].includes(source.pathname) &&
+          request.headers.get('Origin')==='https://'+STANDBY && response.ok &&
+          response.headers.get('Content-Type')?.includes('application/json')) {
+        const value=await response.clone().json().catch(()=>null);
+        if (typeof value?.url==='string') {
+          let authorize;
+          try { authorize=new URL(value.url); } catch { /* Preserve invalid provider responses. */ }
+          if (authorize?.protocol==='https:' && authorize.pathname==='/auth/v1/authorize' &&
+              authorize.searchParams.get('redirect_to')==='https://'+FRONT+'/auth/callback') {
+            authorize.searchParams.set('redirect_to','https://'+STANDBY+'/auth/callback');
+            const resultHeaders=new Headers(response.headers);
+            for (const h of ['Content-Length','Content-Encoding','ETag']) resultHeaders.delete(h);
+            resultHeaders.set('Cache-Control','private, no-store');
+            await response.body?.cancel();
+            return new Response(JSON.stringify({...value,url:authorize.href}),{status:response.status,headers:resultHeaders});
+          }
+        }
+      }
+      return response;
     } finally { clearTimeout(timer); }
   }
   function publicResponse(response, request, b) {
@@ -216,7 +238,7 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
       }
       const frontend = [FRONT, STANDBY].includes(host);
       const navigation = frontend && SAFE(request.method) && request.headers.get('accept')?.includes('text/html') &&
-        !incoming.pathname.startsWith('/assets/') && !incoming.pathname.startsWith('/api/');
+        !incoming.pathname.startsWith('/assets/') && !incoming.pathname.startsWith('/api/') && incoming.pathname!=='/auth/callback';
       let target = host === STANDBY ? (s.backup.ok === false && s.primary[FRONT]?.ok ? 'primary' : 'backup') : choose(s,host,b,env);
       if ([API, AUTH].includes(host) && request.headers.get('Origin') === 'https://' + STANDBY &&
           s.backup.ok && (s.backup.capacity || s.primary[host]?.ok === false)) target='backup';
