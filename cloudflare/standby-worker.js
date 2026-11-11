@@ -190,6 +190,12 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
         } catch { return Response.json({status:503}, {headers:{'Cache-Control':'no-store'}}); }
       }
       if (!HOSTS.includes(host)) return new Response('Not found', { status: 404 });
+      // Origin credentials authenticate our network hop, not the reader.
+      // Never add them to a public request for an internal server endpoint.
+      let decodedPath;
+      try { decodedPath=decodeURIComponent(incoming.pathname).replace(/\/+/g,'/'); }
+      catch { return new Response('Invalid path',{status:400}); }
+      if (decodedPath==='/internal' || decodedPath.startsWith('/internal/')) return new Response('Not found',{status:404,headers:{'Cache-Control':'no-store'}});
       if (incoming.port) {
         incoming.port='';
         return new Response(null,{status:308,headers:{Location:incoming.href,'Cache-Control':'no-store'}});

@@ -230,3 +230,9 @@ test('image routing still falls back when Vercel fails',async()=>{
   const r=await f.worker.fetch(request('api.mangahub.art','/api/images/img?url=fixture'),env,f.ctx);
   assert.equal(r.status,200);assert.equal(f.calls.length,2);await f.done();
 });
+
+for(const path of ['/internal/origin-status','/internal%2Forigin-status','/%69nternal/origin-status','//internal/origin-status'])
+test('public standby never receives origin credentials for '+path,async()=>{
+  const f=setup();const r=await f.worker.fetch(request('standby.mangahub.art',path),env,f.ctx);
+  assert.equal(r.status,404);assert.equal(f.calls.length,0);
+});
