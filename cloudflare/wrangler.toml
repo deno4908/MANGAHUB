@@ -3,15 +3,15 @@ main = "mangadex-edge-worker.js"
 compatibility_date = "2026-06-10"
 workers_dev = true
 
+routes = [
+  { pattern = "mangahub.art/api/mangadex-edge/*", zone_name = "mangahub.art" }
+]
+
 # Same-zone fetches bypass Worker routes. Use the service binding so source
 # access checks also survive a primary API outage without relaxing the policy.
 [[services]]
 binding = "ACCESS_ROUTER"
 service = "mangahub-standby-router"
-
-routes = [
-  { pattern = "mangahub.art/api/mangadex-edge/*", zone_name = "mangahub.art" }
-]
 
 # Keep browser and backend fetches on the same local source cache.
 [placement]
