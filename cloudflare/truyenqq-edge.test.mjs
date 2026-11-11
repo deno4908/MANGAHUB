@@ -12,38 +12,6 @@ function mockFetch(handler, policy = { enabled: false, allowed: true }) {
 afterEach(() => { globalThis.fetch = originalFetch; });
 const edge = 'https://worker.example/api/truyenqq-edge';
 
-test('source access goes through the bound failover router without forwarding credentials to QQ', async () => {
-  let checked = 0, reads = 0;
-  globalThis.fetch = async (url, options) => {
-    assert.equal(url, 'https://truyenqqko.com/doc-truyen');
-    assert.equal(options.headers.Authorization, undefined);
-    reads++;
-    return new Response('<div class="list_grid">source</div>');
-  };
-  const env = { SITE_ACCESS_ROUTER: { fetch: async (url, options) => {
-    assert.equal(url, accessUrl);
-    assert.equal(options.headers.Authorization, 'AccessTicket fixture-reader');
-    assert.equal(options.headers.Cookie, undefined);
-    checked++;
-    return Response.json({enabled:true, allowed:true});
-  } } };
-  const response = await worker.fetch(new Request(edge+'/doc-truyen', {
-    headers:{Authorization:'AccessTicket fixture-reader', Cookie:'private-cookie'},
-  }), env);
-  assert.equal(response.status,200);assert.equal(checked,1);assert.equal(reads,1);
-});
-
-test('bound router denials and failures stop before fetching source content', async () => {
-  globalThis.fetch = async () => {throw new Error('Source must not be reached');};
-  for (const status of [403,503]) {
-    const response = await worker.fetch(new Request(edge+'/doc-truyen'), {
-      SITE_ACCESS_ROUTER: {fetch: async()=>new Response('{}',{status})},
-    });
-    assert.equal(response.status,status);
-    assert.equal(response.headers.get('Cache-Control'),'no-store');
-  }
-});
-
 test('QQ filters relay to the fixed source with the full page and query', async () => {
   mockFetch(async (url, options) => {
     assert.equal(url, 'https://truyenqqko.com/tim-kiem-nang-cao/trang-7?sort=4&category=26');

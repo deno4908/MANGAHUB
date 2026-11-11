@@ -129,17 +129,12 @@ def _log_source_error(method, error):
     except RuntimeError:
         request = None
     response = getattr(error, "response", None)
-    diagnostics = _source_error_headers(error)
-    from site_access import source_authorization
-    authorization = source_authorization.get() or ""
-    auth_kind = next((kind for kind in ("Bearer", "AccessTicket") if authorization.startswith(kind + " ")), "none")
     # Exclude query strings, request bodies, headers, and response content.
     logger.warning(
-        "TruyenQQ source failed operation=%s error=%s host=%s path=%s status=%s reason=%s transport=%s block=%s auth_kind=%s",
+        "TruyenQQ source failed operation=%s error=%s host=%s path=%s status=%s reason=%s",
         method, type(error).__name__, request.url.host if request else "-",
         request.url.path if request else "-", response.status_code if response is not None else "-",
         re.sub(r"https?://[^\s;]+", "[source URL]", str(error))[:160] if isinstance(error, ValueError) else "-",
-        diagnostics.get("X-TruyenQQ-Transport", "-"), diagnostics.get("X-TruyenQQ-Block", "-"), auth_kind,
     )
 
 
