@@ -6,6 +6,10 @@ on:
         description: "Attach the three public routes after the standby drill passes"
         type: boolean
         default: false
+      drill_client_ip:
+        description: "Optional public client IP for a one-hour VPS drill; other readers stay on Vercel"
+        type: string
+        default: ""
 permissions:
   contents: read
 jobs:
@@ -17,6 +21,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       STANDBY_ORIGIN_SECRET: ${{ secrets.STANDBY_ORIGIN_SECRET }}
       ACTIVATE: ${{ inputs.activate }}
+      DRILL_CLIENT_IP: ${{ inputs.drill_client_ip }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,12 +31,32 @@ jobs:
           node-version: '22'
       - name: Verify routing behavior
         run: node --test cloudflare/standby-worker.test.mjs
-      - name: Check standby readiness before activation
-        if: inputs.activate
+      - name: Inspect existing route ownership
         run: |
           python3 - <<'PY'
           import json, os, urllib.request
-          request = urllib.request.Request('https://standby.mangahub.art/internal/standby-health', headers={
+          def get(path):
+              request = urllib.request.Request('https://api.cloudflare.com/client/v4/' + path,
+                  headers={'Authorization': 'Bearer ' + os.environ['CLOUDFLARE_API_TOKEN']})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  value = json.load(response)
+              assert value['success']
+              return value['result']
+          zone = get('zones?name=mangahub.art')[0]['id']
+          print(json.dumps([{'pattern': route['pattern'], 'script': route.get('script')}
+              for route in get('zones/' + zone + '/workers/routes')]))
+          PY
+      - name: Check standby readiness before activation
+        if: inputs.activate || inputs.drill_client_ip != ''
+        run: |
+          python3 - <<'PY'
+          import ipaddress, json, os, urllib.request
+          drill_ip = os.environ.get('DRILL_CLIENT_IP', '').strip()
+          if drill_ip:
+              assert ipaddress.ip_address(drill_ip).is_global, 'Drill requires a public IP'
+              assert os.environ['ACTIVATE'] != 'true', 'Use a drill before full activation'
+          path = 'standby-drill-health' if drill_ip else 'standby-health'
+          request = urllib.request.Request('https://standby.mangahub.art/internal/' + path, headers={
               'X-MangaHub-Origin-Secret': os.environ['STANDBY_ORIGIN_SECRET'],
               'X-MangaHub-Public-Host': 'api.mangahub.art'})
           with urllib.request.urlopen(request, timeout=15) as response:
@@ -40,13 +65,22 @@ jobs:
       - name: Configure routes
         run: |
           python3 - <<'PY'
-          import os
+          import json, os, time
           from pathlib import Path
           p = Path('cloudflare/wrangler-standby.toml')
           text = p.read_text()
+          # Pausing failover retains the frontend country policy and passes through
+          # to Vercel. Only the separate source Worker keeps more-specific routes.
+          routes = 'routes = [' + ','.join('{ pattern = "' + host + '/*", zone_name = "mangahub.art" }' for host in ['mangahub.art', 'api.mangahub.art', 'auth.mangahub.art']) + ']'
+          text = text.replace('routes = []', routes, 1)
           if os.environ['ACTIVATE'] == 'true':
-              routes = 'routes = [' + ','.join('{ pattern = "' + host + '/*", zone_name = "mangahub.art" }' for host in ['mangahub.art', 'api.mangahub.art', 'auth.mangahub.art']) + ']'
-              text = text.replace('routes = []', routes, 1).replace('FAILOVER_ENABLED = \"false\"', 'FAILOVER_ENABLED = \"true\"')
+              text = text.replace('FAILOVER_ENABLED = \"false\"', 'FAILOVER_ENABLED = \"true\"')
+          drill_ip = os.environ.get('DRILL_CLIENT_IP', '').strip()
+          if drill_ip:
+              text = text.replace('DRILL_CLIENT_IP = ""', 'DRILL_CLIENT_IP = ' + json.dumps(drill_ip))
+              deadline = str(int(time.time()) + 3600)
+              text = text.replace('DRILL_EXPIRES_AT = "0"', 'DRILL_EXPIRES_AT = ' + json.dumps(deadline))
+              print('Single-client drill expires at Unix time ' + deadline)
           p.write_text(text)
           PY
       - name: Deploy router with its private origin secret

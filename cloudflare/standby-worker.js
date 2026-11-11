@@ -3,6 +3,11 @@ const HOSTS = ["mangahub.art", "api.mangahub.art", "auth.mangahub.art"];
 const safe = method => method === "GET" || method === "HEAD";
 const failed = status => [500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526].includes(status);
 const validModes = modes => modes && HOSTS.every(host => ["primary", "backup"].includes(modes[host]));
+function isDrill(request, env) {
+  const until = Number(env.DRILL_EXPIRES_AT) * 1000, now = Date.now();
+  return Boolean(env.DRILL_CLIENT_IP && request.headers.get("CF-Connecting-IP") === env.DRILL_CLIENT_IP
+    && Number.isFinite(until) && until > now && until <= now + 3_600_000);
+}
 export function createStandbyWorker(send = fetch) {
   let modes = {}, expires = 0, refresh;
   function origin(env) {
@@ -48,7 +53,11 @@ export function createStandbyWorker(send = fetch) {
       const host = new URL(request.url).hostname;
       if (!HOSTS.includes(host)) return new Response("Not found", { status: 404 });
       if (host === HOSTS[0]) { const denied = denyOutsideVietnam(request); if (denied) return denied; }
-      if (env.FAILOVER_ENABLED !== "true" || !env.STANDBY_ORIGIN_SECRET || !env.BACKUP_ORIGIN) return send(request);
+      const drill = isDrill(request, env);
+      if ((!drill && env.FAILOVER_ENABLED !== "true") || !env.STANDBY_ORIGIN_SECRET || !env.BACKUP_ORIGIN) return send(request);
+      // A timed single-client drill exercises the full VPS without masking failures
+      // with a Vercel retry, touching other readers, or changing shared routing state.
+      if (drill) return stamp(await proxy(request, env, true), true);
       // A background state read never delays the healthy Vercel path.
       if (Date.now() >= expires && !refresh) { refresh = refreshModes(env); ctx.waitUntil(refresh); }
       let backup = modes[host] === "backup";

@@ -3,7 +3,7 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 [[ $(id -u) == 0 ]] || { echo 'Run as root'; exit 1; }
 apt-get update -qq
-apt-get install -y -qq nginx redis-server openssl ca-certificates curl libgomp1 > /var/log/mangahub-bootstrap.log 2>&1
+apt-get install -y -qq nginx redis-server openssl ca-certificates curl libgomp1 fonts-dejavu-core > /var/log/mangahub-bootstrap.log 2>&1
 # This installer is for an empty standby machine, not an existing production host.
 systemctl stop nginx
 if ! id mangahub >/dev/null 2>&1; then

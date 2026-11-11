@@ -6,7 +6,7 @@ This runs the full combined FastAPI + Flask application and the same production 
 
 The initial Sydney machine has native Nginx, a single Python 3.12/Uvicorn process, a local TLS Redis content cache and 1 GiB swap. No Docker daemon or on-VPS frontend build is needed. Redis binds only loopback and has a 96 MiB disposable content limit; the systemd service has memory limits. These are starting budgets for a 1 GiB machine, not a guarantee of Vercel-equivalent traffic capacity.
 
-The checked-in Worker configuration has **no public routes and `FAILOVER_ENABLED=false`**. The VPS private readiness endpoint also rejects activation until `STANDBY_READY=true`. Leaving these disabled while completing env is deliberate. A running health endpoint alone does not prove full login and feature parity.
+The checked-in Worker configuration has **no public routes and `FAILOVER_ENABLED=false`**. The VPS private readiness endpoint also rejects activation until `STANDBY_READY=true`. A running health endpoint alone does not prove full login and feature parity. The deployment workflow attaches the router in Vercel pass-through mode while activation is false; the frontend country restriction remains enforced.
 
 ## State that must remain shared
 
@@ -40,11 +40,11 @@ Cloudflare Workers Free has a daily request quota shared with the account's othe
 
 1. Compare current production environment settings and frontend build values. Complete missing reCAPTCHA and integration configuration.
 2. Verify TLS/private-origin rejection, both Redis stores, full SPA chunks and no localhost URLs in active configuration.
-3. Sign in as a normal approved reader; check MangaDex and QQ lists, filters, chapter images, progress, Follow, History and Bookmark. Check uploads/editor/admin and configured email/AI integrations with appropriate accounts. Never relax whitelist, role, CSRF or rate-limit checks for this drill.
+3. Use the workflow's optional `drill_client_ip` input with `activate=false` to test the live VPS from one public client IP for one hour. Its private `/internal/standby-drill-health` gate requires reCAPTCHA configuration and both Redis stores, without declaring global activation ready. The client uses the real public hostnames, login cookies and complete application; other clients stay on Vercel. The drill never hides a VPS error with a Vercel retry, and never retries writes. It expires automatically, does not update shared failover state, and can be cleared early by dispatching with an empty drill IP. Sign in as a normal approved reader; check MangaDex and QQ lists, filters, chapter images, progress, Follow, History and Bookmark. Check uploads/editor/admin and configured email/AI integrations with appropriate accounts. Never relax whitelist, role, CSRF or rate-limit checks for this drill.
 4. Run unit checks: `node --test cloudflare/standby-worker.test.mjs`; from `backend`, `python -m pytest tests/test_standby_app.py tests/test_vercel_runtime.py tests/test_redis_failover.py -q`.
 5. Run a controlled failure drill against the private origin before switching public traffic. Confirm no write replay and recovery behavior.
 6. Set `STANDBY_READY=true` ONLY after these checks. Restart `mangahub` and verify private readiness is 200.
-7. Dispatch `standby-worker.yml` with `activate=false` first. It deploys a detached router and its encrypted origin secret using the existing Cloudflare Actions credentials. Then dispatch `activate=true`; its readiness gate must pass before routes are attached. The standalone `vn-only-worker.js` source file is not modified by this setup.
+7. Dispatch `standby-worker.yml` with `activate=true`; its full readiness gate must pass before automatic failover is enabled. The workflow uses the existing Cloudflare Actions credentials and encrypted origin secret. All three public routes are attached; the more specific source Worker route remains untouched. The standalone `vn-only-worker.js` source file is not modified by this setup.
 
 ## Operations
 
@@ -52,7 +52,7 @@ Cloudflare Workers Free has a daily request quota shared with the account's othe
 - Resource use: `free -m`; `sudo systemctl show mangahub -p MemoryCurrent -p NRestarts`.
 - Logs: `sudo journalctl -u mangahub --since '10 minutes ago'` (redact before sharing).
 - Readiness/control are private and require `X-MangaHub-Origin-Secret` and an allowed `X-MangaHub-Public-Host` at Nginx.
-- Pause failover by deploying the router with activation false. This leaves Vercel as origin and does not stop the VPS.
+- Pause failover by deploying the router with activation false and an empty drill IP. This keeps the frontend country restriction, leaves Vercel as origin and does not stop the VPS.
 - Keep frontend/backend updates synchronized; do not use stale secrets or an old SPA as a permanent backup.
 
 Do not mark failover operational until the activation checks and a real failure drill have passed. Full functionality is the completion condition; installing services alone is preparation.

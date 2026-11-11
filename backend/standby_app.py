@@ -59,9 +59,11 @@ def advance_state(health):
         return state
 
 
-def ready():
-    if os.getenv("STANDBY_READY", "false").lower() != "true":
+def ready(*, drill=False):
+    if not drill and os.getenv("STANDBY_READY", "false").lower() != "true":
         raise RuntimeError("Standby activation checklist is incomplete")
+    if drill and not (config.RECAPTCHA_SECRET_KEY and config.RECAPTCHA_REQUIRED):
+        raise RuntimeError("Standby reCAPTCHA configuration is incomplete")
     # Verify reads AND writes, not just a PING that can succeed after quota exhaustion.
     from uuid import uuid4
     for client in (security_client(), client_for(config.REDIS_URL)):
@@ -74,18 +76,18 @@ def ready():
 
 @app.middleware("http")
 async def standby_control(request: Request, call_next):
-    if request.url.path not in {"/internal/standby-health", "/internal/standby-control"}:
+    if request.url.path not in {"/internal/standby-health", "/internal/standby-drill-health", "/internal/standby-control"}:
         return await call_next(request)
     secret = os.getenv("STANDBY_ORIGIN_SECRET", "")
     supplied = request.headers.get("x-mangahub-origin-secret", "")
     if not secret or not hmac.compare_digest(secret.encode(), supplied.encode()):
         return JSONResponse({"detail": "Not found"}, status_code=404)
     headers = {"Cache-Control": "private, no-store"}
-    if request.url.path.endswith("standby-health"):
+    if request.url.path.endswith("health"):
         if request.method not in {"GET", "HEAD"}:
             return JSONResponse({"detail": "Method not allowed"}, status_code=405, headers=headers)
         try:
-            await asyncio.to_thread(ready)
+            await asyncio.to_thread(ready, drill=request.url.path.endswith("standby-drill-health"))
             return JSONResponse({"status": "ready"}, headers=headers)
         except Exception:
             return JSONResponse({"status": "unavailable"}, status_code=503, headers=headers)

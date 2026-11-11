@@ -74,3 +74,33 @@ test('keeps routing unchanged until activation is explicitly enabled',async()=>{
  assert.equal(calls.length,1);
  await worker.scheduled({},{...env,FAILOVER_ENABLED:'false'},ctx);assert.equal(calls.length,1);
 });
+
+test('timed client drill routes only the selected client to VPS while activation stays off',async()=>{
+ const {worker,calls,ctx}=fixture(async r=>new Response(new URL(r.url).hostname));
+ const drillEnv={...env,FAILOVER_ENABLED:'false',DRILL_CLIENT_IP:'203.0.113.9',DRILL_EXPIRES_AT:String(Date.now()/1000+600)};
+ const target=request(undefined,{headers:{'CF-Connecting-IP':'203.0.113.9'}});
+ const response=await worker.fetch(target,drillEnv,ctx);
+ assert.equal(await response.text(),'standby.mangahub.art');assert.equal(response.headers.get('x-mangahub-origin'),'vps');
+ assert.equal(calls.length,1);
+ const other=await worker.fetch(request(undefined,{headers:{'CF-Connecting-IP':'203.0.113.10'}}),drillEnv,ctx);
+ assert.equal(await other.text(),'api.mangahub.art');assert.equal(calls.length,2);
+ await worker.scheduled({},drillEnv,ctx);assert.equal(calls.length,2);
+});
+
+test('expired or overlong client drills cannot divert traffic',async()=>{
+ for(const deadline of ['0','invalid',String(Date.now()/1000-10),String(Date.now()/1000+7200)]){
+  const {worker,calls,ctx}=fixture(async r=>new Response(new URL(r.url).hostname));
+  const result=await worker.fetch(request(undefined,{headers:{'CF-Connecting-IP':'203.0.113.9'}}),{...env,FAILOVER_ENABLED:'false',DRILL_CLIENT_IP:'203.0.113.9',DRILL_EXPIRES_AT:deadline},ctx);
+  assert.equal(await result.text(),'api.mangahub.art');assert.equal(calls.length,1);
+ }
+});
+
+test('client drill preserves standby failures without replaying writes or hiding errors',async()=>{
+ const {worker,calls,ctx}=fixture(async()=>new Response('standby failure',{status:503}));
+ const drillEnv={...env,FAILOVER_ENABLED:'false',DRILL_CLIENT_IP:'203.0.113.9',DRILL_EXPIRES_AT:String(Date.now()/1000+600)};
+ for(const method of ['GET','POST']){
+  calls.length=0;
+  const r=await worker.fetch(request(undefined,{method,headers:{'CF-Connecting-IP':'203.0.113.9'},...(method==='POST'?{body:'drill'}:{})}),drillEnv,ctx);
+  assert.equal(r.status,503);assert.equal(calls.length,1);assert.match(calls[0].url,/standby/);
+ }
+});

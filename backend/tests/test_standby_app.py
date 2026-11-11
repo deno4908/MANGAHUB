@@ -33,7 +33,7 @@ def standby(monkeypatch, tmp_path):
 def test_control_is_private_while_normal_app_requests_keep_working(standby):
     module, client = standby
     assert client.get("/api/plain").json() == {"normal": True}
-    for path in ("/internal/standby-control", "/internal/standby-health"):
+    for path in ("/internal/standby-control", "/internal/standby-health", "/internal/standby-drill-health"):
         assert client.get(path).status_code == 404
         assert client.get(path, headers={"x-mangahub-origin-secret": "wrong"}).status_code == 404
     assert not module.STATE_FILE.exists()
@@ -87,3 +87,22 @@ def test_readiness_checks_both_redis_stores_and_redacts_failure(standby, monkeyp
     monkeypatch.setattr(module, "security_client", broken)
     response = client.get("/internal/standby-health", headers=headers)
     assert response.status_code == 503 and "private" not in response.text
+
+
+def test_private_drill_can_verify_config_and_stores_without_enabling_global_failover(standby, monkeypatch):
+    module, client = standby
+    monkeypatch.setenv("STANDBY_READY", "false")
+    monkeypatch.setattr(config, "RECAPTCHA_SECRET_KEY", "test-only")
+    monkeypatch.setattr(config, "RECAPTCHA_REQUIRED", True)
+    writes = []
+    values = {}
+    store = SimpleNamespace(set=lambda key, value, **kw: (writes.append(key), values.update({key: value})),
+                            get=lambda key: values.get(key), delete=lambda key: values.pop(key))
+    monkeypatch.setattr(module, "security_client", lambda: store)
+    monkeypatch.setattr(module, "client_for", lambda url: store)
+    headers = {"x-mangahub-origin-secret": "test-origin-secret"}
+    assert client.get("/internal/standby-drill-health", headers=headers).json() == {"status": "ready"}
+    assert len(writes) == 2 and not values
+    assert client.get("/internal/standby-health", headers=headers).status_code == 503
+    monkeypatch.setattr(config, "RECAPTCHA_SECRET_KEY", "")
+    assert client.get("/internal/standby-drill-health", headers=headers).status_code == 503

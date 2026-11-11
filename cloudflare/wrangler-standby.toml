@@ -13,6 +13,8 @@ routes = []
 [vars]
 FAILOVER_ENABLED = "false"
 BACKUP_ORIGIN = "https://standby.mangahub.art"
+DRILL_CLIENT_IP = ""
+DRILL_EXPIRES_AT = "0"
 [triggers]
 crons = ["* * * * *"]
 # Supply STANDBY_ORIGIN_SECRET with wrangler secret put, never in this file.
