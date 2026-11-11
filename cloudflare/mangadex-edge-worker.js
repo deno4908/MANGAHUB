@@ -3,11 +3,11 @@ const QQ_PREFIX = "/api/truyenqq-edge";
 const QQ_SOURCE = "https://truyenqqko.com";
 const SITE_ACCESS_URL = "https://api.mangahub.art/api/site-access";
 
-async function checkSiteAccess(request) {
+async function checkSiteAccess(request, env) {
   let failure = 'network';
   try {
     const authorization = request.headers.get('Authorization');
-    const response = await fetch(SITE_ACCESS_URL, {
+    const response = await fetch(env?.SITE_ACCESS_URL || SITE_ACCESS_URL, {
       headers: { Accept: 'application/json', 'User-Agent': 'MangaHub-Access-Relay/1.0', ...(authorization ? { Authorization: authorization } : {}) },
       redirect: 'manual', signal: AbortSignal.timeout(6000),
     });
@@ -140,10 +140,33 @@ function json(payload, status = 200, extraHeaders = {}) {
 }
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname === '/internal/qq-probe') {
+      if (!env?.LAB_PROBE_SECRET || request.headers.get('X-MangaHub-Probe-Secret') !== env.LAB_PROBE_SECRET) {
+        return json({ error: 'Not found' }, 404, { 'Cache-Control': 'no-store' });
+      }
+      if (request.method !== 'GET') return json({ error: 'Method not allowed' }, 405);
+      const mode = url.searchParams.get('mode') || 'origin';
+      if (!['origin', 'cache'].includes(mode)) return json({ error: 'Invalid mode' }, 400);
+      const started = Date.now();
+      try {
+        const path = '/truyen-moi-cap-nhat';
+        const response = mode === 'cache'
+          ? await qqSource(new Request(new URL(QQ_PREFIX + path, url), request), new URL(QQ_PREFIX + path, url))
+          : await fetchQQOrigin(path, '', undefined).then(result => new Response(result.body, { status: result.status, headers: result.headers }));
+        const html = await response.text();
+        // Operator-only metadata. Never return source pages, cookies or tokens.
+        return json({ mode, status: response.status, valid: response.status === 200 && /list_grid/.test(html),
+          cache: response.headers.get('X-TruyenQQ-Cache'), colo: request.cf?.colo || '-',
+          challenge: /cf-chl-|challenge-platform|Just a moment/i.test(html), milliseconds: Date.now() - started,
+        }, 200, { 'Cache-Control': 'no-store' });
+      } catch {
+        return json({ mode, status: 502, valid: false }, 200, { 'Cache-Control': 'no-store' });
+      }
+    }
     if (request.method !== 'OPTIONS' && (url.pathname.startsWith(QQ_PREFIX + '/') || url.pathname.startsWith('/api/mangadex-edge/chapter/'))) {
-      const denied = await checkSiteAccess(request);
+      const denied = await checkSiteAccess(request, env);
       if (denied) return denied;
     }
     if (url.pathname.startsWith(QQ_PREFIX + "/")) return qqSource(request, url);

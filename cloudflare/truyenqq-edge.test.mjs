@@ -12,6 +12,43 @@ function mockFetch(handler, policy = { enabled: false, allowed: true }) {
 afterEach(() => { globalThis.fetch = originalFetch; });
 const edge = 'https://worker.example/api/truyenqq-edge';
 
+test('lab operator probe is private and returns metadata without source pages or secrets', async () => {
+  let calls = 0;
+  globalThis.fetch = async (url, options) => {
+    calls++;
+    assert.equal(url, 'https://truyenqqko.com/truyen-moi-cap-nhat');
+    assert.equal(options.headers['X-MangaHub-Probe-Secret'], undefined);
+    assert.equal(options.headers.Authorization, undefined);
+    return new Response('<div class="list_grid">private-source-fixture</div>', {headers:{'Set-Cookie':'source=fixture'}});
+  };
+  const env = {LAB_PROBE_SECRET:'operator-fixture'};
+  assert.equal((await worker.fetch(new Request('https://worker.example/internal/qq-probe'), env)).status, 404);
+  assert.equal(calls, 0);
+  const result = await worker.fetch(new Request('https://worker.example/internal/qq-probe', {headers:{'X-MangaHub-Probe-Secret':'operator-fixture'}}), env);
+  const value = await result.json();
+  assert.equal(value.status, 200);assert.equal(value.valid, true);assert.equal(calls, 1);
+  assert.doesNotMatch(JSON.stringify(value), /private-source-fixture|operator-fixture|source=fixture/);
+  assert.equal(result.headers.get('Cache-Control'), 'no-store');
+});
+
+test('isolated relay verifies readers against its configured lab API only', async () => {
+  const lab = 'https://standby.mangahub.art:8443/api/site-access';
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push(url);
+    if (url === lab) {
+      assert.equal(options.headers.Authorization, 'Bearer fixture');
+      return Response.json({enabled:true,allowed:true});
+    }
+    assert.equal(url,'https://truyenqqko.com/truyen-moi-cap-nhat');
+    assert.equal(options.headers.Authorization,undefined);
+    return new Response('<div class="list_grid">source</div>');
+  };
+  const result = await worker.fetch(new Request(edge+'/truyen-moi-cap-nhat',{headers:{Authorization:'Bearer fixture'}}),{SITE_ACCESS_URL:lab});
+  assert.equal(result.status,200);
+  assert.deepEqual(calls,[lab,'https://truyenqqko.com/truyen-moi-cap-nhat']);
+});
+
 test('QQ filters relay to the fixed source with the full page and query', async () => {
   mockFetch(async (url, options) => {
     assert.equal(url, 'https://truyenqqko.com/tim-kiem-nang-cao/trang-7?sort=4&category=26');

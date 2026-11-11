@@ -1,0 +1,9 @@
+name = "mangahub-qq-lab"
+main = "mangadex-edge-worker.js"
+compatibility_date = "2026-11-11"
+workers_dev = true
+routes = []
+[vars]
+SITE_ACCESS_URL = "https://standby.mangahub.art:8443/api/site-access"
+[placement]
+region = "aws:ap-southeast-1"

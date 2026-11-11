@@ -1,0 +1,45 @@
+name: Deploy isolated VPS lab source
+on:
+  push:
+    branches: [codex/vps-qq-lab]
+    paths:
+      - cloudflare/**
+      - .github/workflows/vps-lab-source.yml
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      LAB_PROBE_SECRET: ${{ secrets.VPS_LAB_RELAY_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: cloudflare
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify source and isolation
+        run: |
+          node --test cloudflare/truyenqq-edge.test.mjs
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+          cfg=tomllib.loads(Path('cloudflare/wrangler-vps-lab.toml').read_text())
+          assert cfg['name']=='mangahub-qq-lab' and cfg['routes']==[]
+          assert cfg['vars']['SITE_ACCESS_URL']=='https://standby.mangahub.art:8443/api/site-access'
+          PY
+      - name: Deploy only the lab worker
+        run: |
+          test -n "$LAB_PROBE_SECRET"
+          npx --yes wrangler@4 deploy --config cloudflare/wrangler-vps-lab.toml
+          umask 077
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          Path('/tmp/mh-lab-secret.json').write_text(json.dumps({'LAB_PROBE_SECRET':os.environ['LAB_PROBE_SECRET']}))
+          PY
+          npx --yes wrangler@4 secret bulk /tmp/mh-lab-secret.json --config cloudflare/wrangler-vps-lab.toml
