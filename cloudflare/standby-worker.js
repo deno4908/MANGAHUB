@@ -3,10 +3,12 @@ const HOSTS = ["mangahub.art", "api.mangahub.art", "auth.mangahub.art"];
 const safe = method => method === "GET" || method === "HEAD";
 const failed = status => [500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526].includes(status);
 const validModes = modes => modes && HOSTS.every(host => ["primary", "backup"].includes(modes[host]));
-function isDrill(request, env) {
+function drillActive(env) {
   const until = Number(env.DRILL_EXPIRES_AT) * 1000, now = Date.now();
-  return Boolean(env.DRILL_CLIENT_IP && request.headers.get("CF-Connecting-IP") === env.DRILL_CLIENT_IP
-    && Number.isFinite(until) && until > now && until <= now + 3_600_000);
+  return Boolean(env.DRILL_CLIENT_IP && Number.isFinite(until) && until > now && until <= now + 3_600_000);
+}
+function isDrill(request, env) {
+  return drillActive(env) && request.headers.get("CF-Connecting-IP") === env.DRILL_CLIENT_IP;
 }
 export function createStandbyWorker(send = fetch) {
   let modes = {}, expires = 0, refresh;
@@ -73,8 +75,11 @@ export function createStandbyWorker(send = fetch) {
       return stamp(response, backup);
     },
     async scheduled(event, env, ctx) {
-      if (env.FAILOVER_ENABLED !== "true") return;
-      const ready = await control(env, "/internal/standby-health");
+      const enabled = env.FAILOVER_ENABLED === "true";
+      if (!enabled && !drillActive(env)) return;
+      // Exercise the real Cloudflare scheduled origin probes during the timed
+      // drill, while public routing still requires separate full activation.
+      const ready = await control(env, enabled ? "/internal/standby-health" : "/internal/standby-drill-health");
       if (!ready.ok) { await ready.body?.cancel(); return; }
       await ready.body?.cancel();
       const health = Object.fromEntries(await Promise.all(HOSTS.map(async host => {

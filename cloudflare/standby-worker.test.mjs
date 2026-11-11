@@ -84,7 +84,6 @@ test('timed client drill routes only the selected client to VPS while activation
  assert.equal(calls.length,1);
  const other=await worker.fetch(request(undefined,{headers:{'CF-Connecting-IP':'203.0.113.10'}}),drillEnv,ctx);
  assert.equal(await other.text(),'api.mangahub.art');assert.equal(calls.length,2);
- await worker.scheduled({},drillEnv,ctx);assert.equal(calls.length,2);
 });
 
 test('expired or overlong client drills cannot divert traffic',async()=>{
@@ -92,7 +91,26 @@ test('expired or overlong client drills cannot divert traffic',async()=>{
   const {worker,calls,ctx}=fixture(async r=>new Response(new URL(r.url).hostname));
   const result=await worker.fetch(request(undefined,{headers:{'CF-Connecting-IP':'203.0.113.9'}}),{...env,FAILOVER_ENABLED:'false',DRILL_CLIENT_IP:'203.0.113.9',DRILL_EXPIRES_AT:deadline},ctx);
   assert.equal(await result.text(),'api.mangahub.art');assert.equal(calls.length,1);
+  await worker.scheduled({},{...env,FAILOVER_ENABLED:'false',DRILL_CLIENT_IP:'203.0.113.9',DRILL_EXPIRES_AT:deadline},ctx);
+  assert.equal(calls.length,1);
  }
+});
+
+test('timed drill exercises the real monitor without enabling public failover',async()=>{
+ const calls=[],ctx=context();
+ const worker=createStandbyWorker(async(r,init)=>{
+  const url=typeof r==='string'?r:r.url;calls.push({url,init});
+  if(url.endsWith('/internal/standby-drill-health'))return new Response('{"status":"ready"}');
+  if(url.endsWith('/internal/standby-control'))return new Response('{}');
+  return new Response('primary unavailable',{status:503});
+ });
+ const drillEnv={...env,FAILOVER_ENABLED:'false',DRILL_CLIENT_IP:'203.0.113.9',DRILL_EXPIRES_AT:String(Date.now()/1000+600)};
+ await worker.scheduled({},drillEnv,ctx);
+ assert.equal(calls.length,5);
+ assert.deepEqual(JSON.parse(calls[4].init.body),{health:Object.fromEntries(hosts.map(h=>[h,false]))});
+ calls.length=0;
+ const response=await worker.fetch(request(undefined,{headers:{'CF-Connecting-IP':'203.0.113.10'}}),drillEnv,ctx);
+ assert.equal(response.status,503);assert.equal(calls.length,1);assert.match(calls[0].url,/api.mangahub.art/);
 });
 
 test('client drill preserves standby failures without replaying writes or hiding errors',async()=>{
