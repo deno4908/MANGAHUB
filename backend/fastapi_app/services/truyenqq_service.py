@@ -139,9 +139,13 @@ def _log_source_error(method, error):
     response = getattr(error, "response", None)
     # Exclude query strings, request bodies, headers, and response content.
     logger.warning(
-        "TruyenQQ source failed operation=%s error=%s host=%s path=%s status=%s reason=%s",
+        "TruyenQQ source failed operation=%s error=%s host=%s path=%s status=%s auth=%s transport=%s colo=%s block=%s reason=%s",
         method, type(error).__name__, request.url.host if request else "-",
         request.url.path if request else "-", response.status_code if response is not None else "-",
+        bool(source_authorization.get()),
+        _source_error_headers(error).get("X-TruyenQQ-Transport", "-"),
+        _source_error_headers(error).get("X-TruyenQQ-Colo", "-"),
+        _source_error_headers(error).get("X-TruyenQQ-Block", "-"),
         re.sub(r"https?://[^\s;]+", "[source URL]", str(error))[:160] if isinstance(error, ValueError) else "-",
     )
 
