@@ -83,7 +83,10 @@ async def run_live(method: str, *args, **kwargs):
     except httpx.HTTPStatusError as error:
         _log_source_error(method, error)
         status = error.response.status_code
-        raise HTTPException(404 if status == 404 else 503 if status == 429 else 502,
+        # Cloudflare replaces origin 502 responses and strips the source hints
+        # needed by browser recovery. A blocked/rate-limited source is temporarily
+        # unavailable; 503 preserves its safe JSON and bounded recovery headers.
+        raise HTTPException(404 if status == 404 else 503 if status in {403, 429} else 502,
                             "Không tải được dữ liệu từ TruyenQQ.", headers=_source_error_headers(error)) from error
     except (httpx.RequestError, ValueError) as error:
         _log_source_error(method, error)

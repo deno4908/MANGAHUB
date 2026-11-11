@@ -8,8 +8,8 @@ const json = (body: unknown, status = 200, headers = {}) => new Response(JSON.st
   status, headers: { 'Content-Type': 'application/json', ...headers },
 });
 
-it('warms the exact blocked QQ source page, then retries the original backend request', async () => {
-  const blocked = json({ detail: 'Unavailable' }, 502, {
+it.each([502, 503])('warms the exact blocked QQ source page after HTTP %s, then retries the original backend request', async status => {
+  const blocked = json({ detail: 'Unavailable' }, status, {
     'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/tim-kiem-nang-cao/trang-53?sort=4',
   });
   const fetcher = vi.fn().mockResolvedValueOnce(blocked)
