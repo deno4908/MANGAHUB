@@ -12,6 +12,11 @@ map $http_x_mangahub_client_ip $mh_client_ip {
     default $http_x_mangahub_client_ip;
     "" $remote_addr;
 }
+map $http_user_agent $mh_preview {
+    default "";
+    ~*(googlebot|bingbot|duckduckbot|yandexbot|baiduspider|slurp) seo;
+    ~*(facebookexternalhit|facebot|messenger|zalo|twitterbot|telegrambot|discordbot|whatsapp|linkedinbot|pinterest|slackbot|redditbot) share;
+}
 server {
     listen 80;
     server_name standby.mangahub.art;
@@ -30,14 +35,27 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     root /opt/mangahub/standby/dist;
     client_max_body_size 50m;
+    add_header Cache-Control "private, no-store" always;
     if ($mh_origin_allowed = 0) { return 404; }
     if ($mh_public_host = "") { return 404; }
+    location ~ ^/manga/([^/]+)$ {
+        if ($mh_preview = seo) { rewrite ^/manga/(.+)$ /api/manga/seo/$1 last; }
+        if ($mh_preview = share) { rewrite ^/manga/(.+)$ /api/manga/share/$1 last; }
+        add_header Cache-Control "private, no-store" always;
+        try_files $uri /index.html;
+    }
+    location ~ ^/chapter/([^/]+)$ {
+        if ($mh_preview = seo) { rewrite ^/chapter/(.+)$ /api/manga/seo-chapter/$1 last; }
+        if ($mh_preview = share) { rewrite ^/chapter/(.+)$ /api/manga/share-chapter/$1 last; }
+        add_header Cache-Control "private, no-store" always;
+        try_files $uri /index.html;
+    }
     location = /auth/callback {
         add_header Cache-Control "private, no-store" always;
         try_files /index.html =404;
     }
     location /assets/ {
-        add_header Cache-Control "public, max-age=31536000, immutable";
+        add_header Cache-Control "private, max-age=31536000, immutable";
         try_files $uri @retained_assets;
     }
     location @retained_assets { root /opt/mangahub; try_files $uri =404; }

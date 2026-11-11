@@ -1,19 +1,26 @@
-name: Prepare adaptive standby router
+name: Manage adaptive standby router
 on:
-  push:
-    branches: [codex/adaptive-standby]
-    paths: [cloudflare/**, .github/workflows/adaptive-standby.yml]
   workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [inspect, prepare, activate, rollback]
+        default: inspect
+        required: true
 permissions:
   contents: read
+concurrency:
+  group: adaptive-standby-router
+  cancel-in-progress: false
 jobs:
-  prepare:
+  manage:
     runs-on: ubuntu-latest
     environment: production
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       STANDBY_ORIGIN_SECRET: ${{ secrets.STANDBY_ORIGIN_SECRET }}
+      OPERATION: ${{ inputs.operation }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,26 +28,41 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Test routing and source gates
+      - name: Test routing and source access
         run: node --test cloudflare/standby-worker.test.mjs cloudflare/truyenqq-edge.test.mjs
-      - name: Require detached preparation
-        run: |
-          python3 - <<'PY'
-          import tomllib
-          from pathlib import Path
-          cfg=tomllib.loads(Path('cloudflare/wrangler-standby.toml').read_text())
-          assert cfg['name']=='mangahub-standby-router'
-          assert cfg['routes']==[] and cfg['vars']['FAILOVER_ENABLED']=='false'
-          PY
-      - name: Install private origin credential
+      - name: Inspect public routing without disclosing origin addresses
+        run: python3 cloudflare/manage-standby.py inspect
+      - name: Prepare router configuration
+        if: inputs.operation == 'prepare' || inputs.operation == 'activate'
         run: |
           test -n "$STANDBY_ORIGIN_SECRET"
           umask 077
           python3 - <<'PY'
           import json,os
           from pathlib import Path
+          cfg=Path('cloudflare/wrangler-standby.toml').read_text()
+          if os.environ['OPERATION']=='activate':
+              cfg=cfg.replace('FAILOVER_ENABLED = "false"','FAILOVER_ENABLED = "true"').replace('BALANCE_ENABLED = "false"','BALANCE_ENABLED = "true"')
+          Path('cloudflare/standby-runtime.toml').write_text(cfg)
           Path('/tmp/mh-standby-secret.json').write_text(json.dumps({'STANDBY_ORIGIN_SECRET':os.environ['STANDBY_ORIGIN_SECRET']}))
           PY
-          npx --yes wrangler@4 secret bulk /tmp/mh-standby-secret.json --config cloudflare/wrangler-standby.toml
-      - name: Deploy detached standby only
-        run: npx --yes wrangler@4 deploy --config cloudflare/wrangler-standby.toml
+          npx --yes wrangler@4 secret bulk /tmp/mh-standby-secret.json --config cloudflare/standby-runtime.toml
+          npx --yes wrangler@4 deploy --config cloudflare/standby-runtime.toml
+      - name: Check actual standby dependencies and both origins
+        if: inputs.operation == 'prepare' || inputs.operation == 'activate'
+        run: |
+          python3 - <<'PY'
+          import os,json,urllib.request
+          base='https://mangahub-standby-router.vinhytb3010.workers.dev/internal/router-probe'
+          for query in ['kind=readiness','kind=frontend&target=primary','kind=frontend&target=backup','kind=api&target=primary','kind=api&target=backup','kind=auth&target=primary','kind=auth&target=backup']:
+              request=urllib.request.Request(base+'?'+query,headers={'X-MangaHub-Probe-Secret':os.environ['STANDBY_ORIGIN_SECRET']})
+              with urllib.request.urlopen(request,timeout=20) as response:result=json.load(response)
+              print(json.dumps({'probe':query,'result':result}))
+              assert result.get('ok') if query=='kind=readiness' else result.get('status')==200
+          PY
+      - name: Activate verified routes
+        if: inputs.operation == 'activate'
+        run: python3 cloudflare/manage-standby.py activate
+      - name: Restore original country Worker and Vercel routing
+        if: inputs.operation == 'rollback'
+        run: python3 cloudflare/manage-standby.py rollback

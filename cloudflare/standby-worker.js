@@ -1,7 +1,8 @@
 import { denyOutsideVietnam } from './standby-country.js';
 
 const FRONT = 'mangahub.art', API = 'api.mangahub.art', AUTH = 'auth.mangahub.art';
-const HOSTS = [FRONT, API, AUTH];
+const STANDBY = 'standby.mangahub.art';
+const HOSTS = [FRONT, API, AUTH, STANDBY];
 const SAFE = method => ['GET', 'HEAD'].includes(method);
 const FAILED = status => [500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526].includes(status);
 const TTL = 30_000;
@@ -19,26 +20,26 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
   function backupOrigin(env) {
     const value = new URL(env.BACKUP_ORIGIN);
     if (value.protocol !== 'https:' || value.username || value.password || value.pathname !== '/' ||
-        value.search || value.hash || HOSTS.includes(value.hostname)) throw new Error('Invalid standby configuration');
+        value.search || value.hash || [FRONT, API, AUTH].includes(value.hostname)) throw new Error('Invalid standby configuration');
     return value.origin;
   }
-  async function timed(url, options = {}, ms = 5000) {
+  async function timed(url, options = {}, ms = 5000, html = false) {
     const started = now(), controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms);
     try {
       const response = await send(url, { ...options, redirect: 'manual', signal: controller.signal });
-      const value = response.status === 200 ? await response.json() : null;
-      if (!value) await response.body?.cancel();
+      const value = response.status === 200 ? (html ? { html: response.headers.get('Content-Type')?.startsWith('text/html') } : await response.json()) : null;
+      if (!value || html) await response.body?.cancel();
       return { response, value, milliseconds: Math.max(0, now() - started) };
     } finally { clearTimeout(timer); }
   }
   async function primaryProbe(host) {
-    const path = host === API ? '/health' : '/auth/health';
+    const html = host === FRONT, path = html ? '/' : host === API ? '/health' : '/auth/health';
     try {
       const { response, value, milliseconds } = await timed('https://' + host + path, {
-        headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' }, cf: { cacheTtl: 0 },
-      });
-      return { ok: response.status === 200 && value?.status === 'ok', milliseconds };
+        headers: { Accept: html ? 'text/html' : 'application/json', 'Cache-Control': 'no-cache' }, cf: { cacheTtl: 0 },
+      },5000,html);
+      return { ok: response.status === 200 && (html ? value?.html : value?.status === 'ok'), milliseconds };
     } catch { return { ok: false }; }
   }
   async function backupProbe(env, checkFrontend) {
@@ -47,7 +48,12 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
         headers: { 'X-MangaHub-Origin-Secret': env.STANDBY_ORIGIN_SECRET,
           'X-MangaHub-Public-Host': API, 'Cache-Control': 'no-cache' }, cf: { cacheTtl: 0 },
       });
-      return { ok: value?.status === 'ready', capacity: value?.accept_extra === true, milliseconds,
+      const frontend = await timed(backupOrigin(env) + '/index.html', {
+        headers: { 'X-MangaHub-Origin-Secret': env.STANDBY_ORIGIN_SECRET, 'X-MangaHub-Public-Host': FRONT,
+          'Cache-Control':'no-cache' }, cf: {cacheTtl:0},
+      },3000,true);
+      return { ok: value?.status === 'ready' && frontend.value?.html === true,
+        capacity: value?.accept_extra === true, milliseconds, frontendMilliseconds:frontend.milliseconds,
         primaryFrontend: value?.primary_frontend_ok };
     } catch { return { ok: false, capacity: false }; }
   }
@@ -61,14 +67,11 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
   async function refresh(s, env) {
     if (s.pending) return s.pending;
     s.pending = (async () => {
-      const [api, auth, backup] = await Promise.all([primaryProbe(API), primaryProbe(AUTH), backupProbe(env, s.primary[FRONT]?.ok === false)]);
+      const [front, api, auth, backup] = await Promise.all([primaryProbe(FRONT), primaryProbe(API), primaryProbe(AUTH), backupProbe(env, false)]);
+      s.primary[FRONT] = adopt(s.primary[FRONT], front, s.recovery, FRONT);
       s.primary[API] = adopt(s.primary[API], api, s.recovery, API);
       s.primary[AUTH] = adopt(s.primary[AUTH], auth, s.recovery, AUTH);
-      // A primary API probe must not stand in for a frontend probe. Frontend
-      // observations come from real requests, without the Under Attack layer.
       s.backup = adopt(s.backup, backup, s.recovery, 'backup');
-      if (typeof backup.primaryFrontend === 'boolean') s.primary[FRONT] = adopt(s.primary[FRONT],
-        { ok: backup.primaryFrontend }, s.recovery, FRONT);
       s.expires = now() + TTL;
     })().finally(() => { s.pending = undefined; });
     return s.pending;
@@ -82,28 +85,43 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
   function choose(s, host, b, env) {
     const primary = s.primary[host];
     if (primary?.ok === false) return s.backup.ok ? 'backup' : 'primary';
-    if (host === FRONT || env.BALANCE_ENABLED !== 'true' || !s.backup.ok || !s.backup.capacity) return 'primary';
+    // An operator can pin one trusted Cloudflare client IP for a short user
+    // acceptance test. It grants no application access and expires by itself.
+    if (b.test && s.backup.ok) return 'backup';
+    if (env.BALANCE_ENABLED !== 'true' || !s.backup.ok || !s.backup.capacity) return 'primary';
+    const standbyTime = host === FRONT ? s.backup.frontendMilliseconds : s.backup.milliseconds;
     const faster = Number.isFinite(primary?.milliseconds) &&
-      s.backup.milliseconds + 100 < primary.milliseconds * .8;
+      standbyTime + 100 < primary.milliseconds * .8;
     const congested = now() < s.busyUntil;
     // The 1 GB standby has a deliberately bounded share while both hosts are
     // healthy. An actual primary outage is handled above, independently.
-    const share = faster || congested ? 25 : 10;
+    const share = faster || congested ? 25 : host === FRONT ? 0 : 10;
     return b.value < share ? 'backup' : 'primary';
   }
   async function proxy(request, env, target) {
     const headers = new Headers(request.headers), source = new URL(request.url);
     for (const name of ['X-MangaHub-Origin-Secret', 'X-MangaHub-Public-Host', 'X-MangaHub-Client-IP',
       'Host', 'X-Real-IP', 'X-Forwarded-For', 'X-Forwarded-Host', 'X-Forwarded-Proto']) headers.delete(name);
+    // Both frontends are owned by this application. The backend retains its
+    // canonical callback and strict CSRF policy; translate only this exact
+    // additional frontend origin, then translate its CORS response below.
+    if ([API, AUTH].includes(source.hostname) && headers.get('Origin') === 'https://' + STANDBY) {
+      headers.set('Origin','https://' + FRONT);
+      headers.set('Referer','https://' + FRONT + '/');
+    }
     let url = source.href;
+    if (source.hostname === STANDBY && target === 'primary') {
+      url = 'https://' + FRONT + source.pathname + source.search;
+    }
     if (target === 'backup') {
       url = backupOrigin(env) + source.pathname + source.search;
       headers.set('X-MangaHub-Origin-Secret', env.STANDBY_ORIGIN_SECRET);
-      headers.set('X-MangaHub-Public-Host', source.hostname);
+      headers.set('X-MangaHub-Public-Host', source.hostname === STANDBY ? FRONT : source.hostname);
       headers.set('X-MangaHub-Client-IP', request.headers.get('CF-Connecting-IP') || 'unknown');
     }
     // Bound waiting for response headers, not streaming bodies or SSE lifetime.
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8000);
+    const timeout = source.pathname === '/api/site-access' ? 2500 : 8000;
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeout);
     const signal = AbortSignal.any([controller.signal, request.signal]);
     try {
       return await send(new Request(url, { method: request.method, headers,
@@ -113,6 +131,10 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
   function publicResponse(response, request, b) {
     const result = new Response(response.body, response);
     for (const header of ['X-MangaHub-Origin', 'X-MangaHub-Origin-Secret', 'X-MangaHub-Public-Host', 'X-MangaHub-Client-IP']) result.headers.delete(header);
+    if (request.headers.get('Origin') === 'https://' + STANDBY && result.headers.get('Access-Control-Allow-Origin') === 'https://' + FRONT) {
+      result.headers.set('Access-Control-Allow-Origin','https://' + STANDBY);
+      result.headers.append('Vary','Origin');
+    }
     const path = new URL(request.url).pathname;
     if (b?.fresh && (new URL(request.url).hostname !== FRONT || request.headers.get('accept')?.includes('text/html')) && !path.startsWith('/assets/')) {
       result.headers.append('Set-Cookie', `mh_route=${b.id}; Domain=mangahub.art; Path=/; Max-Age=1800; Secure; HttpOnly; SameSite=Lax`);
@@ -121,8 +143,8 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
   }
   function unavailable(request) {
     const headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '5' };
-    if (request.headers.get('Origin') === 'https://' + FRONT) {
-      headers['Access-Control-Allow-Origin'] = 'https://' + FRONT;
+    if (['https://' + FRONT,'https://' + STANDBY].includes(request.headers.get('Origin'))) {
+      headers['Access-Control-Allow-Origin'] = request.headers.get('Origin');
       headers['Access-Control-Allow-Credentials'] = 'true';
     }
     return new Response(JSON.stringify({ detail: 'Dịch vụ tạm thời không khả dụng. Vui lòng thử lại.' }), { status: 503, headers });
@@ -138,7 +160,7 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
         const kind = incoming.searchParams.get('kind') || 'api';
         const target = incoming.searchParams.get('target') || 'primary';
         if (!['api','auth','frontend','readiness'].includes(kind) || !['primary','backup'].includes(target)) return new Response('Invalid probe', { status: 400 });
-        if (kind === 'readiness') return Response.json(await backupProbe(env, false), { headers: { 'Cache-Control':'no-store' } });
+        if (kind === 'readiness') return Response.json(await backupProbe(env, true), { headers: { 'Cache-Control':'no-store' } });
         const canonical = kind === 'api' ? API : kind === 'auth' ? AUTH : FRONT;
         const path = kind === 'api' ? '/health' : kind === 'auth' ? '/auth/health' : '/';
         try {
@@ -149,18 +171,32 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
         } catch { return Response.json({status:503}, {headers:{'Cache-Control':'no-store'}}); }
       }
       if (!HOSTS.includes(host)) return new Response('Not found', { status: 404 });
-      if (host === FRONT) { const denied = denyOutsideVietnam(request); if (denied) return denied; }
+      if ([FRONT, STANDBY].includes(host)) { const denied = denyOutsideVietnam(request); if (denied) return denied; }
       if (env.FAILOVER_ENABLED !== 'true') return publicResponse(await send(request), request);
       if (!env.STANDBY_ORIGIN_SECRET || !env.BACKUP_ORIGIN) return publicResponse(await send(request), request);
       const s = state(request), b = bucket(request);
+      const until = Number(env.STANDBY_TEST_UNTIL);
+      b.test = !!env.STANDBY_TEST_IP && request.headers.get('CF-Connecting-IP') === env.STANDBY_TEST_IP &&
+        until > now() && until <= now() + 15 * 60_000;
       if (now() >= s.expires) {
         const job = refresh(s, env);
         // Check readiness before selecting an origin for a mutation. Never
         // repeat a submitted write, even after a network error or a 5xx.
-        if (!SAFE(request.method)) await job;
+        if (!SAFE(request.method) || b.test) await job;
         else ctx.waitUntil(job);
       }
-      const target = choose(s, host, b, env);
+      const frontend = [FRONT, STANDBY].includes(host);
+      const navigation = frontend && SAFE(request.method) && request.headers.get('accept')?.includes('text/html') &&
+        !incoming.pathname.startsWith('/assets/') && !incoming.pathname.startsWith('/api/');
+      let target = host === STANDBY ? (s.backup.ok === false && s.primary[FRONT]?.ok ? 'primary' : 'backup') : choose(s,host,b,env);
+      if ([API, AUTH].includes(host) && request.headers.get('Origin') === 'https://' + STANDBY && s.backup.ok) target='backup';
+      function navigationRedirect(to) {
+        const destination = new URL(incoming); destination.hostname=to;
+        return publicResponse(new Response(null,{status:307,headers:{Location:destination.href,'Cache-Control':'private, no-store'}}),request,b);
+      }
+      if (navigation && ((host === FRONT && target === 'backup') || (host === STANDBY && target === 'primary'))) {
+        return navigationRedirect(target === 'backup' ? STANDBY : FRONT);
+      }
       let response;
       try { response = await proxy(request, env, target); }
       catch {
@@ -171,7 +207,7 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
       const sourceFailure = response?.headers.has('X-TruyenQQ-Error');
       if (response && (!FAILED(response.status) || sourceFailure || !SAFE(request.method))) {
         if (response.status === 429 && !sourceFailure) s.busyUntil = now() + TTL;
-        if (host === FRONT && response.ok) s.primary[FRONT] = { ok: true };
+        if (host === FRONT && target === 'primary' && response.ok) s.primary[FRONT] = { ...s.primary[FRONT], ok: true };
         return publicResponse(response, request, b);
       }
       const alternative = target === 'primary' ? 'backup' : 'primary';
@@ -184,6 +220,10 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
           if (target === 'primary') { s.primary[host] = { ok: false }; s.recovery[host] = 0; }
           else s.backup.ok = false;
           s.expires = Math.min(s.expires, now() + 5000);
+          if (navigation) {
+            await retry.body?.cancel();
+            return navigationRedirect(alternative === 'backup' ? STANDBY : FRONT);
+          }
         }
         return publicResponse(retry, request, b);
       } catch { return unavailable(request); }

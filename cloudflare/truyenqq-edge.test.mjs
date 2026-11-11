@@ -12,6 +12,19 @@ function mockFetch(handler, policy = { enabled: false, allowed: true }) {
 afterEach(() => { globalThis.fetch = originalFetch; });
 const edge = 'https://worker.example/api/truyenqq-edge';
 
+test('source access checks use the router binding and still fail closed',async()=>{
+  let called=0;
+  const env={ACCESS_ROUTER:{fetch:async r=>{
+    called++;assert.equal(r.url,accessUrl);
+    assert.equal(r.headers.get('Authorization'),'Bearer reader');
+    assert.equal(r.headers.get('Cookie'),null);
+    return Response.json({enabled:true,allowed:false},{status:403});
+  }}};
+  globalThis.fetch=()=>{throw new Error('denied reader must not reach source');};
+  const r=await worker.fetch(new Request(edge+'/doc-truyen',{headers:{Authorization:'Bearer reader',Cookie:'private=fixture'}}),env);
+  assert.equal(r.status,403);assert.equal(called,1);
+});
+
 test('QQ filters relay to the fixed source with the full page and query', async () => {
   mockFetch(async (url, options) => {
     assert.equal(url, 'https://truyenqqko.com/tim-kiem-nang-cao/trang-7?sort=4&category=26');
