@@ -1,0 +1,46 @@
+name: Prepare adaptive standby router
+on:
+  push:
+    branches: [codex/adaptive-standby]
+    paths: [cloudflare/**, .github/workflows/adaptive-standby.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      STANDBY_ORIGIN_SECRET: ${{ secrets.STANDBY_ORIGIN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: cloudflare
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test routing and source gates
+        run: node --test cloudflare/standby-worker.test.mjs cloudflare/truyenqq-edge.test.mjs
+      - name: Require detached preparation
+        run: |
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+          cfg=tomllib.loads(Path('cloudflare/wrangler-standby.toml').read_text())
+          assert cfg['name']=='mangahub-standby-router'
+          assert cfg['routes']==[] and cfg['vars']['FAILOVER_ENABLED']=='false'
+          PY
+      - name: Install private origin credential
+        run: |
+          test -n "$STANDBY_ORIGIN_SECRET"
+          umask 077
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          Path('/tmp/mh-standby-secret.json').write_text(json.dumps({'STANDBY_ORIGIN_SECRET':os.environ['STANDBY_ORIGIN_SECRET']}))
+          PY
+          npx --yes wrangler@4 secret bulk /tmp/mh-standby-secret.json --config cloudflare/wrangler-standby.toml
+      - name: Deploy detached standby only
+        run: npx --yes wrangler@4 deploy --config cloudflare/wrangler-standby.toml

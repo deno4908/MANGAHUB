@@ -29,6 +29,14 @@ from truyenapi.truyenapi.updates import update_interval
 from fastapi_app.services.cache_service import cache
 from fastapi_app.services.request_coalescing import coalesce_reads
 from fastapi_app.services.truyenqq_transport import TruyenQQTransport
+from site_access import source_authorization
+
+
+def _source_read_scope():
+    # Native lifespan warmups have no reader credentials. Their denied relay
+    # call must never become the in-flight result for an approved reader.
+    # Approved readers can still share public QQ data without retaining tokens.
+    return bool(source_authorization.get())
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +83,10 @@ async def run_live(method: str, *args, **kwargs):
     except httpx.HTTPStatusError as error:
         _log_source_error(method, error)
         status = error.response.status_code
-        raise HTTPException(404 if status == 404 else 503 if status == 429 else 502,
+        # Cloudflare replaces origin 502 responses and strips the source hints
+        # needed by browser recovery. A blocked/rate-limited source is temporarily
+        # unavailable; 503 preserves its safe JSON and bounded recovery headers.
+        raise HTTPException(404 if status == 404 else 503 if status in {403, 429} else 502,
                             "Không tải được dữ liệu từ TruyenQQ.", headers=_source_error_headers(error)) from error
     except (httpx.RequestError, ValueError) as error:
         _log_source_error(method, error)
@@ -131,9 +142,13 @@ def _log_source_error(method, error):
     response = getattr(error, "response", None)
     # Exclude query strings, request bodies, headers, and response content.
     logger.warning(
-        "TruyenQQ source failed operation=%s error=%s host=%s path=%s status=%s reason=%s",
+        "TruyenQQ source failed operation=%s error=%s host=%s path=%s status=%s auth=%s transport=%s colo=%s block=%s reason=%s",
         method, type(error).__name__, request.url.host if request else "-",
         request.url.path if request else "-", response.status_code if response is not None else "-",
+        bool(source_authorization.get()),
+        _source_error_headers(error).get("X-TruyenQQ-Transport", "-"),
+        _source_error_headers(error).get("X-TruyenQQ-Colo", "-"),
+        _source_error_headers(error).get("X-TruyenQQ-Block", "-"),
         re.sub(r"https?://[^\s;]+", "[source URL]", str(error))[:160] if isinstance(error, ValueError) else "-",
     )
 
@@ -240,7 +255,7 @@ def _remember(key: str, payload: dict, ttl=60) -> dict:
     return payload
 
 
-@coalesce_reads
+@coalesce_reads(scope=_source_read_scope)
 async def get_home():
     payload = await _catalog_page("home")
     return await asyncio.to_thread(_remember, "truyenqq:home", payload)
@@ -346,7 +361,7 @@ async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=
         # Do not attach an unrelated stale-page refresh to their Vercel invocation.
         return await finish(snapshot["payload"])
     if snapshot is None or snapshot.get("fresh_until", 0) < time.time():
-        task_key = (asyncio.get_running_loop(), key)
+        task_key = (asyncio.get_running_loop(), key, _source_read_scope())
         task = _catalog_jobs.get(task_key)
         if task is None:
             async def refresh():
@@ -392,7 +407,7 @@ async def get_list(list_type="truyen-moi", page=1):
     return await _load_list_page(list_type, page, revision)
 
 
-@coalesce_reads
+@coalesce_reads(scope=_source_read_scope)
 async def _load_list_page(list_type, page, revision):
     # Revision is part of the shared-read identity, so a new chapter event
     # cannot join an older in-flight request for the same page.
@@ -410,7 +425,7 @@ def invalidate_live_catalog(slugs, preserve_latest=False):
     _live.html_cache.invalidate_matching(lambda url: url in urls)
 
 
-@coalesce_reads
+@coalesce_reads(scope=_source_read_scope)
 async def get_categories():
     raw = await asyncio.to_thread(cache.get, "truyenqq:genres:v1")
     if isinstance(raw, str):
@@ -482,7 +497,7 @@ def _cached_detail_identifier(slug):
     return slug
 
 
-@coalesce_reads
+@coalesce_reads(scope=_source_read_scope)
 async def get_manga_detail(slug):
     cached = await asyncio.to_thread(_json_cached, f"truyenqq:detail:{slug}")
     item = ((cached or {}).get("data") or {}).get("item") if isinstance(cached, dict) else None
@@ -507,7 +522,7 @@ async def get_manga_detail(slug):
     return payload
 
 
-@coalesce_reads
+@coalesce_reads(scope=_source_read_scope)
 async def search_manga(keyword, page=1):
     # The source AJAX search is a single limited result set, without fake pages.
     if page > 1:
@@ -520,7 +535,7 @@ async def search_manga(keyword, page=1):
     return await asyncio.to_thread(_remember, key, payload, 60)
 
 
-@coalesce_reads
+@coalesce_reads(scope=_source_read_scope)
 async def get_chapter_manifest(slug, number):
     """Share source-provided page URLs across Vercel instances, never image bytes."""
     key = f"truyenqq:chapter-manifest:v1:{slug}:{number}"

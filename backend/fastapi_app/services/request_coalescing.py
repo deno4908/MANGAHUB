@@ -6,9 +6,9 @@ import inspect
 from copy import deepcopy
 
 
-def coalesce_reads(function=None, *, revision=None):
+def coalesce_reads(function=None, *, revision=None, scope=None):
     if function is None:
-        return lambda target: coalesce_reads(target, revision=revision)
+        return lambda target: coalesce_reads(target, revision=revision, scope=scope)
     signature = inspect.signature(function)
     pending = {}
 
@@ -19,7 +19,7 @@ def coalesce_reads(function=None, *, revision=None):
         # Revision providers read shared Redis state. A slow network must not
         # pause all image/catalog requests on the ASGI event loop.
         version = await asyncio.to_thread(revision) if revision else None
-        key = (asyncio.get_running_loop(), repr(bound.arguments), version)
+        key = (asyncio.get_running_loop(), repr(bound.arguments), version, scope() if scope else None)
         task = pending.get(key)
         if task is None:
             task = create_task(function(*args, **kwargs))

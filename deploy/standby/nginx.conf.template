@@ -1,0 +1,62 @@
+map $http_x_mangahub_origin_secret $mh_origin_allowed {
+    default 0;
+    "ORIGIN_SECRET_PLACEHOLDER" 1;
+}
+map $http_x_mangahub_public_host $mh_public_host {
+    default "";
+    mangahub.art mangahub.art;
+    api.mangahub.art api.mangahub.art;
+    auth.mangahub.art auth.mangahub.art;
+}
+map $http_x_mangahub_client_ip $mh_client_ip {
+    default $http_x_mangahub_client_ip;
+    "" $remote_addr;
+}
+server {
+    listen 80;
+    server_name standby.mangahub.art;
+    server_tokens off;
+    include /etc/nginx/mangahub-origin-rules/*.conf;
+    location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+    location / { return 301 https://standby.mangahub.art$request_uri; }
+}
+server {
+    listen 443 ssl;
+    server_name standby.mangahub.art;
+    server_tokens off;
+    include /etc/nginx/mangahub-origin-rules/*.conf;
+    ssl_certificate /etc/letsencrypt/live/standby.mangahub.art/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/standby.mangahub.art/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    root /opt/mangahub/standby/dist;
+    client_max_body_size 50m;
+    if ($mh_origin_allowed = 0) { return 404; }
+    if ($mh_public_host = "") { return 404; }
+    location = /auth/callback {
+        add_header Cache-Control "private, no-store" always;
+        try_files /index.html =404;
+    }
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri @retained_assets;
+    }
+    location @retained_assets { root /opt/mangahub; try_files $uri =404; }
+    location ~ ^/(api/|auth/|health$|internal/origin-status$) {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $mh_public_host;
+        proxy_set_header X-Real-IP $mh_client_ip;
+        proxy_set_header X-Forwarded-For $mh_client_ip;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $mh_public_host;
+        proxy_set_header CF-Connecting-IP "";
+        proxy_hide_header X-MangaHub-Origin;
+        proxy_buffering off;
+        proxy_read_timeout 310s;
+        proxy_connect_timeout 5s;
+    }
+    location / {
+        add_header Cache-Control "private, no-store" always;
+        try_files $uri /index.html;
+    }
+}

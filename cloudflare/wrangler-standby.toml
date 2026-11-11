@@ -1,0 +1,11 @@
+name = "mangahub-standby-router"
+main = "standby-worker.js"
+compatibility_date = "2026-11-11"
+workers_dev = true
+# Attach only after direct origin and failure drills pass. Keep the separate
+# /api/mangadex-edge/* source route and the existing country policy intact.
+routes = []
+[vars]
+FAILOVER_ENABLED = "false"
+BALANCE_ENABLED = "false"
+BACKUP_ORIGIN = "https://standby.mangahub.art"
