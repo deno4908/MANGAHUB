@@ -1,0 +1,65 @@
+name: Deploy standby router
+on:
+  workflow_dispatch:
+    inputs:
+      activate:
+        description: "Attach the three public routes after the standby drill passes"
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      STANDBY_ORIGIN_SECRET: ${{ secrets.STANDBY_ORIGIN_SECRET }}
+      ACTIVATE: ${{ inputs.activate }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: cloudflare
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify routing behavior
+        run: node --test cloudflare/standby-worker.test.mjs
+      - name: Check standby readiness before activation
+        if: inputs.activate
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          request = urllib.request.Request('https://standby.mangahub.art/internal/standby-health', headers={
+              'X-MangaHub-Origin-Secret': os.environ['STANDBY_ORIGIN_SECRET'],
+              'X-MangaHub-Public-Host': 'api.mangahub.art'})
+          with urllib.request.urlopen(request, timeout=15) as response:
+              assert response.status == 200 and json.load(response)['status'] == 'ready'
+          PY
+      - name: Configure routes
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          p = Path('cloudflare/wrangler-standby.toml')
+          text = p.read_text()
+          if os.environ['ACTIVATE'] == 'true':
+              routes = 'routes = [' + ','.join('{ pattern = "' + host + '/*", zone_name = "mangahub.art" }' for host in ['mangahub.art', 'api.mangahub.art', 'auth.mangahub.art']) + ']'
+              text = text.replace('routes = []', routes, 1).replace('FAILOVER_ENABLED = \"false\"', 'FAILOVER_ENABLED = \"true\"')
+          p.write_text(text)
+          PY
+      - name: Deploy router with its private origin secret
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$STANDBY_ORIGIN_SECRET"
+          # First deployment stays detached. Subsequent activation reuses the installed secret.
+          umask 077
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          Path('/tmp/standby-worker-secrets.json').write_text(json.dumps({'STANDBY_ORIGIN_SECRET': os.environ['STANDBY_ORIGIN_SECRET']}))
+          PY
+          npx --yes wrangler@4 deploy --config cloudflare/wrangler-standby.toml
+          npx --yes wrangler@4 secret bulk /tmp/standby-worker-secrets.json --config cloudflare/wrangler-standby.toml

@@ -1,0 +1,58 @@
+# MangaHub VPS standby
+
+This runs the full combined FastAPI + Flask application and the same production SPA. Vercel stays the primary origin for all three public hostnames. A separate Worker can route `mangahub.art`, `api.mangahub.art`, and `auth.mangahub.art` to `standby.mangahub.art` without changing browser URLs or cookies. Keep the more specific MangaDex source Worker route unchanged.
+
+## Current deployment and activation boundary
+
+The initial Sydney machine has native Nginx, a single Python 3.12/Uvicorn process, a local TLS Redis content cache and 1 GiB swap. No Docker daemon or on-VPS frontend build is needed. Redis binds only loopback and has a 96 MiB disposable content limit; the systemd service has memory limits. These are starting budgets for a 1 GiB machine, not a guarantee of Vercel-equivalent traffic capacity.
+
+The checked-in Worker configuration has **no public routes and `FAILOVER_ENABLED=false`**. The VPS private readiness endpoint also rejects activation until `STANDBY_READY=true`. Leaving these disabled while completing env is deliberate. A running health endpoint alone does not prove full login and feature parity.
+
+## State that must remain shared
+
+Use the same Supabase database/storage, Flask/JWT secrets, authentication JWK, frontend/auth URLs and integration credentials as production. The VPS uses its own Redis for content caching. `REDIS_SECURITY_URL` must point at the SAME Redis security authority used by Vercel; do not create independent revocation, refresh, nonce or access-ticket ledgers. Preserve the production fallback/cutover setting. This protects against a logged-out or revoked session becoming valid again on the other host.
+
+This setup survives a Vercel origin outage. It does not independently recover a shared Supabase or security-Redis outage, a Cloudflare outage, an upstream source outage, or an overloaded VPS. Changing those dependencies requires a separate data/identity recovery design.
+
+## Provisioning
+
+`bootstrap.sh` is for a new, empty Ubuntu VPS with root access. It installs Nginx and Redis, installs managed Python 3.12 with uv for the pinned application dependencies, generates local Redis certificates/passwords, and adds swap only if none exists. Redis is TLS-only with hostname verification. Bootstrap creates a backup of the distribution Redis configuration. Do not print or commit `/etc/mangahub/backend.env`, `/etc/mangahub/origin-secret`, the Redis password or private TLS keys.
+
+AWS inbound: TCP 22 from the administrator's IP; TCP 80 and 443 for web/ACME. Never expose 6379, 8000 or 5000. Create a DNS-only `standby.mangahub.art` A record for the server and obtain a valid HTTPS certificate. Run `setup-web.sh` after the first release exists; it obtains HTTPS and configures automatic renewal plus Nginx reload.
+
+Keep private environment settings in `/etc/mangahub/backend.env` (root:mangahub, 0640). See `backend.env.example`. Copy ALL current production settings and override only the VPS-local paths, bind settings and content Redis URL. Do not import old cached env as proof that current production secrets match. Preserve reCAPTCHA/SMTP/OpenRouter and all enabled integrations.
+
+Build the frontend in CI with the production public env. For the initial deployment, the exact currently deployed production HTML and its 94 public asset files were mirrored, retaining production API/auth URLs and the public reCAPTCHA site key. Local developer builds point at localhost and are unsuitable. Future releases must install matching frontend and backend revisions before declaring readiness.
+
+Place a release under `/opt/mangahub/releases/<revision>/` with `backend`, `dist`, and `deploy/standby`, excluding venvs, `.env*`, keys and runtime caches. Run `install-release.sh /opt/mangahub/releases/<revision>`. Keep `/opt/mangahub/assets` as a retained archive of old hashed public assets so already-open tabs can load their chunks after an update. No credentials or private cache may go into this archive.
+
+Use `nginx.conf.template`, replacing only `ORIGIN_SECRET_PLACEHOLDER` with the generated Worker/VPS secret. Run `nginx -t` before reload. It serves the SPA, preserves crawler previews, proxies API/auth/SSE, sanitizes client-IP forwarding, and rejects direct origin access without the secret. The application trusts only the local Nginx hop.
+
+## Worker behavior
+
+The healthy request path streams directly to Vercel. A bounded background routing-state read does not delay that response. Cron probes each original Vercel hostname every minute, checks the VPS including Redis reads/writes, and records private routing state on the VPS disk, outside the evictable content cache. Three successful probes are required before returning a failed origin to primary.
+
+GET/HEAD can retry a failed origin on the other host. POST/PUT/PATCH/DELETE are NEVER replayed after any error because they may already have committed. Once the health monitor selects the standby, new writes start there. An in-flight write at the beginning of an outage can still fail and require the client's normal retry. HTTP 401/403/404/429 are preserved. Country restrictions on the frontend keep the existing denial page; API/auth keep the application access checks.
+
+Cloudflare Workers Free has a daily request quota shared with the account's other Workers; it is not unlimited failover capacity. See https://developers.cloudflare.com/workers/platform/limits/ . No KV or paid load-balancer subscription is required by this design.
+
+## Checks before activation
+
+1. Compare current production environment settings and frontend build values. Complete missing reCAPTCHA and integration configuration.
+2. Verify TLS/private-origin rejection, both Redis stores, full SPA chunks and no localhost URLs in active configuration.
+3. Sign in as a normal approved reader; check MangaDex and QQ lists, filters, chapter images, progress, Follow, History and Bookmark. Check uploads/editor/admin and configured email/AI integrations with appropriate accounts. Never relax whitelist, role, CSRF or rate-limit checks for this drill.
+4. Run unit checks: `node --test cloudflare/standby-worker.test.mjs`; from `backend`, `python -m pytest tests/test_standby_app.py tests/test_vercel_runtime.py tests/test_redis_failover.py -q`.
+5. Run a controlled failure drill against the private origin before switching public traffic. Confirm no write replay and recovery behavior.
+6. Set `STANDBY_READY=true` ONLY after these checks. Restart `mangahub` and verify private readiness is 200.
+7. Dispatch `standby-worker.yml` with `activate=false` first. It deploys a detached router and its encrypted origin secret using the existing Cloudflare Actions credentials. Then dispatch `activate=true`; its readiness gate must pass before routes are attached. The standalone `vn-only-worker.js` source file is not modified by this setup.
+
+## Operations
+
+- Status: `sudo systemctl status mangahub redis-server nginx`.
+- Resource use: `free -m`; `sudo systemctl show mangahub -p MemoryCurrent -p NRestarts`.
+- Logs: `sudo journalctl -u mangahub --since '10 minutes ago'` (redact before sharing).
+- Readiness/control are private and require `X-MangaHub-Origin-Secret` and an allowed `X-MangaHub-Public-Host` at Nginx.
+- Pause failover by deploying the router with activation false. This leaves Vercel as origin and does not stop the VPS.
+- Keep frontend/backend updates synchronized; do not use stale secrets or an old SPA as a permanent backup.
+
+Do not mark failover operational until the activation checks and a real failure drill have passed. Full functionality is the completion condition; installing services alone is preparation.
