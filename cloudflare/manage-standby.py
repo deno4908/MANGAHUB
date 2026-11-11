@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import urllib.request
+import urllib.error
 
 TARGETS = {host + '/*' for host in ('mangahub.art', 'api.mangahub.art', 'auth.mangahub.art', 'standby.mangahub.art')}
 ROUTER = 'mangahub-standby-router'
@@ -24,8 +25,13 @@ def main(operation):
     previous = api(route_path)
     dns = {}
     for host in ('mangahub.art','api.mangahub.art','auth.mangahub.art','standby.mangahub.art'):
-        records = api(f'zones/{zone}/dns_records?name={host}')
-        dns[host] = bool(records) and all(r['proxied'] for r in records)
+        path = '/health' if host=='api.mangahub.art' else '/auth/health' if host=='auth.mangahub.art' else '/'
+        try:
+            response=urllib.request.urlopen('https://'+host+path,timeout=15)
+        except urllib.error.HTTPError as error:
+            response=error
+        with response:
+            dns[host]=bool(response.headers.get('CF-Ray'))
     print(json.dumps({'proxied':dns,'routes':[{'pattern':r['pattern'],'script':r.get('script')} for r in previous]}))
     if operation == 'inspect':
         return
