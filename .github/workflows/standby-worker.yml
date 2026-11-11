@@ -95,5 +95,57 @@ jobs:
           from pathlib import Path
           Path('/tmp/standby-worker-secrets.json').write_text(json.dumps({'STANDBY_ORIGIN_SECRET': os.environ['STANDBY_ORIGIN_SECRET']}))
           PY
-          npx --yes wrangler@4 deploy --config cloudflare/wrangler-standby.toml
+          # The router includes the existing frontend country gate. Wrangler cannot
+          # take over a route owned by that separate Worker, so transfer only that
+          # exact known route; leave every more-specific source route untouched.
+          python3 - <<'PY'
+          import json, os, urllib.request
+          from pathlib import Path
+          def api(path, data=None):
+              request = urllib.request.Request('https://api.cloudflare.com/client/v4/' + path,
+                  data=None if data is None else json.dumps(data).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['CLOUDFLARE_API_TOKEN'], 'Content-Type': 'application/json'},
+                  method='GET' if data is None else 'PUT')
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  value = json.load(response)
+              assert value['success']
+              return value['result']
+          zone = api('zones?name=mangahub.art')[0]['id']
+          previous = api('zones/' + zone + '/workers/routes')
+          Path('/tmp/standby-previous-routes.json').write_text(json.dumps({'zone': zone, 'routes': previous}))
+          for route in previous:
+              if route['pattern'] == 'mangahub.art/*' and route.get('script') == 'mangahub-vn-only':
+                  api('zones/' + zone + '/workers/routes/' + route['id'], {'pattern': route['pattern'], 'script': 'mangahub-standby-router'})
+                  print('Transferred frontend route; country gate is retained in standby router')
+          PY
+          if ! npx --yes wrangler@4 deploy --config cloudflare/wrangler-standby.toml; then
+            python3 - <<'PY'
+          import json, os, urllib.request
+          from pathlib import Path
+          previous = json.loads(Path('/tmp/standby-previous-routes.json').read_text())
+          for route in previous['routes']:
+              if route['pattern'] == 'mangahub.art/*' and route.get('script') == 'mangahub-vn-only':
+                  request = urllib.request.Request('https://api.cloudflare.com/client/v4/zones/' + previous['zone'] + '/workers/routes/' + route['id'],
+                      data=json.dumps({'pattern': route['pattern'], 'script': route['script']}).encode(), method='PUT',
+                      headers={'Authorization': 'Bearer ' + os.environ['CLOUDFLARE_API_TOKEN'], 'Content-Type': 'application/json'})
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      assert json.load(response)['success']
+          PY
+            exit 1
+          fi
           npx --yes wrangler@4 secret bulk /tmp/standby-worker-secrets.json --config cloudflare/wrangler-standby.toml
+          python3 - <<'PY'
+          import json, os, urllib.request
+          from pathlib import Path
+          previous = json.loads(Path('/tmp/standby-previous-routes.json').read_text())
+          request = urllib.request.Request('https://api.cloudflare.com/client/v4/zones/' + previous['zone'] + '/workers/routes',
+              headers={'Authorization': 'Bearer ' + os.environ['CLOUDFLARE_API_TOKEN']})
+          with urllib.request.urlopen(request, timeout=20) as response:
+              current = {route['pattern']: route.get('script') for route in json.load(response)['result']}
+          targets = {host + '/*' for host in ['mangahub.art', 'api.mangahub.art', 'auth.mangahub.art']}
+          for route in previous['routes']:
+              if route['pattern'] not in targets:
+                  assert current.get(route['pattern']) == route.get('script'), 'Unrelated source route changed'
+          assert all(current.get(pattern) == 'mangahub-standby-router' for pattern in targets)
+          print('All public router bindings verified; more-specific source routes unchanged')
+          PY
