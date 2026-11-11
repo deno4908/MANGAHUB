@@ -190,6 +190,10 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
         } catch { return Response.json({status:503}, {headers:{'Cache-Control':'no-store'}}); }
       }
       if (!HOSTS.includes(host)) return new Response('Not found', { status: 404 });
+      if (incoming.port) {
+        incoming.port='';
+        return new Response(null,{status:308,headers:{Location:incoming.href,'Cache-Control':'no-store'}});
+      }
       if ([FRONT, STANDBY].includes(host)) { const denied = denyOutsideVietnam(request); if (denied) return denied; }
       if (env.FAILOVER_ENABLED !== 'true') return publicResponse(await send(request), request);
       if (!env.STANDBY_ORIGIN_SECRET || !env.BACKUP_ORIGIN) return publicResponse(await send(request), request);
@@ -210,6 +214,11 @@ export function createStandbyWorker(send = fetch, now = Date.now) {
       let target = host === STANDBY ? (s.backup.ok === false && s.primary[FRONT]?.ok ? 'primary' : 'backup') : choose(s,host,b,env);
       if ([API, AUTH].includes(host) && request.headers.get('Origin') === 'https://' + STANDBY &&
           s.backup.ok && (s.backup.capacity || s.primary[host]?.ok === false)) target='backup';
+      const image = incoming.pathname.startsWith('/api/images/') ||
+        /^\/api\/manga\/(?:mangadex-cover|truyenqq\/(?:cover|image))\//.test(incoming.pathname);
+      // Keep warm image bytes at one origin while it is healthy. Splitting
+      // covers by API affinity would turn a cache hit into a cold source fetch.
+      if (host===API && image && s.primary[API]?.ok!==false) target='primary';
       function navigationRedirect(to) {
         const destination = new URL(incoming); destination.hostname=to;
         return publicResponse(new Response(null,{status:307,headers:{Location:destination.href,'Cache-Control':'private, no-store'}}),request,b);

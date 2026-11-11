@@ -4,9 +4,21 @@ import os
 import sys
 import urllib.request
 import urllib.error
+from pathlib import Path
 
 TARGETS = {host + '/*' for host in ('mangahub.art', 'api.mangahub.art', 'auth.mangahub.art', 'standby.mangahub.art')}
 ROUTER = 'mangahub-standby-router'
+
+
+def runtime_config(config, previous, operation):
+    owned=[{'pattern':r['pattern'],'zone_name':'mangahub.art'} for r in previous if r.get('script')==ROUTER]
+    if operation=='prepare' and any(r['pattern'] in TARGETS for r in owned):
+        raise ValueError('Refusing detached preparation while public standby routing is active')
+    tables=', '.join('{ pattern = '+json.dumps(r['pattern'])+', zone_name = "mangahub.art" }' for r in owned)
+    config=config.replace('routes = []','routes = ['+tables+']')
+    if operation=='activate':
+        config=config.replace('FAILOVER_ENABLED = "false"','FAILOVER_ENABLED = "true"').replace('BALANCE_ENABLED = "false"','BALANCE_ENABLED = "true"')
+    return config
 
 
 def api(path, value=None, method=None):
@@ -23,6 +35,12 @@ def main(operation):
     zone = api('zones?name=mangahub.art')[0]['id']
     route_path = f'zones/{zone}/workers/routes'
     previous = api(route_path)
+    if operation.startswith('config-'):
+        mode=operation.removeprefix('config-')
+        assert mode in {'prepare','activate'}
+        source=Path(__file__).with_name('wrangler-standby.toml')
+        source.with_name('standby-runtime.toml').write_text(runtime_config(source.read_text(),previous,mode))
+        return
     if operation=='probe':
         pattern='standby.mangahub.art/internal/router-probe*'
         row=next((r for r in previous if r['pattern']==pattern),None)

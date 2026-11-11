@@ -32,6 +32,8 @@ faster, or the primary is congested. Shares are intentionally bounded for a
 1 GB machine. No extra share is assigned with low memory, excessive load or
 more than eight active app requests. Actual primary outages take precedence.
 Two healthy samples are required to restore an origin previously marked down.
+Images retain the healthy Vercel origin to avoid fragmenting its warm cache;
+they still fall back to the VPS on a Vercel failure. Image quality is unchanged.
 
 GET/HEAD can be retried once at the other origin. Submitted writes are never
 automatically replayed: a lost response might follow an already committed
@@ -41,8 +43,8 @@ write. A request already in flight during an outage can still fail.
 
 `Manage adaptive standby router` is manual, with `inspect`, `prepare`,
 `activate` and `rollback` operations. Inspect does not change routing. Prepare
-deploys detached and verifies both origins. Do not run prepare on an already
-active router; deploy a tested active configuration instead. Activate verifies
+deploys detached and verifies both origins. Prepare refuses to detach an already
+active router. Activate retains its current routes while deploying, then verifies
 that all four hostnames are Cloudflare proxied and preserves the more-specific
 MangaDex source route. Rollback restores the existing country Worker on the
 primary frontend and removes this router's other public routes.

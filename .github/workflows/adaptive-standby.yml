@@ -29,7 +29,9 @@ jobs:
         with:
           node-version: '22'
       - name: Test routing and source access
-        run: node --test cloudflare/standby-worker.test.mjs cloudflare/truyenqq-edge.test.mjs
+        run: |
+          node --test cloudflare/standby-worker.test.mjs cloudflare/truyenqq-edge.test.mjs
+          python3 -m unittest discover -s cloudflare -p 'test_*.py'
       - name: Inspect public routing without disclosing origin addresses
         run: python3 cloudflare/manage-standby.py inspect
       - name: Prepare router configuration
@@ -37,13 +39,10 @@ jobs:
         run: |
           test -n "$STANDBY_ORIGIN_SECRET"
           umask 077
+          python3 cloudflare/manage-standby.py "config-$OPERATION"
           python3 - <<'PY'
           import json,os
           from pathlib import Path
-          cfg=Path('cloudflare/wrangler-standby.toml').read_text()
-          if os.environ['OPERATION']=='activate':
-              cfg=cfg.replace('FAILOVER_ENABLED = "false"','FAILOVER_ENABLED = "true"').replace('BALANCE_ENABLED = "false"','BALANCE_ENABLED = "true"')
-          Path('cloudflare/standby-runtime.toml').write_text(cfg)
           Path('/tmp/mh-standby-secret.json').write_text(json.dumps({'STANDBY_ORIGIN_SECRET':os.environ['STANDBY_ORIGIN_SECRET']}))
           PY
           npx --yes wrangler@4 secret bulk /tmp/mh-standby-secret.json --config cloudflare/standby-runtime.toml

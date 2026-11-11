@@ -210,3 +210,23 @@ test('private outage drill uses the standby without poisoning public health stat
   assert.deepEqual(await r.json(),{recovered:true,results:[{service:'api',status:200},{service:'auth',status:200}]});
   assert.equal(await(await f.worker.fetch(request(),env,f.ctx)).text(),'primary');await f.done();
 });
+
+test('the retired port redirects before contacting either origin',async()=>{
+  const f=setup();
+  const r=await f.worker.fetch(request('standby.mangahub.art:8443','/chapter/fixture?page=2'),env,f.ctx);
+  assert.equal(r.status,308);assert.equal(r.headers.get('Location'),'https://standby.mangahub.art/chapter/fixture?page=2');
+  assert.equal(f.calls.length,0);
+});
+
+for(const path of ['/api/images/img?url=fixture','/api/manga/mangadex-cover/fixture','/api/manga/truyenqq/cover/fixture'])
+test('healthy image origin retains its warm cache for '+path,async()=>{
+  const f=setup();await f.worker.fetch(request(),env,f.ctx);await f.done();f.calls.length=0;
+  const r=await f.worker.fetch(request('api.mangahub.art',path,{headers:{Cookie:'mh_route=00000000',Origin:'https://standby.mangahub.art'}}),env,f.ctx);
+  assert.equal(await r.text(),'primary');assert.equal(f.calls.length,1);
+});
+
+test('image routing still falls back when Vercel fails',async()=>{
+  const f=setup({handle:r=>new Response('image',{status:new URL(r.url).hostname==='api.mangahub.art'?503:200})});
+  const r=await f.worker.fetch(request('api.mangahub.art','/api/images/img?url=fixture'),env,f.ctx);
+  assert.equal(r.status,200);assert.equal(f.calls.length,2);await f.done();
+});
