@@ -52,6 +52,15 @@ export function needsSavedCover(value: unknown): boolean {
   return !usable(raw) || legacyCover(raw);
 }
 
+/** A migrated OTruyen save needs an exact QQ match before its old card is usable. */
+export function isLegacySavedManga(record: SavedRecord): boolean {
+  const id = savedMangaId(record);
+  if (normalizeMangaDexId(id) || record.source === 'uploaded' || record.is_user_upload) return false;
+  return record.legacy_source_record === true || record.source === 'otruyen' || Boolean(normalizeOTruyenObjectId(id))
+    || !/-\d+$/.test(id)
+    || legacyCover(String(record.manga_thumb || record.cover || record.cover_url || record.thumb || '').trim());
+}
+
 /** Load MangaDex covers through our image client; recover stale filenames by ID. */
 export function resolveSavedMangaCover(identifier: string, cover?: string, storedFallback?: string, coverSize?: 256 | 512): { primary: string; fallback: string } {
   const mangaDexId = normalizeMangaDexId(identifier);

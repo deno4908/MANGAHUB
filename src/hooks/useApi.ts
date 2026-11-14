@@ -18,7 +18,7 @@ import {
 } from "@/lib/api";
 import { useUserStore } from "@/store/userStore";
 import { useCanonicalMangaRecords } from "@/hooks/useCardMetadata";
-import { resolveSavedMangaCover } from "@/lib/savedManga";
+import { isLegacySavedManga, resolveSavedMangaCover } from "@/lib/savedManga";
 import {
   adaptMangaDetail,
   adaptListData,
@@ -642,6 +642,8 @@ export function useBookmarks() {
         const resolvedThumb = resolveThumbSources(item.manga_slug, item.manga_thumb, 256);
         return {
           ...item,
+          // Preserve source provenance before rebasing old OTruyen covers to QQ.
+          legacy_source_record: isLegacySavedManga(item),
           manga_thumb: resolvedThumb.primary,
           manga_thumb_fallback: resolvedThumb.fallback || "",
         };
@@ -653,7 +655,7 @@ export function useBookmarks() {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
-  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true, retainUnavailable: true, coverSize: 256 });
+  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true, retainUnavailable: true, hideUnmatchedLegacy: true, coverSize: 256 });
   return { ...query, data };
 }
 
@@ -755,6 +757,8 @@ export function useFollows() {
         const resolvedThumb = resolveThumbSources(item.manga_slug, item.manga_thumb, 256);
         return {
           ...item,
+          // Preserve source provenance before rebasing old OTruyen covers to QQ.
+          legacy_source_record: isLegacySavedManga(item),
           manga_thumb: resolvedThumb.primary,
           manga_thumb_fallback: resolvedThumb.fallback || "",
         };
@@ -766,7 +770,7 @@ export function useFollows() {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
-  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true, retainUnavailable: true, coverSize: 256 });
+  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true, retainUnavailable: true, hideUnmatchedLegacy: true, coverSize: 256 });
   return { ...query, data };
 }
 
@@ -909,6 +913,8 @@ export function useHistory(options: UseHistoryOptions = {}) {
         const resolvedThumb = resolveThumbSources(mangaSlug, preferredThumb, enrichThumbs ? 256 : undefined);
         return {
           ...item,
+          // Preserve source provenance before rebasing old OTruyen covers to QQ.
+          legacy_source_record: isLegacySavedManga(item),
           manga_thumb: resolvedThumb.primary,
           manga_thumb_fallback: resolvedThumb.fallback || "",
         };
@@ -931,7 +937,7 @@ export function useHistory(options: UseHistoryOptions = {}) {
     }
     return rows.sort((a, b) => historyTime(b) - historyTime(a));
   }, [query.data, localRecords]);
-  const data = useCanonicalMangaRecords(combined, { enabled, fillMissingCovers: enrichThumbs, refreshMetadata: enrichThumbs, requireQQMatch: true, retainUnavailable: true, coverSize: enrichThumbs ? 256 : undefined });
+  const data = useCanonicalMangaRecords(combined, { enabled, fillMissingCovers: enrichThumbs, refreshMetadata: enrichThumbs, requireQQMatch: true, retainUnavailable: true, hideUnmatchedLegacy: true, coverSize: enrichThumbs ? 256 : undefined });
   return { ...query, data };
 }
 

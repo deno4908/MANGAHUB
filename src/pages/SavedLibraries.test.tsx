@@ -31,7 +31,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 for (const Page of [BookmarksPage, FollowingPage, HistoryPage]) {
-  it(`${Page.name} renders saved QQ records immediately and keeps them after missing source metadata`, async () => {
+  it(`${Page.name} renders saved records immediately then hides only confirmed unmatched migrated OTruyen saves`, async () => {
     let finish!: (value: any) => void;
     const metadata = vi.spyOn(mangaApi, 'getCardMetadata').mockReturnValue(new Promise(resolve => { finish = resolve; }));
     const client = new QueryClient();
@@ -43,10 +43,13 @@ for (const Page of [BookmarksPage, FollowingPage, HistoryPage]) {
     await waitFor(() => expect(metadata).toHaveBeenCalled());
     await act(async () => finish({ items: Object.fromEntries(rows.map(row => [row.manga_slug, null])) }));
     await waitFor(() => expect(client.getQueryData(['manga', 'card-metadata', rows[0].manga_slug])).toBeNull());
-    for (const row of rows) expect(screen.getByText(row.manga_title)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(rows[1].manga_title)).not.toBeInTheDocument());
+    expect(screen.getByText(rows[0].manga_title)).toBeInTheDocument();
+    expect(rows).toHaveLength(2);
+    expect(screen.getByText('(1)')).toBeInTheDocument();
     if (Page === HistoryPage) {
       expect(screen.getByText(/Chapter 12.*73%/)).toBeInTheDocument();
-      expect(screen.getByText(/Chapter 6.*42%/)).toBeInTheDocument();
+      expect(screen.queryByText(/Chapter 6.*42%/)).not.toBeInTheDocument();
     }
     mounted.unmount();client.clear();
   });

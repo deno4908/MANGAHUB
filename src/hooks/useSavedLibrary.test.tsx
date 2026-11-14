@@ -51,7 +51,7 @@ it('refreshes stale covers with valid titles across bookmarks, follows and histo
   client.clear();
 });
 
-it('retains saved records on every private library when source matching returns no result', async () => {
+it('hides confirmed unmatched migrated saves across all private libraries without deleting saved records', async () => {
   const client = new QueryClient();
   const rows = [
     { manga_slug: 'hundred', manga_title: 'Chưa có tiêu đề', progress: 1, manga_thumb: 'old.jpg' },
@@ -71,12 +71,12 @@ it('retains saved records on every private library when source matching returns 
     wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
   });
   await waitFor(() => {
-    for (const query of result.current) expect(query.data?.map(row => row.manga_slug)).toEqual(rows.map(row => row.manga_slug));
+    for (const query of result.current) expect(query.data?.map(row => row.manga_slug)).toEqual(rows.slice(2).map(row => row.manga_slug));
   });
   await waitFor(() => expect(request).toHaveBeenCalledWith(expect.arrayContaining(['ma-kiem-si']), { 'ma-kiem-si': 'Ma Kiếm Sĩ' }));
   expect(rows).toHaveLength(5);
   expect(rows[0].progress).toBe(1);
-  for (const query of result.current) expect(query.data?.[2]).toMatchObject({ progress: 81, manga_slug: 'ma-kiem-si' });
+  for (const query of result.current) expect(query.data?.[0]).toMatchObject({ progress: 81, manga_slug: 'ma-kiem-si' });
   client.clear();
 });
 
@@ -134,7 +134,7 @@ it('starts bounded small-cover downloads while exact QQ matching and stale cover
     expect(query.data?.[0]).toMatchObject({ manga_slug: `mdx-${mdx}`, chapter_id: 'chapter', page: 7, progress: 62 });
   }
   await act(async () => finish());
-  await waitFor(() => { for (const query of result.current) expect(query.data).toHaveLength(8); });
+  await waitFor(() => { for (const query of result.current) expect(query.data).toHaveLength(7); });
   for (const query of result.current) expect(new URL(query.data![0].manga_thumb).searchParams.get('url')).toContain('fresh.jpg.256.jpg');
   expect(rows[0].manga_thumb).toContain('original.png');
   client.clear();
@@ -176,4 +176,37 @@ it('new QQ bookmarks, follows and saved reading progress stay visible through me
     expect(second.result.current.history.data?.[0]).toMatchObject({ chapter_id: row.chapter_id, page: 8, progress: 73 });
   });
   second.unmount();freshClient.clear();
+});
+
+
+it('keeps pending and failed legacy lookups, native QQ, MangaDex and uploads while hiding confirmed missing OTruyen IDs', async () => {
+  const client = new QueryClient();
+  const rows = [
+    { manga_slug: 'legacy-confirmed', manga_title: 'Legacy confirmed', progress: 80 },
+    { manga_slug: 'legacy-network', manga_title: 'Legacy network', progress: 60 },
+    { manga_slug: '65b1234567890abcdef12345', manga_title: 'Missing Mongo Save', progress: 40 },
+    { manga_slug: 'legacy-volume-2', manga_title: 'Legacy Volume', manga_thumb: 'https://img.otruyenapi.com/uploads/comics/old.jpg', progress: 20 },
+    { manga_slug: 'native-qq-123', manga_title: 'Native QQ', manga_thumb: '/api/manga/truyenqq/cover/native-qq-123' },
+    { manga_slug: mdx, manga_title: 'MangaDex' },
+    { manga_slug: 'my-upload', manga_title: 'Upload', source: 'uploaded' },
+  ];
+  vi.spyOn(bookmarkApi, 'getAll').mockResolvedValue({ bookmarks: rows });
+  vi.spyOn(followApi, 'getAll').mockResolvedValue({ follows: rows });
+  vi.spyOn(historyApi, 'getAll').mockResolvedValue({ history: rows });
+  let finish!: (value: any) => void;
+  const pending = new Promise(resolve => { finish = resolve; });
+  const metadata = vi.spyOn(mangaApi, 'getCardMetadata').mockReturnValue(pending as any);
+  const { result, unmount } = renderHook(() => [useBookmarks(), useFollows(), useHistory()], {
+    wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+  });
+  await waitFor(() => { for (const query of result.current) expect(query.data).toHaveLength(rows.length); });
+  await waitFor(() => expect(metadata).toHaveBeenCalled());
+  // Omitted IDs represent temporary failures, rather than a confirmed absence.
+  await act(async () => finish({ items: { 'legacy-confirmed': null, 'missing-mongo-save': null,
+    'legacy-volume-2': null, 'native-qq-123': null, [mdx]: null } }));
+  await waitFor(() => { for (const query of result.current) expect(query.data?.map(row => row.manga_slug))
+    .toEqual(['legacy-network', 'native-qq-123', mdx, 'my-upload']); });
+  expect(rows).toHaveLength(7);
+  expect(rows[0].progress).toBe(80);
+  unmount();client.clear();
 });

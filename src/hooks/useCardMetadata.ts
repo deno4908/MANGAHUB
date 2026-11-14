@@ -4,7 +4,7 @@ import type { Manga } from '@/types/manga';
 import { normalizeMangaDexId } from '@/lib/mangaLinks';
 import { applyCardMetadata, isLegacyQQIdentifier, needsCanonicalTitle, requestCardMetadata } from '@/lib/cardMetadata';
 import { thumbUrl } from '@/lib/adapters';
-import { needsSavedCover, resolveSavedMangaCover, savedMangaId, savedMangaLookupId, savedMangaTitleHint } from '@/lib/savedManga';
+import { isLegacySavedManga, needsSavedCover, resolveSavedMangaCover, savedMangaId, savedMangaLookupId, savedMangaTitleHint } from '@/lib/savedManga';
 
 const metadataOptions = (id: string, client: QueryClient, title?: string) => queryOptions({
   queryKey: ['manga', 'card-metadata', id],
@@ -40,13 +40,14 @@ type SavedMetadataOptions = {
   requireQQMatch?: boolean;
   refreshMetadata?: boolean;
   retainUnavailable?: boolean;
+  hideUnmatchedLegacy?: boolean;
   coverSize?: 256 | 512;
 };
 const recordId = savedMangaId;
 
 /** Saved cards share the same batched metadata and never rewrite saved IDs or reading progress. */
 export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | undefined,
-  { enabled = true, fillMissingCovers = false, requireQQMatch = false, refreshMetadata = false, retainUnavailable = false, coverSize }: SavedMetadataOptions = {}): T[] | undefined {
+  { enabled = true, fillMissingCovers = false, requireQQMatch = false, refreshMetadata = false, retainUnavailable = false, hideUnmatchedLegacy = false, coverSize }: SavedMetadataOptions = {}): T[] | undefined {
   const client = useQueryClient();
   const ids = useMemo(() => enabled ? [...new Set((records || []).filter(record => {
     const id = savedMangaLookupId(record);
@@ -69,6 +70,10 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
     if (!records) return records;
     const byId = new Map(ids.map((id, index) => [id, metadata[index]]));
     return records.filter(record => {
+      // Only an explicit negative result hides migrated saves. Pending queries,
+      // omitted results and source/network errors keep the library available.
+      if (enabled && hideUnmatchedLegacy && isLegacySavedManga(record)
+          && byId.get(savedMangaLookupId(record)) === null) return false;
       if (retainUnavailable || record.source === 'uploaded' || record.is_user_upload) return true;
       const id = recordId(record);
       const mustMatch = requireQQMatch && enabled &&
@@ -107,5 +112,5 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
       }
       return next as T;
     });
-  }, [records, ids, metadata, fillMissingCovers, requireQQMatch, enabled, refreshMetadata, retainUnavailable, coverSize]);
+  }, [records, ids, metadata, fillMissingCovers, requireQQMatch, enabled, refreshMetadata, retainUnavailable, hideUnmatchedLegacy, coverSize]);
 }
