@@ -45,6 +45,9 @@ def main(operation):
         pattern='standby.mangahub.art/internal/router-probe*'
         row=next((r for r in previous if r['pattern']==pattern),None)
         assert not row or row.get('script') in {None,ROUTER}
+        if row and row.get('script')==ROUTER:
+            print('Credential-protected operator probe already installed')
+            return
         api(route_path+('/'+row['id'] if row else ''),{'pattern':pattern,'script':ROUTER},'PUT' if row else 'POST')
         print('Installed credential-protected operator probe only')
         return

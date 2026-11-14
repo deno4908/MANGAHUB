@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import tomllib
 import unittest
+from unittest.mock import patch
 
 spec=importlib.util.spec_from_file_location('standby_routes',Path(__file__).with_name('manage-standby.py'))
 routes=importlib.util.module_from_spec(spec)
@@ -27,6 +28,17 @@ class DeploymentRoutingTests(unittest.TestCase):
     def test_first_activation_leaves_country_worker_for_the_verified_transfer(self):
         value=tomllib.loads(routes.runtime_config(self.cfg,[{'pattern':'mangahub.art/*','script':'mangahub-vn-only'}],'activate'))
         self.assertEqual(value['routes'],[])
+
+    def test_existing_operator_probe_is_not_rewritten_during_a_live_update(self):
+        calls=[]
+        def api(path, value=None, method=None):
+            calls.append((path,value,method))
+            return [{'id':'zone'}] if path.startswith('zones?') else [
+                {'id':'existing','pattern':'standby.mangahub.art/internal/router-probe*','script':routes.ROUTER}]
+        with patch.object(routes,'api',api):
+            routes.main('probe')
+        self.assertEqual(len(calls),2)
+        self.assertTrue(all(value is None and method is None for _,value,method in calls))
 
 
 if __name__=='__main__':
