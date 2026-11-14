@@ -270,9 +270,9 @@ const PublicProfilePage = () => {
   });
   const rawActivity = data?.activity || {};
   const activity = {
-    following: useCanonicalMangaRecords(rawActivity.following, { fillMissingCovers: true }) || [],
-    history: useCanonicalMangaRecords(rawActivity.history, { fillMissingCovers: true }) || [],
-    comments: useCanonicalMangaRecords(rawActivity.comments, { fillMissingCovers: true }) || [],
+    following: useCanonicalMangaRecords(rawActivity.following, { fillMissingCovers: true, retainUnavailable: true }) || [],
+    history: useCanonicalMangaRecords(rawActivity.history, { fillMissingCovers: true, retainUnavailable: true }) || [],
+    comments: useCanonicalMangaRecords(rawActivity.comments, { fillMissingCovers: true, retainUnavailable: true }) || [],
   };
 
   if (isLoading) {

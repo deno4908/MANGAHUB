@@ -286,3 +286,61 @@ test('a primary callback stays on its starting frontend even when standby is pre
   const r=await f.worker.fetch(request('mangahub.art','/auth/callback?code=fixture',{headers:{accept:'text/html','CF-Connecting-IP':'192.0.2.10'}}),pinned,f.ctx);
   assert.equal(r.status,200);assert.equal(r.headers.get('Location'),null);
 });
+
+function redirectCookies(response) {
+  return response.headers.getSetCookie().map(cookie => cookie.split(';')[0]).join('; ');
+}
+
+test('different isolates cannot bounce a reader back after an outage redirect, including old affinity cookies',async()=>{
+  const source=setup({primary:false}), destination=setup();
+  const first=await source.worker.fetch(request('mangahub.art','/manga/book-123?chapter=4',
+    {headers:{accept:'text/html',cookie:'mh_route=00000000'}}),env,source.ctx);
+  await source.done();
+  // A cold first GET can discover the outage on its actual read instead of a probe.
+  const redirect=first.status===307?first:await source.worker.fetch(request('mangahub.art','/manga/book-123?chapter=4',
+    {headers:{accept:'text/html',cookie:'mh_route=00000000'}}),env,source.ctx);
+  assert.equal(redirect.status,307);
+  const cookies='mh_route=00000000; '+redirectCookies(redirect);
+  const second=await destination.worker.fetch(request('standby.mangahub.art','/manga/book-123?chapter=4',
+    {headers:{accept:'text/html',cookie:cookies}}),env,destination.ctx);
+  assert.equal(second.status,200);assert.equal(await second.text(),'backup');
+  assert.equal(second.headers.get('Location'),null);await destination.done();
+});
+
+test('return to primary is honored by an isolate that still considers standby faster',async()=>{
+  const source=setup(), destination=setup({latency:{primary:1000,backup:1}});
+  const redirect=await source.worker.fetch(request('standby.mangahub.art','/manga/book-123',
+    {headers:{accept:'text/html'}}),env,source.ctx);
+  assert.equal(redirect.status,307);
+  await destination.worker.fetch(request(),env,destination.ctx);await destination.done();
+  const second=await destination.worker.fetch(request('mangahub.art','/manga/book-123',
+    {headers:{accept:'text/html',cookie:'mh_route=00000000; '+redirectCookies(redirect)}}),env,destination.ctx);
+  assert.equal(second.status,200);assert.equal(await second.text(),'primary');
+});
+
+test('a leased primary still fails over on a real read error without replaying writes',async()=>{
+  const source=setup();
+  const redirect=await source.worker.fetch(request('standby.mangahub.art','/manga/book-123',
+    {headers:{accept:'text/html'}}),env,source.ctx);
+  const destination=setup({handle:r=>new Response('page',{status:new URL(r.url).hostname==='mangahub.art'?503:200})});
+  const second=await destination.worker.fetch(request('mangahub.art','/manga/book-123',
+    {headers:{accept:'text/html',cookie:redirectCookies(redirect)}}),env,destination.ctx);
+  assert.equal(second.status,307);assert.equal(new URL(second.headers.get('Location')).hostname,'standby.mangahub.art');
+  const final=await source.worker.fetch(request('standby.mangahub.art','/manga/book-123',
+    {headers:{accept:'text/html',cookie:redirectCookies(second)}}),env,source.ctx);
+  assert.equal(final.status,200);await destination.done();await source.done();
+});
+
+test('route decisions expire automatically and invalid routing cookies do not grant a lease',async()=>{
+  const f=setup({latency:{primary:1000,backup:1}});
+  const page=await f.worker.fetch(request('standby.mangahub.art','/',{headers:{accept:'text/html'}}),env,f.ctx);
+  const cookie=redirectCookies(page);
+  const destination=setup();destination.tick(10_000); // Align the independent fake clock after simulated probes.
+  let r=await destination.worker.fetch(request('standby.mangahub.art','/',{headers:{accept:'text/html',cookie}}),env,destination.ctx);
+  assert.equal(r.status,200);
+  destination.tick(121_000);
+  r=await destination.worker.fetch(request('standby.mangahub.art','/',{headers:{accept:'text/html',cookie}}),env,destination.ctx);
+  assert.equal(r.status,307);
+  r=await destination.worker.fetch(request('standby.mangahub.art','/',{headers:{accept:'text/html',cookie:cookie.replace(/.$/,'z')}}),env,destination.ctx);
+  assert.equal(r.status,307);await f.done();await destination.done();
+});

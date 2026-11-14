@@ -6,9 +6,30 @@ const HOSTS = [FRONT, API, AUTH, STANDBY];
 const SAFE = method => ['GET', 'HEAD'].includes(method);
 const FAILED = status => [500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526].includes(status);
 const TTL = 30_000;
+const FRONTEND_LEASE = 120_000;
 
 export function createStandbyWorker(send = fetch, now = Date.now, countryGate = denyOutsideVietnam) {
   const regions = new Map();
+  const encoder = new TextEncoder();
+  async function routeSignature(value, secret) {
+    const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const signature = await crypto.subtle.sign('HMAC', key, encoder.encode('frontend-route:' + value));
+    return [...new Uint8Array(signature)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+  async function frontendLease(request, env) {
+    const value = request.headers.get('Cookie')?.match(/(?:^|;\s*)mh_front_route=([pb]\.\d+\.[a-f0-9]{64})(?:;|$)/)?.[1];
+    if (!value) return null;
+    const [provider, expires, signature] = value.split('.');
+    if (Number(expires) <= now() || Number(expires) > now() + FRONTEND_LEASE + 5000) return null;
+    if (signature !== await routeSignature(provider + '.' + expires, env.STANDBY_ORIGIN_SECRET)) return null;
+    return provider === 'b' ? 'backup' : 'primary';
+  }
+  async function rememberFrontend(response, target, env) {
+    const value = (target === 'backup' ? 'b' : 'p') + '.' + (now() + FRONTEND_LEASE);
+    response.headers.append('Set-Cookie', `mh_front_route=${value}.${await routeSignature(value, env.STANDBY_ORIGIN_SECRET)}; Domain=mangahub.art; Path=/; Max-Age=120; Secure; HttpOnly; SameSite=Lax`);
+    response.headers.set('Cache-Control', 'private, no-store');
+    return response;
+  }
   function state(request) {
     const colo = request.cf?.colo || 'unknown';
     if (!regions.has(colo)) {
@@ -262,6 +283,7 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       const frontend = [FRONT, STANDBY].includes(host);
       const navigation = frontend && SAFE(request.method) && request.headers.get('accept')?.includes('text/html') &&
         !incoming.pathname.startsWith('/assets/') && !incoming.pathname.startsWith('/api/');
+      const lease = navigation ? await frontendLease(request, env) : null;
       let target = host === STANDBY ? (standbyFrontendEligible(s,b,env)?'backup':'primary') : choose(s,host,b,env);
       if (host===FRONT) {
         if (!standbyFrontendEligible(s,b,env)) target='primary';
@@ -271,6 +293,10 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
         // host's protected PKCE cookie, including a standby-to-primary return.
         if (incoming.pathname==='/auth/callback' && s.primary[FRONT]?.ok!==false) target='primary';
       }
+      // Health and latency samples are local to an isolate. Carry a short,
+      // signed decision across domains so a different isolate cannot reverse
+      // the redirect immediately. Actual origin errors can still fail over.
+      if (lease) target = lease;
       if ([API, AUTH].includes(host) && request.headers.get('Origin') === 'https://' + STANDBY &&
           s.backup.ok && (s.backup.capacity || s.primary[host]?.ok === false)) target='backup';
       const image = incoming.pathname.startsWith('/api/images/') ||
@@ -278,9 +304,9 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       // Keep warm image bytes at one origin while it is healthy. Splitting
       // covers by API affinity would turn a cache hit into a cold source fetch.
       if (host===API && image && s.primary[API]?.ok!==false) target='primary';
-      function navigationRedirect(to) {
+      async function navigationRedirect(to) {
         const destination = new URL(incoming); destination.hostname=to;
-        return publicResponse(new Response(null,{status:307,headers:{Location:destination.href,'Cache-Control':'private, no-store'}}),request,b);
+        return rememberFrontend(publicResponse(new Response(null,{status:307,headers:{Location:destination.href,'Cache-Control':'private, no-store'}}),request,b),to===STANDBY?'backup':'primary',env);
       }
       if (navigation && ((host === FRONT && target === 'backup') || (host === STANDBY && target === 'primary'))) {
         return navigationRedirect(target === 'backup' ? STANDBY : FRONT);
@@ -296,7 +322,8 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       if (response && (!FAILED(response.status) || sourceFailure || !SAFE(request.method))) {
         if (response.status === 429 && !sourceFailure) s.busyUntil = now() + TTL;
         if (host === FRONT && target === 'primary' && response.ok) s.primary[FRONT] = { ...s.primary[FRONT], ok: true };
-        return publicResponse(response, request, b);
+        const result = publicResponse(response, request, b);
+        return navigation && response.ok && !lease ? rememberFrontend(result,target,env) : result;
       }
       const alternative = target === 'primary' ? 'backup' : 'primary';
       // A previous negative health sample is advisory for a fresh read error:

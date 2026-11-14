@@ -63,8 +63,8 @@ function resolveThumbSources(slug?: string, thumb?: string, size?: 256 | 512): {
   return resolveSavedMangaCover(String(slug || ''), thumb, undefined, size);
 }
 
-// Overlap bounded cover downloads with metadata refresh; source matching still
-// decides which records are displayed, including legacy QQ migrations.
+// Overlap bounded cover downloads with background metadata refresh. Saved
+// library rows remain visible even when the source lookup is unavailable.
 function warmLibraryCovers(items: Array<Record<string, any>>, signal: AbortSignal) {
   const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
   if (signal.aborted || document.hidden || connection?.saveData || /(^|-)2g$/.test(connection?.effectiveType || '')) return;
@@ -653,7 +653,7 @@ export function useBookmarks() {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
-  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true, coverSize: 256 });
+  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true, retainUnavailable: true, coverSize: 256 });
   return { ...query, data };
 }
 
@@ -766,7 +766,7 @@ export function useFollows() {
     ...USER_DATA_QUERY_OPTIONS,
     placeholderData: (previousData) => previousData,
   });
-  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true, coverSize: 256 });
+  const data = useCanonicalMangaRecords(query.data, { enabled: isLoggedIn && !!user && !isRestoringSession, fillMissingCovers: true, refreshMetadata: true, requireQQMatch: true, retainUnavailable: true, coverSize: 256 });
   return { ...query, data };
 }
 
@@ -931,7 +931,7 @@ export function useHistory(options: UseHistoryOptions = {}) {
     }
     return rows.sort((a, b) => historyTime(b) - historyTime(a));
   }, [query.data, localRecords]);
-  const data = useCanonicalMangaRecords(combined, { enabled, fillMissingCovers: enrichThumbs, refreshMetadata: enrichThumbs, requireQQMatch: true, coverSize: enrichThumbs ? 256 : undefined });
+  const data = useCanonicalMangaRecords(combined, { enabled, fillMissingCovers: enrichThumbs, refreshMetadata: enrichThumbs, requireQQMatch: true, retainUnavailable: true, coverSize: enrichThumbs ? 256 : undefined });
   return { ...query, data };
 }
 
