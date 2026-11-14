@@ -31,14 +31,14 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 for (const Page of [BookmarksPage, FollowingPage, HistoryPage]) {
-  it(`${Page.name} renders saved records immediately then hides only confirmed unmatched migrated OTruyen saves`, async () => {
+  it(`${Page.name} renders native QQ immediately and excludes unverified retired OTruyen records`, async () => {
     let finish!: (value: any) => void;
     const metadata = vi.spyOn(mangaApi, 'getCardMetadata').mockReturnValue(new Promise(resolve => { finish = resolve; }));
     const client = new QueryClient();
     const mounted = render(<QueryClientProvider client={client}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Page /></MemoryRouter></QueryClientProvider>);
     // A source lookup may be pending for seconds; saved content is already usable.
     await screen.findByText(rows[0].manga_title);
-    expect(screen.getByText(rows[1].manga_title)).toBeInTheDocument();
+    expect(screen.queryByText(rows[1].manga_title)).not.toBeInTheDocument();
     expect(screen.getByText(rows[0].manga_title).closest('a')).toHaveAttribute('href', '/manga/native-book-123');
     await waitFor(() => expect(metadata).toHaveBeenCalled());
     await act(async () => finish({ items: Object.fromEntries(rows.map(row => [row.manga_slug, null])) }));

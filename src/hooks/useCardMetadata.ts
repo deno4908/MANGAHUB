@@ -70,10 +70,10 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
     if (!records) return records;
     const byId = new Map(ids.map((id, index) => [id, metadata[index]]));
     return records.filter(record => {
-      // Only an explicit negative result hides migrated saves. Pending queries,
-      // omitted results and source/network errors keep the library available.
+      // Retired OTruyen records are usable only after an exact QQ match.
+      // Resolve them in the background while native QQ/MDX/uploaded saves stay visible.
       if (enabled && hideUnmatchedLegacy && isLegacySavedManga(record)
-          && byId.get(savedMangaLookupId(record)) === null) return false;
+          && !byId.get(savedMangaLookupId(record))) return false;
       if (retainUnavailable || record.source === 'uploaded' || record.is_user_upload) return true;
       const id = recordId(record);
       const mustMatch = requireQQMatch && enabled &&
