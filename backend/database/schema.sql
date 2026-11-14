@@ -129,8 +129,8 @@ CREATE TABLE IF NOT EXISTS reading_history (
     manga_slug VARCHAR(255) NOT NULL,
     manga_title VARCHAR(500) DEFAULT '',
     manga_thumb TEXT DEFAULT '',
-    chapter_id VARCHAR(100) NOT NULL,       -- OTruyen chapter _id
-    chapter_name VARCHAR(100) DEFAULT '',   -- e.g. "671"
+    chapter_id TEXT NOT NULL,              -- source chapter ID/token, including long QQ slugs
+    chapter_name TEXT DEFAULT '',          -- e.g. "671", or a source chapter title
     page INTEGER DEFAULT 0,
     progress DECIMAL(5,2) DEFAULT 0,        -- 0-100
     read_at TIMESTAMPTZ DEFAULT NOW(),

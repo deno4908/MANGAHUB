@@ -95,7 +95,6 @@ export function useReaderProgress(options: Options) {
 
   useEffect(() => {
     if (!viewer || !options.manga || !options.chapter || !options.totalPages || !ready) return;
-    const started = Date.now();
     const identity = { ...values.current };
     let lastPosition = '';
     let snapshot: ReadingHistory | undefined;
@@ -110,7 +109,10 @@ export function useReaderProgress(options: Options) {
       const height = document.documentElement.scrollHeight - window.innerHeight;
       const progress = current.mode === 'horizontal' ? ((position.page + 1) / current.totalPages) * 100
         : height > 0 ? window.scrollY / height * 100 : 0;
-      if (Date.now() - started < 8_000 && progress < (current.totalPages <= 2 ? 1 : 5) && position.page < 1) return;
+      // Once history has answered, a first-page visit is still reading history.
+      // A failed lookup must not overwrite a remote checkpoint at page zero
+      // until the reader actually interacts with the chapter.
+      if (history.isError && interacted !== key && position.page === 0) return;
       const signature = `${position.page}:${position.pageOffset.toFixed(3)}:${Math.round(progress)}`;
       if (signature === lastPosition) return;
       lastPosition = signature;
@@ -147,7 +149,7 @@ export function useReaderProgress(options: Options) {
       document.removeEventListener('visibilitychange', visibility);
       flush(true);
     };
-  }, [viewer, key, options.totalPages, ready, client]);
+  }, [viewer, key, options.totalPages, ready, client, history.isError, interacted]);
   useEffect(() => { captureCurrent.current(); }, [options.currentPage, key]);
   return history;
 }

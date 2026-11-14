@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, memo } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { getMangaDexImageFallback } from '@/lib/mangaDexImages';
+import { fetchImageResponse, isProtectedImage } from '@/lib/imageTransport';
 
 interface ReaderImageProps {
   src: string;
@@ -13,154 +14,131 @@ interface ReaderImageProps {
   fallbackSrc?: string;
 }
 
+const RETRY_DELAYS = [1000, 2000, 4000, 8000];
+const MIN_RECOVERY_MS = 30_000;
+const RECOVERY_DEADLINE_MS = 60_000;
+
 const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, priority = false, fallbackSrc }: ReaderImageProps) => {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
+  const [waiting, setWaiting] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const [cycle, setCycle] = useState(0);
   const [inView, setInView] = useState(priority);
   const [visible, setVisible] = useState(priority);
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
-  const [useFallbackSource, setUseFallbackSource] = useState(false);
+  const [download, setDownload] = useState<{ key: string; url: string }>();
   const imgRef = useRef<HTMLDivElement>(null);
+  const began = useRef(0);
   const onVisibleRef = useRef(onVisible);
   onVisibleRef.current = onVisible;
 
   useEffect(() => {
     const el = imgRef.current;
     if (!el) return;
-
-    const preloadObserver = new IntersectionObserver(
-      ([entry]) => { if (entry.isIntersecting) setInView(true); },
-      { rootMargin: '1000px 0px', threshold: 0 }
-    );
-
-    const visibleObserver = new IntersectionObserver(
-      ([entry]) => {
-        setVisible(entry.isIntersecting);
-        if (entry.isIntersecting) onVisibleRef.current?.(index);
-      },
-      { rootMargin: '0px', threshold: 0.05 }
-    );
-
-    preloadObserver.observe(el);
-    visibleObserver.observe(el);
-    return () => { preloadObserver.disconnect(); visibleObserver.disconnect(); };
+    if (typeof IntersectionObserver === 'undefined') { setInView(true);setVisible(true);return; }
+    const preload = new IntersectionObserver(([entry]) => { if (entry.isIntersecting) setInView(true); },
+      { rootMargin: '1000px 0px', threshold: 0 });
+    const viewport = new IntersectionObserver(([entry]) => {
+      setVisible(entry.isIntersecting);
+      if (entry.isIntersecting) onVisibleRef.current?.(index);
+    }, { rootMargin: '0px', threshold: .05 });
+    preload.observe(el);viewport.observe(el);
+    return () => { preload.disconnect();viewport.disconnect(); };
   }, [index]);
 
   useEffect(() => {
-    setLoaded(false);
-    setError(false);
-    setRetryCount(0);
-    setNaturalSize(null);
-    setUseFallbackSource(false);
-  }, [src]);
+    began.current = 0;
+    setLoaded(false);setError(false);setWaiting(false);setAttempt(0);setNaturalSize(null);
+  }, [src, cycle]);
 
-  const fitClass =
-    imageFit === 'width' ? 'block w-full h-auto' :
-    imageFit === 'height' ? 'block max-h-screen max-w-full w-auto h-auto mx-auto object-contain' :
-    'block max-w-full h-auto mx-auto';
+  const fallback = fallbackSrc || getMangaDexImageFallback(src);
+  const activeSrc = attempt % 2 === 1 && fallback && fallback !== src ? fallback : src;
+  const retry = cycle * (RETRY_DELAYS.length + 1) + attempt;
+  const url = retry ? `${activeSrc}${activeSrc.includes('?') ? '&' : '?'}retry=${retry}` : activeSrc;
+  const key = `${src}:${cycle}:${attempt}`;
+  const managed = isProtectedImage(activeSrc) && typeof URL.createObjectURL === 'function';
+  const failed = useCallback(() => { setLoaded(false);setWaiting(true); }, []);
 
-  const handleRetry = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    setLoaded(false);
-    setError(false);
-    setUseFallbackSource(false);
-    setRetryCount(r => r + 1);
-  }, []);
+  // Own proxies need the verified website token and QQ relay recovery. Native
+  // CDN URLs remain ordinary images, preserving their direct download speed.
+  useEffect(() => {
+    if (!inView || error || waiting || !managed) return;
+    const controller = new AbortController();
+    let disposed = false, objectUrl: string | undefined;
+    void (async () => {
+      try {
+        const response = await fetchImageResponse(url, { signal: controller.signal, priority: visible || priority ? 'high' : 'auto' });
+        if (!response.ok || !response.headers.get('Content-Type')?.startsWith('image/')) throw new Error('Image unavailable');
+        const blob = await response.blob();
+        if (disposed || !blob.size) { if (!disposed) failed();return; }
+        objectUrl = URL.createObjectURL(blob);
+        setDownload({ key, url: objectUrl });
+      } catch { if (!disposed) failed(); }
+    })();
+    return () => { disposed = true;controller.abort();if (objectUrl) URL.revokeObjectURL(objectUrl); };
+    // Visibility only sets the priority at acquisition. Scrolling must not
+    // cancel an image that is already downloading or revoke a decoded image.
+  }, [key, inView, managed, error, waiting, url, failed]);
 
-  const handleLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
-    const img = e.currentTarget;
-    setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
-    setLoaded(true);
-  }, []);
-
-  const fallbackSource = fallbackSrc || getMangaDexImageFallback(src);
-  const hasExplicitFallback = Boolean(fallbackSrc);
-  const isTruyenQQProxy = /\/api\/manga\/truyenqq\/image\//.test(src);
-  const activeSrc = useFallbackSource && fallbackSource ? fallbackSource : src;
-  const imgSrc = retryCount > 0 ? `${activeSrc}${activeSrc.includes('?') ? '&' : '?'}retry=${retryCount}` : activeSrc;
+  useEffect(() => {
+    if (!inView || loaded || error || waiting) return;
+    const timer = window.setTimeout(failed, /\/truyenqq\/image\//.test(activeSrc) ? 25_000 : 18_000);
+    return () => window.clearTimeout(timer);
+  }, [key, activeSrc, inView, loaded, error, waiting, failed]);
 
   useEffect(() => {
     if (!inView || loaded || error) return;
-    const timeout = window.setTimeout(() => {
-      if (!useFallbackSource && fallbackSource) {
-        setUseFallbackSource(true);
-        setRetryCount(0);
-        return;
-      }
-      if (retryCount < 2) {
-        setRetryCount((count) => count + 1);
-        return;
-      }
-      setError(true);
-    // The QQ proxy may try another CDN before responding. Give that request
-    // time to finish instead of aborting it with a new URL every five seconds.
-    }, isTruyenQQProxy
-      ? 25_000
-      : useFallbackSource
-      ? 18_000
-      : hasExplicitFallback
-        ? (visible ? 8_000 : priority ? 10_000 : 12_000)
-        : visible
-          ? 5_000
-          : priority
-            ? 6_500
-            : 8_000);
-    return () => window.clearTimeout(timeout);
-  }, [inView, visible, loaded, error, useFallbackSource, fallbackSource, retryCount, priority, hasExplicitFallback, isTruyenQQProxy]);
+    if (!began.current) began.current = Date.now();
+    const elapsed = Date.now() - began.current;
+    const timer = window.setTimeout(() => setError(true), Math.max(0, RECOVERY_DEADLINE_MS - elapsed));
+    return () => window.clearTimeout(timer);
+  }, [inView, loaded, error, cycle, src]);
 
-  const placeholderStyle: React.CSSProperties = naturalSize
-    ? { aspectRatio: `${naturalSize.w}/${naturalSize.h}` }
-    : { aspectRatio: '2/3' };
+  useEffect(() => {
+    if (!waiting || error || !inView) return;
+    const delay = attempt < RETRY_DELAYS.length ? RETRY_DELAYS[attempt]
+      : Math.max(0, MIN_RECOVERY_MS - (Date.now() - began.current));
+    const timer = window.setTimeout(() => {
+      if (navigator.onLine === false || document.visibilityState === 'hidden') return;
+      if (attempt >= RETRY_DELAYS.length || Date.now() - began.current >= RECOVERY_DEADLINE_MS) setError(true);
+      else { setAttempt(value => value + 1);setWaiting(false); }
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [waiting, error, inView, attempt, cycle]);
 
-  const containerStyle: React.CSSProperties = {
-    marginBottom: `${pageGap}px`,
-  };
+  useEffect(() => {
+    const recover = () => {
+      if (!loaded && inView && navigator.onLine !== false && document.visibilityState !== 'hidden') setCycle(value => value + 1);
+    };
+    window.addEventListener('online', recover);
+    document.addEventListener('visibilitychange', recover);
+    return () => { window.removeEventListener('online', recover);document.removeEventListener('visibilitychange', recover); };
+  }, [loaded, inView]);
+
+  const fitClass = imageFit === 'width' ? 'block w-full h-auto' : imageFit === 'height'
+    ? 'block max-h-screen max-w-full w-auto h-auto mx-auto object-contain' : 'block max-w-full h-auto mx-auto';
+  const placeholder = { aspectRatio: naturalSize ? `${naturalSize.w}/${naturalSize.h}` : '2/3' };
+  const imageSrc = managed ? download?.key === key ? download.url : undefined : url;
 
   return (
-    <div ref={imgRef} data-reader-page={index} style={containerStyle} className="relative w-full min-w-0 max-w-full overflow-hidden">
-      {!loaded && !error && (
-        <div className={`flex w-full items-center justify-center bg-secondary/50 ${inView || priority ? 'animate-pulse' : ''}`} style={placeholderStyle}>
-          <div className="text-muted-foreground text-xs font-medium">Trang {index + 1}</div>
-        </div>
-      )}
-
-      {error ? (
-        <div className="w-full bg-secondary/30 flex flex-col items-center justify-center gap-3 border border-border rounded-lg" style={placeholderStyle}>
-          <p className="text-muted-foreground text-sm">Không thể tải ảnh</p>
-          <button
-            onClick={handleRetry}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-bold hover:opacity-90 transition-opacity"
-          >
-            <RefreshCw className="w-4 h-4" /> Thử lại
-          </button>
-        </div>
-      ) : (inView || priority) ? (
-        <img
-          src={imgSrc}
-          alt={alt}
-          className={`${fitClass} select-none ${loaded ? '' : 'invisible absolute'}`}
-          loading="eager"
-          decoding="async"
-          fetchPriority={visible || priority ? 'high' : 'auto'}
-          referrerPolicy="no-referrer"
-          draggable={false}
-          onLoad={handleLoad}
-          onError={() => {
-            if (!useFallbackSource && fallbackSource) {
-              setUseFallbackSource(true);
-              setLoaded(false);
-              setRetryCount(0);
-              return;
-            }
-            setError(true);
-          }}
-        />
-      ) : null}
+    <div ref={imgRef} data-reader-page={index} style={{ marginBottom: `${pageGap}px` }} className="relative w-full min-w-0 max-w-full overflow-hidden">
+      {!loaded && !error && <div className={`flex w-full items-center justify-center bg-secondary/50 ${inView ? 'animate-pulse' : ''}`} style={placeholder}>
+        <div className="text-muted-foreground text-xs font-medium">Trang {index + 1}</div>
+      </div>}
+      {error ? <div className="w-full bg-secondary/30 flex flex-col items-center justify-center gap-3 border border-border rounded-lg" style={placeholder}>
+        <p className="text-muted-foreground text-sm">Không thể tải ảnh</p>
+        <button onClick={event => { event.stopPropagation();setCycle(value => value + 1); }}
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-bold hover:opacity-90 transition-opacity">
+          <RefreshCw className="w-4 h-4" /> Thử lại
+        </button>
+      </div> : inView && !waiting && imageSrc ? <img key={key} src={imageSrc} alt={alt}
+        className={`${fitClass} select-none ${loaded ? '' : 'invisible absolute'}`} loading="eager" decoding="async"
+        fetchPriority={visible || priority ? 'high' : 'auto'} referrerPolicy="no-referrer" draggable={false}
+        onLoad={event => { setNaturalSize({ w: event.currentTarget.naturalWidth, h: event.currentTarget.naturalHeight });setLoaded(true); }}
+        onError={failed} /> : null}
     </div>
   );
 });
-
 ReaderImage.displayName = 'ReaderImage';
-
 export default ReaderImage;

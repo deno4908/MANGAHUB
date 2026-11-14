@@ -9,7 +9,7 @@ import { useReaderProgress } from '@/hooks/useReaderProgress';
 import type { ReadingHistory } from '@/lib/readingHistory';
 import { adaptChapterPages, adaptMangaDetail, getChapterPageFallback } from '@/lib/adapters';
 import { getMangaDetailPath, normalizeMangaDexId } from '@/lib/mangaLinks';
-import { loadMangaDexChapterPages, getMangaDexImageFallback } from '@/lib/mangaDexImages';
+import { loadMangaDexChapterPages } from '@/lib/mangaDexImages';
 import { incrementMangaViewsInQueryCache, invalidateMangaRealtimeQueries } from '@/lib/querySync';
 import { retainCachedCover } from '@/lib/coverCache';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -432,9 +432,6 @@ const ChapterReader = () => {
   const [scrollProgress, setScrollProgress] = useState(0);
   const [viewEligibilityTick, setViewEligibilityTick] = useState(0);
   const [touchStart, setTouchStart] = useState<{ x: number; y: number } | null>(null);
-  const [horizontalRetryCount, setHorizontalRetryCount] = useState(0);
-  const [horizontalUseFallback, setHorizontalUseFallback] = useState(false);
-  const [horizontalLoaded, setHorizontalLoaded] = useState(false);
   const [chapterSourceFilter, setChapterSourceFilter] = useState(
     chapterState.chapterSourceFilter || CHAPTER_SOURCE_ALL
   );
@@ -681,9 +678,6 @@ const ChapterReader = () => {
     setVisiblePage(0);
     setScrollProgress(0);
     setShowComments(false);
-    setHorizontalRetryCount(0);
-    setHorizontalUseFallback(false);
-    setHorizontalLoaded(false);
     viewTrackedRef.current = false;
     viewSessionStartedRef.current = false;
     readSessionIdRef.current = createReadSessionId();
@@ -693,24 +687,6 @@ const ChapterReader = () => {
     preloadedRef.current.clear();
     window.scrollTo(0, 0);
   }, [id]);
-
-  useEffect(() => {
-    setHorizontalRetryCount(0);
-    setHorizontalUseFallback(false);
-    setHorizontalLoaded(false);
-  }, [store.currentPage, id]);
-
-  useEffect(() => {
-    if (store.mode !== 'horizontal' || horizontalLoaded || horizontalUseFallback) return;
-    const page = pages[store.currentPage] || '';
-    const fallback = getChapterPageFallback(page) || getMangaDexImageFallback(page);
-    if (!fallback) return;
-    const timeout = window.setTimeout(() => {
-      setHorizontalUseFallback(true);
-      setHorizontalRetryCount(0);
-    }, 10_000);
-    return () => window.clearTimeout(timeout);
-  }, [store.mode, store.currentPage, pages, horizontalLoaded, horizontalUseFallback]);
 
   // ─── Start a server-side read session before a view can be counted ───
   useEffect(() => {
@@ -1007,15 +983,6 @@ const ChapterReader = () => {
 
   const progress = store.mode === 'horizontal' ? ((store.currentPage + 1) / totalPages) * 100 : scrollProgress;
   const displayPage = store.mode === 'horizontal' ? store.currentPage + 1 : visiblePage + 1;
-  const currentHorizontalPage = pages[store.currentPage] || '';
-  const horizontalFallbackPage = getChapterPageFallback(currentHorizontalPage) || getMangaDexImageFallback(currentHorizontalPage);
-  const activeHorizontalPage =
-    horizontalUseFallback && horizontalFallbackPage
-      ? horizontalFallbackPage
-      : currentHorizontalPage;
-  const horizontalPageSrc = horizontalRetryCount > 0
-    ? `${activeHorizontalPage}${activeHorizontalPage.includes('?') ? '&' : '?'}retry=${horizontalRetryCount}`
-    : activeHorizontalPage;
 
   return (
     <div className="flex min-h-screen w-full max-w-full overflow-x-hidden bg-background">
@@ -1171,20 +1138,12 @@ const ChapterReader = () => {
               <ChevronLeft className="w-5 h-5" />
             </button>
             <AnimatePresence mode="wait">
-              <motion.img key={store.currentPage} initial={{ opacity: 0, x: store.pageDirection === 'rtl' ? -20 : 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}
-                src={horizontalPageSrc} alt={`Trang ${store.currentPage + 1}`}
-                className={`select-none ${store.imageFit === 'height' ? 'max-h-screen max-w-full w-auto h-auto' : store.imageFit === 'width' ? 'w-full max-w-4xl h-auto' : 'max-h-[90vh] max-w-full'} object-contain mx-auto`}
-                draggable={false}
-                onLoad={() => setHorizontalLoaded(true)}
-                onError={() => {
-                  if (!horizontalUseFallback && horizontalFallbackPage) {
-                    setHorizontalUseFallback(true);
-                    setHorizontalRetryCount(0);
-                    setHorizontalLoaded(false);
-                    return;
-                  }
-                  setHorizontalRetryCount((prev) => (prev >= 3 ? prev : prev + 1));
-                }} />
+              <motion.div key={store.currentPage} initial={{ opacity: 0, x: store.pageDirection === 'rtl' ? -20 : 20 }}
+                animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}
+                className={`w-full mx-auto ${store.imageFit === 'width' ? 'max-w-4xl' : ''} ${store.imageFit === 'original' ? '[&_img]:max-h-[90vh]' : ''}`}>
+                <ReaderImage src={pages[store.currentPage] || ''} fallbackSrc={getChapterPageFallback(pages[store.currentPage] || '')}
+                  alt={`Trang ${store.currentPage + 1}`} index={store.currentPage} imageFit={store.imageFit} pageGap={0} priority />
+              </motion.div>
             </AnimatePresence>
             <button onClick={e => { e.stopPropagation(); const dir = store.pageDirection === 'rtl' ? -1 : 1; store.setCurrentPage(Math.min(totalPages - 1, store.currentPage + dir)); }}
               disabled={store.pageDirection === 'rtl' ? store.currentPage <= 0 : store.currentPage >= totalPages - 1}

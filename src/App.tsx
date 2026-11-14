@@ -1,4 +1,5 @@
 import { Toaster } from "@/components/ui/toaster";
+import ReadingHistorySync from '@/components/ReadingHistorySync';
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import SiteAccessGate from '@/components/SiteAccessGate';
@@ -761,6 +762,7 @@ const AppContent = () => {
   return (
     <SiteAccessGate>
     <div className="flex flex-col min-h-screen">
+      <ReadingHistorySync />
       <ScrollToTop />
       <AuthLoader maintenanceLocked={Boolean(maintenance?.enabled && !isAdmin)} />
       {!hideChrome && <Navbar maintenanceMode={maintenanceChrome} />}

@@ -438,14 +438,16 @@ async def get_categories():
     return payload
 
 
+@coalesce_reads(scope=_source_read_scope)
 async def get_cover_info(identifier):
-    raw = await asyncio.to_thread(cache.get, f"truyenqq:cover-hint:{identifier}")
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except ValueError:
-            pass
+    hint = await asyncio.to_thread(_json_cached, f"truyenqq:cover-hint:{identifier}")
+    if isinstance(hint, dict) and hint.get("cover_urls") and hint.get("url"):
+        return hint
     canonical = await asyncio.to_thread(_cached_detail_identifier, identifier)
+    if canonical != identifier:
+        hint = await asyncio.to_thread(_json_cached, f"truyenqq:cover-hint:{canonical}")
+        if isinstance(hint, dict) and hint.get("cover_urls") and hint.get("url"):
+            return hint
     return await run_live("basic", canonical)
 
 

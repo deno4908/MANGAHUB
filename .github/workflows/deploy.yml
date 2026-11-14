@@ -4,8 +4,52 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: production-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  verify-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Test images, saved libraries, reading progress and routing
+        run: |
+          npx vitest run src/lib/coverCache.test.ts src/lib/truyenqqRelay.test.ts src/lib/imageTransport.test.ts src/components/ui/OptimizedImage.test.tsx src/components/reader/ReaderImage.test.tsx src/components/ReadingHistorySync.test.tsx src/hooks/useReaderProgress.test.tsx src/hooks/useSavedLibrary.test.tsx src/pages/SavedLibraries.test.tsx src/lib/readingHistorySync.test.ts
+          node --test cloudflare/standby-worker.test.mjs cloudflare/truyenqq-edge.test.mjs
+          python3 -m unittest discover -s cloudflare -p 'test_*.py'
+      - run: npm run build
+
+  verify-backend:
+    runs-on: ubuntu-latest
+    env:
+      FLASK_SECRET_KEY: ci-only-not-a-production-secret
+      JWT_SECRET_KEY: ci-only-not-a-production-secret
+      FLASK_DEBUG: 'true'
+      FRONTEND_URL: http://localhost:8080
+      SECURITY_REQUIRE_REDIS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - run: python -m pip install -r backend/requirements-test.txt
+      - name: Test QQ source recovery and reading history
+        working-directory: backend
+        run: python -m pytest tests/test_truyenqq_integration.py tests/test_qq_gateway_recovery.py tests/test_library_reads.py tests/test_reading_history_lookup.py tests/test_saved_library_covers.py -q
+
   deploy-mangadex-edge:
+    needs: [verify-frontend, verify-backend]
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -13,12 +57,31 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check source changes and avoid deploying an outdated revision
+        id: source
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          current=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$current" != "$GITHUB_SHA" ]; then
+            echo 'deploy=false' >> "$GITHUB_OUTPUT"
+          elif [ "$BEFORE" = '0000000000000000000000000000000000000000' ] || ! git diff --quiet "$BEFORE" "$GITHUB_SHA" -- cloudflare/mangadex-edge-worker.js cloudflare/wrangler.toml .github/workflows/deploy.yml; then
+            echo 'deploy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'deploy=false' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Deploy MangaDex edge worker
-        if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
-        run: npx wrangler@4 deploy --config cloudflare/wrangler.toml
+        if: steps.source.outputs.deploy == 'true' && env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
+        run: npx --yes wrangler@4 deploy --config cloudflare/wrangler.toml
 
   deploy:
+    needs: [verify-frontend, verify-backend]
     # This is the old deploy-user host, not the native standby service.
     # Keep it opt-in so an unconfigured legacy target cannot fail production CI.
     if: vars.LEGACY_VPS_DEPLOY == 'true'

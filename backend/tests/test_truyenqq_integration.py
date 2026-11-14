@@ -132,6 +132,16 @@ def test_qq_cover_reuses_listing_hint_and_disk_cache(live, monkeypatch):
         assert api.get(f"/api/manga/truyenqq/cover/{SLUG}", headers={"If-None-Match": second.headers["etag"]}).status_code == 304
 
 
+def test_saved_alias_cover_reuses_its_canonical_hint_without_a_blocked_detail_read(live, monkeypatch):
+    hint = {"cover_urls": ["https://img.example/cover.jpg"], "url": f"https://truyenqqko.com/truyen-tranh/{SLUG}"}
+    qq.cache.get.side_effect = lambda key: json.dumps(hint) if key == f"truyenqq:cover-hint:{SLUG}" else None
+    monkeypatch.setattr(qq, "_cached_detail_identifier", lambda identifier: SLUG)
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Known cover hints must not require another source HTML lookup")
+    monkeypatch.setattr(qq, "run_live", forbidden)
+    assert asyncio.run(qq.get_cover_info("old-saved-slug")) == hint
+
+
 def test_qq_adapter_discards_source_views(live):
     item = qq._item({"id": "123", "slug": "truyen-thu", "url": "https://truyenqqko.com/truyen-tranh/truyen-thu-123", "title": "Test", "views": 90000000})
     assert item["view_count"] == item["local_view_count"] == 0

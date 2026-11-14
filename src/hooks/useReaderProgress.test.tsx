@@ -89,6 +89,15 @@ it('keeps a failed write locally, updates actual caches and retries without scro
   unmount();
 });
 
+it('records a QQ first-page visit even when the reader leaves before eight seconds', async () => {
+  const { unmount } = renderHook(() => useReaderProgress({ ...options('qq--book-23--7'), totalPages: 1 }), { wrapper });
+  await tick(1000);unmount();await tick(0);
+  expect(historyApi.add).toHaveBeenCalledWith(expect.objectContaining({
+    manga_slug: 'book-23', chapter_id: 'qq--book-23--7', page: 0,
+  }), expect.objectContaining({ keepalive: true }));
+  expect(useReaderStore.getState().readingProgress.reader['book-23'].chapter_id).toBe('qq--book-23--7');
+});
+
 it('restores the saved vertical page through lazy image resizing and stops after user input', async () => {
   remote.data = { manga_slug: 'book-23', chapter_id: 'chapter-a', page: 7, pageOffset: 0.25, progress: 35 };
   renderHook(() => useReaderProgress(options()), { wrapper });

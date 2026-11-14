@@ -1,5 +1,6 @@
 // Private, bounded, in-memory cover bytes. Never persist account assets or use a
 // shared CDN cache; SiteAccessGate and logout discard this cache on access loss.
+import { fetchImageResponse } from './imageTransport';
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const TTL = 2 * 60_000;
 const MAX_BYTES = 24 * 1024 * 1024;
@@ -61,8 +62,8 @@ function pump() {
     const timer = window.setTimeout(() => entry.controller.abort(), 15_000);
     void (async () => {
       try {
-        const response = await fetch(entry.key, { credentials: 'include', signal: entry.controller.signal,
-          referrerPolicy: 'no-referrer', priority: entry.priority === 'visible' ? 'high' : entry.priority === 'prefetch' ? 'low' : 'auto' });
+        const response = await fetchImageResponse(entry.key, { signal: entry.controller.signal,
+          priority: entry.priority === 'visible' ? 'high' : entry.priority === 'prefetch' ? 'low' : 'auto' }, 15_000);
         if (!response.ok || !response.headers.get('content-type')?.toLowerCase().startsWith('image/')) throw new Error('Cover unavailable');
         const blob = await response.blob();
         if (!blob.size || entry.controller.signal.aborted) throw new DOMException('Cover cancelled', 'AbortError');
