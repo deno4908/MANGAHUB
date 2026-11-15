@@ -83,7 +83,4 @@ async def scheduled_maintenance(request: Request):
             "completed": len(done) - failed, "failed": failed, "unfinished": len(pending)}
 
 
-from source_status import source_status
-app.add_api_route('/internal/source-status', source_status, methods=['GET'], include_in_schema=False)
-
 app.mount("/", api_app)
