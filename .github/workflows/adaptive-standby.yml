@@ -7,6 +7,10 @@ on:
         options: [inspect, prepare, activate, rollback, quota-relief]
         default: inspect
         required: true
+      country_guard_confirmed:
+        type: boolean
+        default: false
+        description: Exact independent country rule was deployed manually after Rulesets API denial
 permissions:
   contents: read
 concurrency:
@@ -21,6 +25,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       STANDBY_ORIGIN_SECRET: ${{ secrets.STANDBY_ORIGIN_SECRET }}
       OPERATION: ${{ inputs.operation }}
+      COUNTRY_GUARD_CONFIRMED: ${{ inputs.country_guard_confirmed }}
     steps:
       - uses: actions/checkout@v4
         with:

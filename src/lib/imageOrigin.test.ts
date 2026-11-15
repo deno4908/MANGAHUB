@@ -42,3 +42,9 @@ it('does not retry an aborted request or repeat a failed alternate', async()=>{
   send.mockReset().mockRejectedValueOnce(new TypeError('offline')).mockResolvedValueOnce(new Response('down',{status:502}));
   expect((await fetchWithTimeout(url,{})).status).toBe(502);expect(send).toHaveBeenCalledTimes(2);
 });
+
+it('does not replace an image host failure with a successful HTML challenge', async()=>{
+ const send=vi.fn().mockResolvedValueOnce(new Response('down',{status:502})).mockResolvedValueOnce(new Response('<html>challenge</html>',{headers:{'Content-Type':'text/html'}}));
+ vi.stubGlobal('fetch',send);
+ expect((await fetchWithTimeout(url,{})).status).toBe(502);expect(imageOriginRoute(url)?.preferBackup).toBe(false);
+});

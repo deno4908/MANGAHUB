@@ -20,13 +20,13 @@ export async function fetchWithTimeout(url: string, options: RequestInit, timeou
       // Only fixed, application-owned image GET/HEAD endpoints can be retried.
       retried = true;
       response = await send(route.preferBackup ? route.primary : route.backup);
-      if (response.ok) rememberImageOrigin(!route.preferBackup);
+      if (response.ok && response.headers.get('Content-Type')?.startsWith('image/')) rememberImageOrigin(!route.preferBackup);
     }
     if (route && !retried && failedImageHost(response) && !controller.signal.aborted) {
       const original = response;
       try {
         const alternative = await send(route.preferBackup ? route.primary : route.backup);
-        if (alternative.ok) {
+        if (alternative.ok && alternative.headers.get('Content-Type')?.startsWith('image/')) {
           await original.body?.cancel();response = alternative;
           rememberImageOrigin(!route.preferBackup);
         } else await alternative.body?.cancel();

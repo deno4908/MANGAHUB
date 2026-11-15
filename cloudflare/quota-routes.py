@@ -1,6 +1,7 @@
 """Move image/static bytes off Workers, preserving other scripts and policies."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import urllib.error
 
@@ -88,6 +89,10 @@ def main():
     previous = manager.api(f'zones/{zone}/workers/routes')
     # Origin image/static access must have been prepared before dispatching this.
     protected = country_policy(zone)
+    # Used only after the operator reports deploying the exact dashboard rule
+    # when this token cannot read/write Rulesets. Never inferred from a timer.
+    if not protected and os.environ.get('COUNTRY_GUARD_CONFIRMED') == 'true':
+        protected = True
     current = apply(zone, previous, protected)
     print(json.dumps({'image_and_static_bypasses': len(BYPASS), 'country_guard_independent': protected,
         'frontend_fail_open': protected, 'api_auth_fail_open': True,
