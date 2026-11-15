@@ -4,7 +4,7 @@ on:
     inputs:
       operation:
         type: choice
-        options: [inspect, prepare, activate, rollback]
+        options: [inspect, prepare, activate, rollback, quota-relief]
         default: inspect
         required: true
 permissions:
@@ -73,3 +73,6 @@ jobs:
       - name: Restore original country Worker and Vercel routing
         if: inputs.operation == 'rollback'
         run: python3 cloudflare/manage-standby.py rollback
+      - name: Reduce free-plan traffic after origin image preflight
+        if: inputs.operation == 'quota-relief'
+        run: python3 cloudflare/quota-routes.py

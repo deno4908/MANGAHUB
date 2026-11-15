@@ -3,14 +3,33 @@ map $http_x_mangahub_origin_secret $mh_origin_allowed {
     "ORIGIN_SECRET_PLACEHOLDER" 1;
 }
 map $http_x_mangahub_public_host $mh_public_host {
-    default "";
+    default api.mangahub.art;
     mangahub.art mangahub.art;
     api.mangahub.art api.mangahub.art;
     auth.mangahub.art auth.mangahub.art;
 }
-map $http_x_mangahub_client_ip $mh_client_ip {
-    default $http_x_mangahub_client_ip;
+# Public image/static reads are still restricted to Cloudflare ingress below.
+# Only the signed Worker hop may provide a client-IP override.
+map $http_cf_connecting_ip $mh_cloudflare_client_ip {
+    default $http_cf_connecting_ip;
     "" $remote_addr;
+}
+map "$mh_origin_allowed:$http_x_mangahub_client_ip" $mh_client_ip {
+    ~^1:(.+)$ $1;
+    default $mh_cloudflare_client_ip;
+}
+map $uri $mh_public_bytes {
+    default 0;
+    ~^/assets/ 1;
+    ~^/(favicon\.(ico|svg)|no-cover\.svg)$ 1;
+    ~^/api/images/ 1;
+    ~^/api/manga/(mangadex-cover|truyenqq/(cover|image))/ 1;
+}
+map "$mh_origin_allowed:$mh_public_bytes" $mh_request_allowed {
+    default 0;
+    "1:0" 1;
+    "1:1" 1;
+    "0:1" 1;
 }
 map $http_user_agent $mh_preview {
     default "";
@@ -36,7 +55,7 @@ server {
     root /opt/mangahub/standby/dist;
     client_max_body_size 50m;
     add_header Cache-Control "private, no-store" always;
-    if ($mh_origin_allowed = 0) { return 404; }
+    if ($mh_request_allowed = 0) { return 404; }
     if ($mh_public_host = "") { return 404; }
     location ~ ^/manga/([^/]+)$ {
         if ($mh_preview = seo) { rewrite ^/manga/(.+)$ /api/manga/seo/$1 last; }

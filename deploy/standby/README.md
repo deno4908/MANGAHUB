@@ -73,3 +73,36 @@ not automatically cross domains, and a previously established login may need
 restoring from the canonical auth cookie. Hosted service failures, source
 blocking and Cloudflare plan quotas are independent of the two host machines;
 this configuration does not provide unlimited capacity or guaranteed uptime.
+
+
+## Free-plan image routing
+
+The `quota-relief` operation installs explicit no-script routes for image
+endpoints on `api`/`standby` and static assets on the two frontend hosts. This
+keeps their high-volume downloads out of the Workers invocation quota. JSON
+API, auth, navigation and the more-specific source Worker remain unchanged.
+The router still handles their existing host selection and mutations.
+
+The browser downloads healthy images from the original primary host with no
+additional health request. A fixed owned image GET/HEAD may retry once at the
+standby after a network/host error; a successful fallback selects that image
+origin for 60 seconds. Permission errors, missing images, rate limits and QQ
+source errors retain the existing recovery behavior. No writes are replayed.
+
+Nginx accepts only image/static public paths without the private Worker header,
+from the existing Cloudflare IP allowlist. It derives their client IP from
+Cloudflare's overwritten header, not a caller's private routing headers.
+Internal, JSON and auth endpoints still require the private hop. No shared
+image caches or Redis/public origins are introduced.
+
+API/auth routes use request-limit fail-open: when Workers quota is exhausted,
+their primary origin still validates authentication, site policy, rate limits
+and CSRF. Frontend fail-open is enabled only after an independent Cloudflare
+WAF country rule is installed; if the token lacks Rulesets permissions, the
+operation reports the exact rule and retains frontend fail-closed. The rule
+preserves the Vietnam frontend policy independently of the Worker budget.
+
+Quota relief reduces invocations; it does not make the free plan unlimited.
+Source relay calls still consume the same account-wide free budget. While
+quota is exhausted, no new Worker-based routing decision or source relay can
+run; origin image fallback and primary API/auth bypass do not require it.
