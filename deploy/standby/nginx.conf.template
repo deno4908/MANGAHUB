@@ -25,11 +25,19 @@ map $uri $mh_public_bytes {
     ~^/api/images/ 1;
     ~^/api/manga/(mangadex-cover|truyenqq/(cover|image))/ 1;
 }
-map "$mh_origin_allowed:$mh_public_bytes" $mh_request_allowed {
+# If Workers are out of quota, an unsigned standby navigation returns to
+# the canonical primary rather than exposing a private origin or a 404 page.
+# The independent zone country rule must be live before frontend fail-open.
+map $uri $mh_quota_navigation {
+    default 1;
+    ~^/(api|auth|internal)(/|$) 0;
+    /auth/callback 1;
+}
+map "$mh_origin_allowed:$mh_public_bytes:$mh_quota_navigation" $mh_request_allowed {
     default 0;
-    "1:0" 1;
-    "1:1" 1;
-    "0:1" 1;
+    ~^1: 1;
+    ~^0:1: 1;
+    "0:0:1" 1;
 }
 map $http_user_agent $mh_preview {
     default "";
@@ -58,18 +66,21 @@ server {
     if ($mh_request_allowed = 0) { return 404; }
     if ($mh_public_host = "") { return 404; }
     location ~ ^/manga/([^/]+)$ {
+        if ($mh_origin_allowed = 0) { return 307 https://mangahub.art$request_uri; }
         if ($mh_preview = seo) { rewrite ^/manga/(.+)$ /api/manga/seo/$1 last; }
         if ($mh_preview = share) { rewrite ^/manga/(.+)$ /api/manga/share/$1 last; }
         add_header Cache-Control "private, no-store" always;
         try_files $uri /index.html;
     }
     location ~ ^/chapter/([^/]+)$ {
+        if ($mh_origin_allowed = 0) { return 307 https://mangahub.art$request_uri; }
         if ($mh_preview = seo) { rewrite ^/chapter/(.+)$ /api/manga/seo-chapter/$1 last; }
         if ($mh_preview = share) { rewrite ^/chapter/(.+)$ /api/manga/share-chapter/$1 last; }
         add_header Cache-Control "private, no-store" always;
         try_files $uri /index.html;
     }
     location = /auth/callback {
+        if ($mh_origin_allowed = 0) { return 307 https://mangahub.art$request_uri; }
         add_header Cache-Control "private, no-store" always;
         try_files /index.html =404;
     }
@@ -93,6 +104,7 @@ server {
         proxy_connect_timeout 5s;
     }
     location / {
+        if ($mh_origin_allowed = 0) { return 307 https://mangahub.art$request_uri; }
         add_header Cache-Control "private, no-store" always;
         try_files $uri /index.html;
     }
