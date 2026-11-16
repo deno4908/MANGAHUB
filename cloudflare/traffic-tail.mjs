@@ -29,10 +29,12 @@ async function observe(script) {
     const started = Date.now();
     await new Promise(resolve => {
       socket = new WebSocket(tail.url, 'trace-v1');
+      socket.binaryType = 'arraybuffer';
       const timer = setTimeout(resolve, duration);
       socket.addEventListener('message', message => {
         try {
-          const value = JSON.parse(String(message.data));
+          const raw = typeof message.data === 'string' ? message.data : new TextDecoder().decode(message.data);
+          const value = JSON.parse(raw);
           const request = value.event?.request;
           total++;
           if (!request?.url) { unclassified++; return; }
@@ -62,3 +64,6 @@ async function observe(script) {
   }
 }
 await Promise.all(['mangahub-standby-router', 'mangahub-mangadex-edge'].map(observe));
+// The server can keep a closing tail socket alive after returning its final
+// summary. All tail deletion calls above have completed; no work remains.
+process.exit(0);
