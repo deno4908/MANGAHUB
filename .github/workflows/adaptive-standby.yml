@@ -41,6 +41,9 @@ jobs:
           python3 -m unittest discover -s cloudflare -p 'test_*.py'
       - name: Inspect public routing without disclosing origin addresses
         run: python3 cloudflare/manage-standby.py inspect
+      - name: Read aggregate traffic without changing production
+        if: inputs.operation == 'inspect'
+        run: python3 cloudflare/traffic-audit.py
       - name: Prepare router configuration
         if: inputs.operation == 'prepare' || inputs.operation == 'activate'
         run: |
