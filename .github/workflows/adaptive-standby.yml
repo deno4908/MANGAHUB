@@ -60,6 +60,7 @@ jobs:
           PY
           npx --yes wrangler@4 secret bulk /tmp/mh-standby-secret.json --config cloudflare/standby-runtime.toml
           npx --yes wrangler@4 deploy --config cloudflare/standby-runtime.toml
+          python3 cloudflare/manage-standby.py restore-failure-policy
           python3 cloudflare/manage-standby.py probe
       - name: Check actual standby dependencies and both origins
         if: inputs.operation == 'prepare' || inputs.operation == 'activate'

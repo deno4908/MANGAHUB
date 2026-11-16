@@ -8,6 +8,29 @@ from pathlib import Path
 
 TARGETS = {host + '/*' for host in ('mangahub.art', 'api.mangahub.art', 'auth.mangahub.art', 'standby.mangahub.art')}
 ROUTER = 'mangahub-standby-router'
+POLICY_FILE = Path(__file__).with_name('standby-route-policy.json')
+
+
+def restore_failure_policy(zone, previous, saved, api):
+    path = f'zones/{zone}/workers/routes'
+    by_pattern = {row['pattern']: row for row in previous}
+    for policy in saved:
+        assert type(policy['request_limit_fail_open']) is bool
+        assert by_pattern.get(policy['pattern'], {}).get('script') == ROUTER, 'Refusing to change unrelated routing'
+    changed = []
+    try:
+        for policy in saved:
+            row = by_pattern[policy['pattern']]
+            if row.get('request_limit_fail_open', False) == policy['request_limit_fail_open']:
+                continue
+            api(path + '/' + row['id'], {**policy, 'script': ROUTER}, 'PUT')
+            changed.append(row)
+        current = {row['pattern']: row for row in api(path)}
+        assert all(current[p['pattern']].get('request_limit_fail_open', False) == p['request_limit_fail_open'] for p in saved)
+    except BaseException:
+        for row in reversed(changed):
+            api(path + '/' + row['id'], {k: row[k] for k in ['pattern','script','request_limit_fail_open'] if k in row}, 'PUT')
+        raise
 
 
 def runtime_config(config, previous, operation):
@@ -40,6 +63,12 @@ def main(operation):
         assert mode in {'prepare','activate'}
         source=Path(__file__).with_name('wrangler-standby.toml')
         source.with_name('standby-runtime.toml').write_text(runtime_config(source.read_text(),previous,mode))
+        POLICY_FILE.write_text(json.dumps([{'pattern': row['pattern'], 'request_limit_fail_open': row.get('request_limit_fail_open', False)}
+                                         for row in previous if row.get('script') == ROUTER]))
+        return
+    if operation == 'restore-failure-policy':
+        restore_failure_policy(zone, previous, json.loads(POLICY_FILE.read_text()), api)
+        print('Preserved verified quota-exhaustion policies after deployment')
         return
     if operation=='probe':
         pattern='standby.mangahub.art/internal/router-probe*'

@@ -40,6 +40,25 @@ class DeploymentRoutingTests(unittest.TestCase):
         self.assertEqual(len(calls),2)
         self.assertTrue(all(value is None and method is None for _,value,method in calls))
 
+    def test_deployment_restores_prior_quota_policy_without_opening_operator_or_source_routes(self):
+        rows=[{'id':'api','pattern':'api.mangahub.art/*','script':routes.ROUTER,'request_limit_fail_open':False},
+              {'id':'private','pattern':'standby.mangahub.art/internal/router-probe*','script':routes.ROUTER,'request_limit_fail_open':False},
+              {'id':'source','pattern':'mangahub.art/api/mangadex-edge/*','script':'mangahub-mangadex-edge','request_limit_fail_open':False},
+              {'id':'images','pattern':'api.mangahub.art/api/images/*','script':None}]
+        before=[dict(r) for r in rows];changes=[]
+        def api(path,value=None,method=None):
+            if method=='PUT':
+                row=next(r for r in rows if r['id']==path.rsplit('/',1)[-1])
+                changes.append(row['id']);row.update(value)
+            return rows
+        routes.restore_failure_policy('zone',before,[{'pattern':rows[0]['pattern'],'request_limit_fail_open':True},
+            {'pattern':rows[1]['pattern'],'request_limit_fail_open':False}],api)
+        self.assertEqual(changes,['api'])
+        self.assertTrue(rows[0]['request_limit_fail_open'])
+        self.assertEqual(rows[1:],before[1:])
+        with self.assertRaises(AssertionError):
+            routes.restore_failure_policy('zone',rows,[{'pattern':rows[2]['pattern'],'request_limit_fail_open':True}],api)
+
 
 if __name__=='__main__':
     unittest.main()
