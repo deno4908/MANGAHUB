@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -25,7 +26,10 @@ def restore_failure_policy(zone, previous, saved, api):
                 continue
             api(path + '/' + row['id'], {**policy, 'script': ROUTER}, 'PUT')
             changed.append(row)
-        current = {row['pattern']: row for row in api(path)}
+        for attempt in range(4):
+            current = {row['pattern']: row for row in api(path)}
+            if all(current[p['pattern']].get('request_limit_fail_open', False) == p['request_limit_fail_open'] for p in saved): break
+            if attempt < 3: time.sleep(1)
         assert all(current[p['pattern']].get('request_limit_fail_open', False) == p['request_limit_fail_open'] for p in saved)
     except BaseException:
         for row in reversed(changed):

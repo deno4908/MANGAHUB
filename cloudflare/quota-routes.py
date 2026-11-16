@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import time
 from pathlib import Path
 import urllib.error
 
@@ -73,11 +74,15 @@ def apply(zone, previous, protected, api=manager.api):
             api(path + '/' + row['id'], {'pattern': row['pattern'], 'script': manager.ROUTER,
                 'request_limit_fail_open': True}, 'PUT')
             changes.append((row, row['id']))
-        current = api(path)
-        by_pattern = {r['pattern']: r for r in current}
+        required = manager.TARGETS if protected else {'api.mangahub.art/*', 'auth.mangahub.art/*'}
+        for attempt in range(4):
+            current = api(path)
+            by_pattern = {r['pattern']: r for r in current}
+            if all(by_pattern.get(p, {}).get('request_limit_fail_open') is True for p in required): break
+            if attempt < 3: time.sleep(1)
         assert all(p in by_pattern and by_pattern[p].get('script') is None for p in selected)
-        for pattern in ['api.mangahub.art/*', 'auth.mangahub.art/*']:
-            assert by_pattern[pattern].get('request_limit_fail_open') is True, 'API/auth fail mode was not applied'
+        for pattern in required:
+            assert by_pattern[pattern].get('request_limit_fail_open') is True, 'Verified quota fail mode was not applied'
         for row in previous:
             if row['pattern'] not in ALL_BYPASS:
                 assert by_pattern.get(row['pattern'], {}).get('script') == row.get('script'), 'Unrelated route changed'
