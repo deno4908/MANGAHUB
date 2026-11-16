@@ -14,6 +14,11 @@ IMAGE_PATHS = ['/api/images/*', '/api/manga/mangadex-cover/*',
 BYPASS = {host + path for host in ['api.mangahub.art', 'standby.mangahub.art'] for path in IMAGE_PATHS}
 BYPASS |= {host + path for host in ['mangahub.art', 'standby.mangahub.art']
            for path in ['/assets/*', '/favicon.ico*', '/favicon.svg*', '/no-cover.svg*']}
+HEALTH_BYPASS = {'mangahub.art/index.html', 'standby.mangahub.art/index.html',
+                'api.mangahub.art/health', 'auth.mangahub.art/auth/health',
+                'standby.mangahub.art/internal/origin-status*',
+                'standby.mangahub.art/internal/router-health'}
+ALL_BYPASS = BYPASS | HEALTH_BYPASS
 COUNTRY_EXPRESSION = ('(http.host in {"mangahub.art" "standby.mangahub.art"} '
     'and ip.src.country ne "VN" and cf.worker.upstream_zone ne "mangahub.art" '
     'and not starts_with(http.request.uri.path, "/internal/") '
@@ -49,9 +54,10 @@ def country_policy(zone, api=manager.api):
 
 def apply(zone, previous, protected, api=manager.api):
     path = f'zones/{zone}/workers/routes'
+    selected = ALL_BYPASS if protected else ALL_BYPASS - {'mangahub.art/index.html', 'standby.mangahub.art/index.html'}
     changes = []
     try:
-        for pattern in sorted(BYPASS):
+        for pattern in sorted(selected):
             row = next((r for r in previous if r['pattern'] == pattern), None)
             assert not row or row.get('script') is None, 'Refusing to bypass an unrelated Worker'
             if row: continue
@@ -69,11 +75,11 @@ def apply(zone, previous, protected, api=manager.api):
             changes.append((row, row['id']))
         current = api(path)
         by_pattern = {r['pattern']: r for r in current}
-        assert all(p in by_pattern and by_pattern[p].get('script') is None for p in BYPASS)
+        assert all(p in by_pattern and by_pattern[p].get('script') is None for p in selected)
         for pattern in ['api.mangahub.art/*', 'auth.mangahub.art/*']:
             assert by_pattern[pattern].get('request_limit_fail_open') is True, 'API/auth fail mode was not applied'
         for row in previous:
-            if row['pattern'] not in BYPASS:
+            if row['pattern'] not in ALL_BYPASS:
                 assert by_pattern.get(row['pattern'], {}).get('script') == row.get('script'), 'Unrelated route changed'
         return current
     except BaseException:
@@ -94,7 +100,7 @@ def main():
     if not protected and os.environ.get('COUNTRY_GUARD_CONFIRMED') == 'true':
         protected = True
     current = apply(zone, previous, protected)
-    print(json.dumps({'image_and_static_bypasses': len(BYPASS), 'country_guard_independent': protected,
+    print(json.dumps({'image_and_static_bypasses': len(BYPASS), 'health_bypasses': len(HEALTH_BYPASS), 'country_guard_independent': protected,
         'frontend_fail_open': protected, 'api_auth_fail_open': True,
         'routes': [{k: r.get(k) for k in ['pattern', 'script', 'request_limit_fail_open']} for r in current]}))
     if not protected:

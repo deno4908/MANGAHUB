@@ -65,6 +65,14 @@ server {
     add_header Cache-Control "private, no-store" always;
     if ($mh_request_allowed = 0) { return 404; }
     if ($mh_public_host = "") { return 404; }
+    # Daily health metadata is private, never an application proxy or a URL
+    # selected by the caller. The server-level origin-secret gate applies.
+    location = /internal/router-health {
+        limit_except GET { deny all; }
+        default_type application/json;
+        add_header Cache-Control "private, no-store" always;
+        alias /var/lib/mangahub/router-health/daily.json;
+    }
     location ~ ^/manga/([^/]+)$ {
         if ($mh_origin_allowed = 0) { return 307 https://mangahub.art$request_uri; }
         if ($mh_preview = seo) { rewrite ^/manga/(.+)$ /api/manga/seo/$1 last; }

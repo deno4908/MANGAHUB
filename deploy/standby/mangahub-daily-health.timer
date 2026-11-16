@@ -1,0 +1,12 @@
+[Unit]
+Description=Maintain the shared daily health result after reboots
+
+[Timer]
+# The script reads the timestamp and performs no network checks until 24h old.
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=30
+Unit=mangahub-daily-health.service
+
+[Install]
+WantedBy=timers.target

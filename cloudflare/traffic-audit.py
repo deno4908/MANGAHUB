@@ -1,10 +1,8 @@
 """Read aggregate traffic and routes; never log credentials, query strings or IPs."""
 import json
 import os
-import re
 import urllib.error
 import urllib.request
-from collections import Counter
 from datetime import datetime, timezone, timedelta
 
 TOKEN = os.environ['CLOUDFLARE_API_TOKEN']
@@ -28,10 +26,6 @@ def query(label, text, variables):
     return value.get('data',{}).get('viewer',{})
 
 now = datetime.now(timezone.utc)
-storage = request(f'accounts/{ACCOUNT}/storage/kv/namespaces?per_page=100')
-print(json.dumps({'health_storage_available': storage.get('success') is True,
-                  'existing_health_storage': any(row.get('title') == 'mangahub-router-health'
-                      for row in storage.get('result', []))}))
 since = now.replace(hour=0, minute=0, second=0, microsecond=0)
 if now-since < timedelta(hours=1): since = now-timedelta(hours=3)
 variables = {'account':ACCOUNT,'since':since.isoformat(),'until':now.isoformat()}
@@ -47,19 +41,3 @@ zone = (zones.get('result') or [{}])[0].get('id')
 if zone:
     routes=request(f'zones/{zone}/workers/routes')
     print(json.dumps({'routes':[{k:row.get(k) for k in ['pattern','script','request_limit_fail_open']} for row in routes.get('result',[])]}))
-    variables={'zone':zone,'since':variables['since'],'until':variables['until']}
-    traffic=query('zone_paths', '''query($zone:String!, $since:Time!, $until:Time!){viewer{zones(filter:{zoneTag:$zone}){
-     httpRequestsAdaptiveGroups(limit:500, orderBy:[count_DESC],filter:{datetime_geq:$since,datetime_leq:$until,requestSource:"eyeball"}){
-      count dimensions{clientRequestHTTPHost clientRequestPath clientRequestHTTPMethodName edgeResponseStatus}
-     }}}}''', variables)
-    if traffic:
-        counts=Counter()
-        for group in traffic['zones'][0]['httpRequestsAdaptiveGroups']:
-            d=group['dimensions']; path=d['clientRequestPath']
-            # Resource paths may contain account/comic IDs. Preserve endpoint
-            # names while grouping dynamic identifiers and dropping queries.
-            path=re.sub(r'/[0-9a-fA-F]{8}(?:-[0-9a-fA-F-]+)?(?=/|$)', '/:id',path)
-            for prefix in ['/api/manga/truyenqq/image/','/api/manga/truyenqq/cover/','/api/manga/mangadex-cover/','/assets/','/api/users/','/manga/','/chapter/']:
-                if path.startswith(prefix): path=prefix+'*';break
-            counts[(d['clientRequestHTTPHost'],path,d['clientRequestHTTPMethodName'],d['edgeResponseStatus'])]+=group['count']
-        print(json.dumps({'top_paths':[{'host':key[0],'path':key[1],'method':key[2],'status':key[3],'requests':value} for key,value in counts.most_common(60)]}))

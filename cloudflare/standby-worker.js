@@ -5,7 +5,9 @@ const STANDBY = 'standby.mangahub.art';
 const HOSTS = [FRONT, API, AUTH, STANDBY];
 const SAFE = method => ['GET', 'HEAD'].includes(method);
 const FAILED = status => [500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526].includes(status);
-const TTL = 30_000;
+const TTL = 24 * 60 * 60_000;
+const SHARED_READ_TTL = 60_000;
+const BUSY_TTL = 30_000;
 const FRONTEND_LEASE = 120_000;
 
 export function createStandbyWorker(send = fetch, now = Date.now, countryGate = denyOutsideVietnam) {
@@ -34,7 +36,7 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
     const colo = request.cf?.colo || 'unknown';
     if (!regions.has(colo)) {
       if (regions.size >= 100) regions.delete(regions.keys().next().value);
-      regions.set(colo, { expires: 0, primary: {}, backup: {}, recovery: {}, busyUntil: 0 });
+      regions.set(colo, { expires: 0, primary: {}, backup: {}, failures: {}, busyUntil: 0 });
     }
     return regions.get(colo);
   }
@@ -55,7 +57,7 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
     } finally { clearTimeout(timer); }
   }
   async function primaryProbe(host) {
-    const html = host === FRONT, path = html ? '/' : host === API ? '/health' : '/auth/health';
+    const html = host === FRONT, path = html ? '/index.html' : host === API ? '/health' : '/auth/health';
     try {
       const { response, value, milliseconds } = await timed('https://' + host + path, {
         headers: { Accept: html ? 'text/html' : 'application/json', 'Cache-Control': 'no-cache' }, cf: { cacheTtl: 0 },
@@ -78,22 +80,49 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
         primaryFrontend: value?.primary_frontend_ok };
     } catch { return { ok: false, capacity: false }; }
   }
-  function adopt(previous, measured, recoveries, key) {
-    if (!measured.ok) { recoveries[key] = 0; return measured; }
-    if (previous?.ok === false && (recoveries[key] = (recoveries[key] || 0) + 1) < 2) return { ...measured, ok: false };
-    recoveries[key] = 0;
-    return { ...measured, milliseconds: previous?.milliseconds === undefined ? measured.milliseconds
-      : previous.milliseconds * .6 + measured.milliseconds * .4 };
+  async function measure(env) {
+    const [front, api, auth, backup] = await Promise.all([
+      primaryProbe(FRONT), primaryProbe(API), primaryProbe(AUTH), backupProbe(env, false)]);
+    return { checkedAt: now(), primary: { [FRONT]: front, [API]: api, [AUTH]: auth }, backup };
+  }
+  function validSnapshot(value) {
+    return Number.isFinite(value?.checkedAt) && value.checkedAt <= now() + 60_000 &&
+      [FRONT, API, AUTH].every(host => typeof value.primary?.[host]?.ok === 'boolean') &&
+      typeof value.backup?.ok === 'boolean' && typeof value.backup?.capacity === 'boolean';
+  }
+  async function readSnapshot(env) {
+    // Read the daily file; this never checks either application's health.
+    // The narrowly scoped route bypasses Workers and still requires our secret.
+    try {
+      const { value, milliseconds } = await timed(backupOrigin(env) + '/internal/router-health', {
+        headers: { 'X-MangaHub-Origin-Secret': env.STANDBY_ORIGIN_SECRET,
+          'Cache-Control': 'no-cache' }, cf: { cacheTtl: 0 },
+      }, 500);
+      if (!validSnapshot(value)) return null;
+      // Measure distance from this edge, not from the VPS writing the file.
+      return { ...value, backup: { ...value.backup, milliseconds, frontendMilliseconds: milliseconds } };
+    } catch { return null; }
   }
   async function refresh(s, env) {
     if (s.pending) return s.pending;
     s.pending = (async () => {
-      const [front, api, auth, backup] = await Promise.all([primaryProbe(FRONT), primaryProbe(API), primaryProbe(AUTH), backupProbe(env, false)]);
-      s.primary[FRONT] = adopt(s.primary[FRONT], front, s.recovery, FRONT);
-      s.primary[API] = adopt(s.primary[API], api, s.recovery, API);
-      s.primary[AUTH] = adopt(s.primary[AUTH], auth, s.recovery, AUTH);
-      s.backup = adopt(s.backup, backup, s.recovery, 'backup');
-      s.expires = now() + TTL;
+      // Production reads the single daily result. Direct measurement
+      // is reserved for isolated operator drills/tests, never ordinary readers.
+      const snapshot = env.DAILY_HEALTH_SHARED === 'true' ? await readSnapshot(env)
+        : env.HEALTH_PROBE_MODE === 'operator' ? await measure(env) : null;
+      if (validSnapshot(snapshot) && snapshot.checkedAt > (s.checkedAt ?? -1)) {
+        s.primary = Object.fromEntries([FRONT, API, AUTH].map(host => [host, {
+          ...snapshot.primary[host], ok: (s.failures[host] ?? -1) > snapshot.checkedAt ? false : snapshot.primary[host].ok,
+          milliseconds: env.DAILY_HEALTH_SHARED === 'true'
+            ? s.primary[host]?.milliseconds : snapshot.primary[host].milliseconds }]));
+        s.backup = { ...snapshot.backup, ok: (s.failures.backup ?? -1) > snapshot.checkedAt ? false : snapshot.backup.ok };
+        s.checkedAt = snapshot.checkedAt;
+      }
+      if (validSnapshot(snapshot) && snapshot.checkedAt === s.checkedAt && env.DAILY_HEALTH_SHARED === 'true') {
+        s.backup.milliseconds = snapshot.backup.milliseconds;
+        s.backup.frontendMilliseconds = snapshot.backup.frontendMilliseconds;
+      }
+      s.expires = now() + (env.DAILY_HEALTH_SHARED === 'true' || !snapshot ? SHARED_READ_TTL : TTL);
     })().finally(() => { s.pending = undefined; });
     return s.pending;
   }
@@ -209,7 +238,13 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
         if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
         const kind = incoming.searchParams.get('kind') || 'api';
         const target = incoming.searchParams.get('target') || 'primary';
-        if (!['api','auth','frontend','readiness','drill'].includes(kind) || !['primary','backup'].includes(target)) return new Response('Invalid probe', { status: 400 });
+        if (!['api','auth','frontend','readiness','drill','daily-health'].includes(kind) || !['primary','backup'].includes(target)) return new Response('Invalid probe', { status: 400 });
+        if (kind === 'daily-health') {
+          const snapshot = env.DAILY_HEALTH_SHARED === 'true' ? await readSnapshot(env) : null;
+          return Response.json({ shared: env.DAILY_HEALTH_SHARED === 'true', initialized: validSnapshot(snapshot),
+            checkedAt: validSnapshot(snapshot) ? snapshot.checkedAt : null,
+            intervalHours: 24 }, { headers: { 'Cache-Control':'no-store' } });
+        }
         if (kind === 'readiness') return Response.json(await backupProbe(env, true), { headers: { 'Cache-Control':'no-store' } });
         if (kind === 'drill') {
           // Exercise the real routing implementation with only the primary
@@ -224,6 +259,8 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
               return send(input,options);
             },now,()=>null); // Operator reads fixed public HTML, never account data.
             const jobs=[], drillEnv={...env,FAILOVER_ENABLED:'true',BALANCE_ENABLED:'false'};
+            drillEnv.DAILY_HEALTH_SHARED = 'false';
+            drillEnv.HEALTH_PROBE_MODE = 'operator';
             const context={waitUntil:p=>jobs.push(p)};
             for (const [host,path] of [[API,'/health'],[AUTH,'/auth/health']]) {
               const response=await drill.fetch(new Request('https://'+host+path,{headers:{Cookie:'mh_route=00000063'}}),drillEnv,context);
@@ -275,7 +312,7 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
         until > now() && until <= now() + 15 * 60_000;
       if (now() >= s.expires) {
         const job = refresh(s, env);
-        // Check readiness before selecting an origin for a mutation. Never
+        // Load the saved decision before selecting an origin for a mutation. Never
         // repeat a submitted write, even after a network error or a 5xx.
         if (!SAFE(request.method) || b.test || host===STANDBY) await job;
         else ctx.waitUntil(job);
@@ -312,15 +349,28 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
         return navigationRedirect(target === 'backup' ? STANDBY : FRONT);
       }
       let response;
+      const primaryHost = frontend ? FRONT : host;
+      function failedOrigin(provider) {
+        if (provider === 'primary') { s.primary[primaryHost] = { ...s.primary[primaryHost], ok: false }; s.failures[primaryHost] = now(); }
+        else { s.backup.ok = false; s.failures.backup = now(); }
+      }
+      const started = now();
       try { response = await proxy(request, env, target); }
       catch {
-        if (!SAFE(request.method)) return unavailable(request);
+        if (!SAFE(request.method)) { failedOrigin(target); return unavailable(request); }
       }
       // QQ failures are source failures with browser recovery hints, not an
       // outage of Vercel/VPS. Authorization and ordinary client errors pass on.
       const sourceFailure = response?.headers.has('X-TruyenQQ-Error');
+      if (env.DAILY_HEALTH_SHARED === 'true' && response && !FAILED(response.status) && response.status !== 429) {
+        const measured = Math.max(0, now() - started);
+        const current = target === 'primary' ? (s.primary[primaryHost] ||= {}) : s.backup;
+        current.milliseconds = current.milliseconds === undefined ? measured : current.milliseconds * .6 + measured * .4;
+        if (target === 'backup' && frontend) current.frontendMilliseconds = current.milliseconds;
+      }
       if (response && (!FAILED(response.status) || sourceFailure || !SAFE(request.method))) {
-        if (response.status === 429 && !sourceFailure) s.busyUntil = now() + TTL;
+        if (FAILED(response.status) && !sourceFailure) failedOrigin(target);
+        if (response.status === 429 && !sourceFailure) s.busyUntil = now() + BUSY_TTL;
         if (host === FRONT && target === 'primary' && response.ok) s.primary[FRONT] = { ...s.primary[FRONT], ok: true };
         const result = publicResponse(response, request, b);
         return navigation && response.ok && !lease ? rememberFrontend(result,target,env) : result;
@@ -332,9 +382,9 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       try {
         const retry = await proxy(request, env, alternative);
         if (retry.ok) {
-          if (target === 'primary') { s.primary[host] = { ok: false }; s.recovery[host] = 0; }
-          else s.backup.ok = false;
-          s.expires = Math.min(s.expires, now() + 5000);
+          failedOrigin(target);
+          if (target === 'primary') s.backup.ok = true;
+          else s.primary[primaryHost] = { ...s.primary[primaryHost], ok: true };
           if (navigation) {
             await retry.body?.cancel();
             return navigationRedirect(alternative === 'backup' ? STANDBY : FRONT);

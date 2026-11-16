@@ -1,0 +1,15 @@
+[Unit]
+Description=Refresh shared MangaHub origin health at most once per 24 hours
+After=network-online.target mangahub-standby.service nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/mangahub/router-health/daily-health.py
+TimeoutStartSec=20
+UMask=0022
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mangahub/router-health

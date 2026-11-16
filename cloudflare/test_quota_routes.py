@@ -21,18 +21,32 @@ class QuotaRoutingTests(unittest.TestCase):
     def test_relief_bypasses_only_image_and_static_paths_and_keeps_auth_and_source_routes(self):
         rows,api=self.fixture();previous=[dict(r) for r in rows]
         result=quota.apply('zone',previous,True,api)
-        self.assertEqual(len([r for r in result if r.get('script') is None]),16)
+        self.assertEqual(len([r for r in result if r.get('script') is None]),22)
         self.assertTrue(all(r.get('request_limit_fail_open') for r in result if r.get('script')==quota.manager.ROUTER))
         self.assertEqual(next(r for r in result if r['id']=='source'),previous[-1])
         count=len(result);quota.apply('zone',[dict(r) for r in result],True,api)
         self.assertEqual(len(rows),count)
     def test_frontend_country_failure_policy_is_not_relaxed_without_independent_guard(self):
         rows,api=self.fixture();quota.apply('zone',[dict(r) for r in rows],False,api)
+        self.assertFalse(any(r['pattern'] in {'mangahub.art/index.html','standby.mangahub.art/index.html'} for r in rows))
         for row in rows:
             if row['pattern'] in {'mangahub.art/*','standby.mangahub.art/*'}:self.assertFalse(row['request_limit_fail_open'])
             if row['pattern'] in {'api.mangahub.art/*','auth.mangahub.art/*'}:self.assertTrue(row['request_limit_fail_open'])
     def test_unrelated_image_worker_is_preserved_and_changes_rolled_back(self):
         rows,api=self.fixture();rows.append({'id':'unrelated','pattern':'standby.mangahub.art/api/images/*','script':'other-worker'})
+        before=[dict(r) for r in rows]
+        with self.assertRaises(AssertionError):quota.apply('zone',before,True,api)
+        self.assertEqual(rows,before)
+    def test_health_bypass_preserves_operator_authentication_and_unrelated_workers(self):
+        rows,api=self.fixture()
+        rows.append({'id':'operator','pattern':'standby.mangahub.art/internal/router-probe*','script':quota.manager.ROUTER})
+        result=quota.apply('zone',[dict(r) for r in rows],True,api)
+        self.assertEqual(next(r for r in result if r['id']=='operator')['script'],quota.manager.ROUTER)
+        self.assertEqual(quota.HEALTH_BYPASS,{'mangahub.art/index.html','standby.mangahub.art/index.html',
+            'api.mangahub.art/health','auth.mangahub.art/auth/health','standby.mangahub.art/internal/origin-status*',
+            'standby.mangahub.art/internal/router-health'})
+        rows,api=self.fixture()
+        rows.append({'id':'unrelated','pattern':'standby.mangahub.art/internal/origin-status*','script':'other-worker'})
         before=[dict(r) for r in rows]
         with self.assertRaises(AssertionError):quota.apply('zone',before,True,api)
         self.assertEqual(rows,before)

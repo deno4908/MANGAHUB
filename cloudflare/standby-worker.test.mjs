@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {createStandbyWorker} from './standby-worker.js';
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
-const env={FAILOVER_ENABLED:'true',BALANCE_ENABLED:'true',BACKUP_ORIGIN:'https://standby.example',STANDBY_ORIGIN_SECRET:'fixture-origin-secret'};
+const env={FAILOVER_ENABLED:'true',BALANCE_ENABLED:'true',BACKUP_ORIGIN:'https://standby.example',STANDBY_ORIGIN_SECRET:'fixture-origin-secret',HEALTH_PROBE_MODE:'operator'};
 function request(host='api.mangahub.art',path='/api/manga/homepage',options={}) {
   const r=new Request('https://'+host+path,{...options,headers:{cookie:'mh_route=00000063',...options.headers}});
   Object.defineProperty(r,'cf',{value:{country:'VN',colo:'SIN'}});
@@ -18,7 +18,7 @@ function setup({primary=true,backup=true,capacity=true,handle,latency}={}) {
     if(latency)clock+=u.hostname==='standby.example'?latency.backup:latency.primary;
     const ready = typeof primary === 'function' ? primary() : primary;
     const backupReady = typeof backup === 'function' ? backup() : backup;
-    if((u.hostname==='mangahub.art' && u.pathname==='/' && r.headers.get('cache-control')==='no-cache') ||
+    if((u.hostname==='mangahub.art' && u.pathname==='/index.html') ||
        (u.hostname==='standby.example' && u.pathname==='/index.html')) {
       const ok = u.hostname==='mangahub.art' ? ready : backupReady;
       return new Response('<html>fixture</html>',{status:ok?200:503,headers:{'Content-Type':'text/html'}});
@@ -48,7 +48,7 @@ test('a measured faster standby raises the eligible share to 25 percent',async()
   let clock=1000;const jobs=[];
   const worker=createStandbyWorker(async(input,options={})=>{
     const r=typeof input==='string'?new Request(input,options):input,u=new URL(r.url);
-    if(u.pathname==='/index.html' || (u.hostname==='mangahub.art' && u.pathname==='/' && r.headers.get('cache-control')==='no-cache'))
+    if(u.pathname==='/index.html' || (u.hostname==='mangahub.art' && u.pathname==='/index.html'))
       return new Response('<html>fixture</html>',{headers:{'Content-Type':'text/html'}});
     if(u.pathname==='/internal/origin-status')return Response.json({status:'ready',accept_extra:true});
     if(u.pathname==='/health'||u.pathname==='/auth/health'){
@@ -65,13 +65,11 @@ test('a measured faster standby raises the eligible share to 25 percent',async()
   assert.equal(await upper.text(),'primary');
 });
 
-test('restoring an unhealthy primary requires two healthy samples',async()=>{
+test('direct operator measurements recover on the next daily sample',async()=>{
   let ready=false;const f=setup({primary:()=>ready});
   const mutation=()=>request(undefined,undefined,{method:'POST',body:'once'});
   assert.equal(await(await f.worker.fetch(mutation(),env,f.ctx)).text(),'backup');
-  ready=true;f.tick(31_000);
-  assert.equal(await(await f.worker.fetch(mutation(),env,f.ctx)).text(),'backup');
-  f.tick(31_000);
+  ready=true;f.tick(24 * 60 * 60_000 + 1);
   assert.equal(await(await f.worker.fetch(mutation(),env,f.ctx)).text(),'primary');
 });
 
@@ -343,4 +341,65 @@ test('route decisions expire automatically and invalid routing cookies do not gr
   assert.equal(r.status,307);
   r=await destination.worker.fetch(request('standby.mangahub.art','/',{headers:{accept:'text/html',cookie:cookie.replace(/.$/,'z')}}),env,destination.ctx);
   assert.equal(r.status,307);await f.done();await destination.done();
+});
+
+
+test('new isolates share the saved daily result without issuing origin health probes',async()=>{
+  const calls=[];
+  const snapshot={checkedAt:900,primary:Object.fromEntries(['mangahub.art','api.mangahub.art','auth.mangahub.art'].map(h=>[h,{ok:true,milliseconds:9999}])),backup:{ok:true,capacity:true}};
+  const shared={...env,DAILY_HEALTH_SHARED:'true'};
+  function instance(){
+    let clock=1000;const jobs=[];
+    const worker=createStandbyWorker(async(input,options={})=>{
+      const r=typeof input==='string'?new Request(input,options):input,u=new URL(r.url);calls.push(u.pathname);
+      if(u.pathname==='/internal/router-health'){
+        assert.equal(r.headers.get('X-MangaHub-Origin-Secret'),env.STANDBY_ORIGIN_SECRET);
+        return Response.json(snapshot);
+      }
+      assert.equal(r.headers.has('X-MangaHub-Origin-Secret'),false);
+      assert.equal(u.pathname,'/api/history/');
+      return new Response('primary');
+    },()=>clock);
+    return {worker,ctx:{waitUntil:p=>jobs.push(p)},done:async()=>{await Promise.all(jobs)},tick:ms=>clock+=ms};
+  }
+  for(let i=0;i<3;i++){
+    const f=instance();
+    for(let j=0;j<5;j++){
+      const r=await f.worker.fetch(request(undefined,'/api/history/'),shared,f.ctx);
+      assert.equal(await r.text(),'primary');await f.done();
+    }
+    f.tick(61000);
+    await f.worker.fetch(request(undefined,'/api/history/'),shared,f.ctx);await f.done();
+  }
+  assert.equal(calls.filter(p=>p==='/internal/router-health').length,6);
+  assert.equal(calls.filter(p=>['/health','/auth/health','/internal/origin-status','/index.html'].includes(p)).length,0);
+});
+
+test('a real outage overrides the daily snapshot and an unchanged file cannot undo it',async()=>{
+  let clock=1000;const jobs=[],calls=[];
+  const snapshot={checkedAt:900,primary:Object.fromEntries(['mangahub.art','api.mangahub.art','auth.mangahub.art'].map(h=>[h,{ok:true}])),backup:{ok:true,capacity:true}};
+  const shared={...env,DAILY_HEALTH_SHARED:'true'};
+  const worker=createStandbyWorker(async(input,options={})=>{
+    const r=typeof input==='string'?new Request(input,options):input,u=new URL(r.url);
+    if(u.pathname==='/internal/router-health')return Response.json(snapshot);
+    calls.push(u.hostname);
+    return new Response(u.hostname==='standby.example'?'backup':'failed',{status:u.hostname==='standby.example'?200:503});
+  },()=>clock);
+  const ctx={waitUntil:p=>jobs.push(p)},done=async()=>{await Promise.all(jobs.splice(0))};
+  assert.equal(await(await worker.fetch(request(),shared,ctx)).text(),'backup');await done();
+  assert.deepEqual(calls,['api.mangahub.art','standby.example']);calls.length=0;
+  clock+=61000;
+  assert.equal(await(await worker.fetch(request(),shared,ctx)).text(),'backup');await done();
+  assert.deepEqual(calls,['standby.example']);
+});
+
+test('missing shared metadata does not launch probes or block a healthy read',async()=>{
+  const calls=[],jobs=[];
+  const worker=createStandbyWorker(async(input,options={})=>{
+    const r=typeof input==='string'?new Request(input,options):input,path=new URL(r.url).pathname;calls.push(path);
+    return new Response(path==='/internal/router-health'?'missing':'reader',{status:path==='/internal/router-health'?404:200});
+  },()=>1000);
+  const r=await worker.fetch(request(),{...env,DAILY_HEALTH_SHARED:'true'},{waitUntil:p=>jobs.push(p)});
+  assert.equal(await r.text(),'reader');await Promise.all(jobs);
+  assert.deepEqual(calls.sort(),['/api/manga/homepage','/internal/router-health'].sort());
 });

@@ -9,3 +9,4 @@ routes = []
 FAILOVER_ENABLED = "false"
 BALANCE_ENABLED = "false"
 BACKUP_ORIGIN = "https://standby.mangahub.art"
+DAILY_HEALTH_SHARED = "true"
