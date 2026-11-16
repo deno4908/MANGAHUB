@@ -44,6 +44,9 @@ jobs:
       - name: Read aggregate traffic without changing production
         if: inputs.operation == 'inspect'
         run: python3 cloudflare/traffic-audit.py
+      - name: Observe aggregate paths for 90 seconds
+        if: inputs.operation == 'inspect'
+        run: node cloudflare/traffic-tail.mjs
       - name: Prepare router configuration
         if: inputs.operation == 'prepare' || inputs.operation == 'activate'
         run: |
