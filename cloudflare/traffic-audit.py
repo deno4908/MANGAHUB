@@ -28,6 +28,10 @@ def query(label, text, variables):
     return value.get('data',{}).get('viewer',{})
 
 now = datetime.now(timezone.utc)
+storage = request(f'accounts/{ACCOUNT}/storage/kv/namespaces?per_page=100')
+print(json.dumps({'health_storage_available': storage.get('success') is True,
+                  'existing_health_storage': any(row.get('title') == 'mangahub-router-health'
+                      for row in storage.get('result', []))}))
 since = now.replace(hour=0, minute=0, second=0, microsecond=0)
 if now-since < timedelta(hours=1): since = now-timedelta(hours=3)
 variables = {'account':ACCOUNT,'since':since.isoformat(),'until':now.isoformat()}
