@@ -1,6 +1,6 @@
 The router uses one shared health snapshot, refreshed at most once per 24 hours.
 Install `daily-health.py` in `/opt/mangahub/router-health/`, and the matching
-service/timer in `/etc/systemd/system/`. Create `/var/lib/mangahub/router-health`
+service/timer in `/etc/systemd/system/`. Create `/var/lib/mangahub-router-health`
 before starting the service. It reads the existing private origin secret from
 `/etc/mangahub/origin-secret`; no new credentials are needed.
 

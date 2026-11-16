@@ -71,7 +71,7 @@ server {
         limit_except GET { deny all; }
         default_type application/json;
         add_header Cache-Control "private, no-store" always;
-        alias /var/lib/mangahub/router-health/daily.json;
+        alias /var/lib/mangahub-router-health/daily.json;
     }
     location ~ ^/manga/([^/]+)$ {
         if ($mh_origin_allowed = 0) { return 307 https://mangahub.art$request_uri; }

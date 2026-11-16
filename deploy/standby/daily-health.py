@@ -11,7 +11,7 @@ import ssl
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-ROOT = Path('/var/lib/mangahub/router-health')
+ROOT = Path('/var/lib/mangahub-router-health')
 SECRET_PATH = Path('/etc/mangahub/origin-secret')
 DAY = 24 * 60 * 60
 PRIMARY_ADDRESS = '76.76.21.21'  # Vercel shared ingress; TLS still verifies the host.

@@ -38,7 +38,7 @@ class DailyHealthTests(unittest.TestCase):
         self.assertNotIn('router-health', public)
         self.assertIn('if ($mh_request_allowed = 0) { return 404; }', nginx)
         self.assertIn('location = /internal/router-health {', nginx)
-        self.assertIn('alias /var/lib/mangahub/router-health/daily.json;', nginx)
+        self.assertIn('alias /var/lib/mangahub-router-health/daily.json;', nginx)
         self.assertIn('limit_except GET { deny all; }', nginx)
 
 
