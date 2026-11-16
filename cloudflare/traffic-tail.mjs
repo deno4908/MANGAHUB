@@ -14,7 +14,7 @@ async function api(path, method, body) {
 }
 function pathGroup(path) {
   for (const prefix of ['/api/manga/truyenqq/image/', '/api/manga/truyenqq/cover/', '/api/manga/mangadex-cover/',
-    '/assets/', '/api/users/', '/manga/', '/chapter/']) {
+    '/assets/', '/api/users/', '/api/history/manga/', '/api/comments/manga/', '/manga/', '/chapter/']) {
     if (path.startsWith(prefix)) return prefix + '*';
   }
   if (path.startsWith('/api/truyenqq-edge/truyen-tranh/')) return '/api/truyenqq-edge/truyen-tranh/*';
@@ -44,6 +44,7 @@ async function observe(script) {
           const row = { host: url.hostname, path: pathGroup(url.pathname), method: request.method,
             status: value.event?.response?.status ?? null,
             ownedOrigin: ['https://mangahub.art','https://standby.mangahub.art'].includes(h.get('Origin')),
+            hasAuthorization: Boolean(h.get('Authorization')),
             workerHop: Boolean(h.get('CF-Worker')) };
           const key = JSON.stringify(row);
           counts.set(key, (counts.get(key) || 0) + 1);

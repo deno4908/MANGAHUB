@@ -13,6 +13,7 @@ from truyenapi.truyenapi.service import LiveService
 
 @pytest.fixture
 def browser(monkeypatch):
+    monkeypatch.setattr(transport.site_access, 'get_state', lambda: {'enabled': False})
     session = Mock()
     monkeypatch.setattr(transport, "Session", Mock(return_value=session))
     session.request.return_value = SimpleNamespace(
@@ -21,6 +22,70 @@ def browser(monkeypatch):
         headers=httpx.Headers({'content-encoding': 'gzip', 'content-type': 'text/html'}),
     )
     return session
+
+
+def test_private_background_work_does_not_call_a_relay_that_would_deny_it(browser, monkeypatch):
+    monkeypatch.setenv('TRUYENQQ_PREFER_EDGE', '1')
+    monkeypatch.setattr(transport.site_access, 'get_state', lambda: {'enabled': True})
+    marker = transport.source_authorization.set(None)
+    client = httpx.Client(transport=transport.TruyenQQTransport(edge_url='https://worker.example/api/truyenqq-edge'))
+    try:
+        for path in ['/truyen-moi-cap-nhat/trang-1', '/frontend/search/search']:
+            response = client.get('https://truyenqqko.com' + path)
+            assert response.status_code == 403
+            assert response.json()['code'] == 'WHITELIST_REQUIRED'
+            assert response.extensions['truyenqq_transport'] == 'edge-gateway'
+        browser.request.assert_not_called()
+    finally:
+        client.close()
+        transport.source_authorization.reset(marker)
+
+
+def test_private_reader_still_relays_normally_without_an_extra_policy_lookup(browser, monkeypatch):
+    monkeypatch.setenv('TRUYENQQ_PREFER_EDGE', '1')
+    def unexpected_lookup():
+        raise AssertionError('Readers keep the existing relay authorization check')
+    monkeypatch.setattr(transport.site_access, 'get_state', unexpected_lookup)
+    marker = transport.source_authorization.set('AccessTicket verified-fixture')
+    client = httpx.Client(transport=transport.TruyenQQTransport(edge_url='https://worker.example/api/truyenqq-edge'))
+    try:
+        assert client.get('https://truyenqqko.com/doc-truyen').status_code == 200
+        browser.request.assert_called_once()
+        assert browser.request.call_args.kwargs['headers']['Authorization'] == 'AccessTicket verified-fixture'
+    finally:
+        client.close()
+        transport.source_authorization.reset(marker)
+
+
+def test_background_relay_resumes_when_site_returns_to_public_mode(browser, monkeypatch):
+    monkeypatch.setenv('TRUYENQQ_PREFER_EDGE', '1')
+    state = {'enabled': True}
+    monkeypatch.setattr(transport.site_access, 'get_state', lambda: state)
+    marker = transport.source_authorization.set(None)
+    client = httpx.Client(transport=transport.TruyenQQTransport(edge_url='https://worker.example/api/truyenqq-edge'))
+    try:
+        assert client.get('https://truyenqqko.com/doc-truyen').status_code == 403
+        state['enabled'] = False
+        assert client.get('https://truyenqqko.com/doc-truyen').status_code == 200
+        browser.request.assert_called_once()
+    finally:
+        client.close()
+        transport.source_authorization.reset(marker)
+
+
+def test_missing_background_policy_never_starts_anonymous_relay_requests(browser, monkeypatch):
+    monkeypatch.setenv('TRUYENQQ_PREFER_EDGE', '1')
+    def unavailable():
+        raise transport.site_access.AccessUnavailable('unavailable')
+    monkeypatch.setattr(transport.site_access, 'get_state', unavailable)
+    marker = transport.source_authorization.set(None)
+    client = httpx.Client(transport=transport.TruyenQQTransport(edge_url='https://worker.example/api/truyenqq-edge'))
+    try:
+        assert client.get('https://truyenqqko.com/doc-truyen').status_code == 503
+        browser.request.assert_not_called()
+    finally:
+        client.close()
+        transport.source_authorization.reset(marker)
 
 
 def test_browser_transport_preserves_filters_and_search_form(browser):

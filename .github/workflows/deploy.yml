@@ -46,7 +46,7 @@ jobs:
       - run: python -m pip install -r backend/requirements-test.txt
       - name: Test QQ source recovery and reading history
         working-directory: backend
-        run: python -m pytest tests/test_truyenqq_integration.py tests/test_qq_gateway_recovery.py tests/test_library_reads.py tests/test_reading_history_lookup.py tests/test_saved_library_covers.py -q
+        run: python -m pytest tests/test_truyenqq_transport.py tests/test_qq_background_scope.py tests/test_truyenqq_integration.py tests/test_qq_gateway_recovery.py tests/test_library_reads.py tests/test_reading_history_lookup.py tests/test_saved_library_covers.py -q
 
   deploy-mangadex-edge:
     needs: [verify-frontend, verify-backend]

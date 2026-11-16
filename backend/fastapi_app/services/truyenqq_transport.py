@@ -7,6 +7,7 @@ import httpx
 from curl_cffi.requests import Session
 from curl_cffi.requests.exceptions import RequestException, Timeout
 from site_access import source_authorization
+import site_access
 
 
 class TruyenQQTransport(httpx.BaseTransport):
@@ -43,6 +44,19 @@ class TruyenQQTransport(httpx.BaseTransport):
         )
 
         def fetch(*, relay=False, max_read_seconds=None):
+            if relay and not source_authorization.get():
+                # Background warmups have no reader identity. In whitelist
+                # mode the relay would reject every one, after invoking both
+                # the source Worker and its access router. Make that same
+                # denial locally; an approved reader never takes this branch.
+                try:
+                    restricted = site_access.get_state()['enabled']
+                except site_access.AccessUnavailable:
+                    return httpx.Response(503, json={'error': 'Access policy unavailable'},
+                        headers={'Cache-Control': 'no-store', 'X-Site-Access-Error': 'policy-unavailable'})
+                if restricted:
+                    return httpx.Response(403, json={'code': 'WHITELIST_REQUIRED'},
+                        headers={'Cache-Control': 'no-store'})
             url = self._edge_url + request.url.raw_path.decode("ascii") if relay else str(request.url)
             # No application/source credentials or original Host header should
             # cross to the relay. The worker itself uses a fixed QQ origin.
