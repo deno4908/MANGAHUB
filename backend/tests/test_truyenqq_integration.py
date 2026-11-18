@@ -259,3 +259,49 @@ def test_admin_preserves_source_page_count_without_guessing_total(live):
     assert result["total_pages"] == 444
     assert result["page"] == 2
     assert result["manga"][0]["source"] == "truyenqq"
+
+
+def test_reader_keeps_last_manifest_while_refresh_is_blocked(live, monkeypatch):
+    store = {}
+    qq.cache.get.side_effect = store.get
+    qq.cache.set.side_effect = lambda key, value, **kwargs: store.__setitem__(key, value)
+    async def scenario():
+        first = await qq.get_chapter_manifest(SLUG, '45-5')
+        key = f'truyenqq:chapter-manifest:v1:{SLUG}:45-5'
+        assert json.loads(store[key + ':last-good']) == first
+        store.pop(key)
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = []
+        async def blocked(*args, **kwargs):
+            calls.append(args)
+            started.set()
+            await release.wait()
+            raise HTTPException(503, 'source temporarily blocked')
+        monkeypatch.setattr(qq, 'run_live', blocked)
+        cached = await asyncio.wait_for(qq.get_chapter_manifest(SLUG, '45-5'), .5)
+        assert cached == first
+        await started.wait()
+        assert await qq.get_chapter_manifest(SLUG, '45-5') == first
+        job = next(task for identity, task in qq._catalog_jobs.items() if key in identity[1])
+        release.set();await job
+        assert await qq.get_chapter_manifest(SLUG, '45-5') == first
+        assert len(calls) == 1
+        assert store[key + ':last-good']
+    asyncio.run(scenario())
+
+
+def test_successful_manifest_refresh_replaces_the_old_page_urls(live, monkeypatch):
+    first = {'images':[{'url':'https://img.example/old.jpg'}], 'url':'https://truyenqqko.com/truyen-tranh/book', 'title':'Book'}
+    key = f'truyenqq:chapter-manifest:v1:{SLUG}:45-5'
+    store = {key + ':last-good': json.dumps(first)}
+    qq.cache.get.side_effect = store.get
+    qq.cache.set.side_effect = lambda key, value, **kwargs: store.__setitem__(key, value)
+    async def scenario():
+        value = await qq.get_chapter_manifest(SLUG, '45-5')
+        assert value == first
+        jobs = list(qq._catalog_jobs.values())
+        await asyncio.gather(*jobs)
+        refreshed = await qq.get_chapter_manifest(SLUG, '45-5')
+        assert refreshed['images'][0]['url'] != first['images'][0]['url']
+        assert json.loads(store[key + ':last-good']) == refreshed
+    asyncio.run(scenario())

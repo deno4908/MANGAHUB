@@ -1,6 +1,6 @@
 // Private, bounded, in-memory cover bytes. Never persist account assets or use a
 // shared CDN cache; SiteAccessGate and logout discard this cache on access loss.
-import { fetchImageResponse } from './imageTransport';
+import { fetchImageResponse, isProtectedImage } from './imageTransport';
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const TTL = 2 * 60_000;
 const MAX_BYTES = 24 * 1024 * 1024;
@@ -15,6 +15,7 @@ type Entry = {
   promise: Promise<string>; resolve: (value: string) => void; reject: (reason: unknown) => void;
   objectUrl?: string; bytes: number; expires: number;
   priority: CoverPriority;
+  timeout: number;
 };
 const entries = new Map<string, Entry>();
 const waiting: Entry[] = [];
@@ -59,11 +60,11 @@ function pump() {
     if (entry.controller.signal.aborted || !entry.users) continue;
     entry.started = true;
     active++;
-    const timer = window.setTimeout(() => entry.controller.abort(), 15_000);
+    const timer = window.setTimeout(() => entry.controller.abort(), entry.timeout);
     void (async () => {
       try {
         const response = await fetchImageResponse(entry.key, { signal: entry.controller.signal,
-          priority: entry.priority === 'visible' ? 'high' : entry.priority === 'prefetch' ? 'low' : 'auto' }, 15_000);
+          priority: entry.priority === 'visible' ? 'high' : entry.priority === 'prefetch' ? 'low' : 'auto' }, entry.timeout);
         if (!response.ok || !response.headers.get('content-type')?.toLowerCase().startsWith('image/')) throw new Error('Cover unavailable');
         const blob = await response.blob();
         if (!blob.size || entry.controller.signal.aborted) throw new DOMException('Cover cancelled', 'AbortError');
@@ -110,13 +111,13 @@ export function invalidateCover(value: string) {
   if (entry?.objectUrl) discard(entry);
 }
 
-export function acquireCover(key: string, priority: CoverPriority = 'normal') {
+export function acquireCover(key: string, priority: CoverPriority = 'normal', timeout = 15_000) {
   let entry = entries.get(key);
   if (entry?.objectUrl && entry.expires <= Date.now() && !entry.users) { discard(entry); entry = undefined; }
   if (!entry) {
     let resolve!: Entry['resolve'], reject!: Entry['reject'];
     const promise = new Promise<string>((yes, no) => { resolve = yes; reject = no; });
-    entry = { key, users: 0, controller: new AbortController(), started: false, promise, resolve, reject, bytes: 0, expires: 0, priority };
+    entry = { key, users: 0, controller: new AbortController(), started: false, promise, resolve, reject, bytes: 0, expires: 0, priority, timeout };
     entries.set(key, entry);
     waiting.push(entry);
   }
@@ -127,7 +128,10 @@ export function acquireCover(key: string, priority: CoverPriority = 'normal') {
   entries.delete(key); entries.set(key, current);
   pump();
   let released = false;
-  return { promise: current.promise, release: () => {
+  return { promise: current.promise, promote: (priority: CoverPriority) => {
+    if (priorityOrder[priority] < priorityOrder[current.priority]) current.priority = priority;
+    pump();
+  }, release: () => {
     if (released) return;
     released = true;
     current.users--;
@@ -153,6 +157,23 @@ export function clearCoverCache() {
 
 export function warmCovers(urls: string[]): () => void {
   const resources = [...new Set(urls)].filter(canCacheCover).slice(0, 6).map(url => acquireCover(url, 'prefetch'));
+  resources.forEach(resource => { void resource.promise.then(resource.release, resource.release); });
+  return () => resources.forEach(resource => resource.release());
+}
+
+// Reader preloads and displayed pages hold the same private blob. Native
+// Image() preloads cannot reuse authenticated, no-store fetch responses.
+export function canCacheReaderImage(url: string) {
+  return typeof URL.createObjectURL === 'function' && isProtectedImage(url);
+}
+
+export function acquireReaderImage(url: string, priority: CoverPriority = 'normal') {
+  return acquireCover(url, priority, 25_000);
+}
+
+export function warmReaderImages(urls: string[]): () => void {
+  const resources = [...new Set(urls)].filter(canCacheReaderImage).slice(0, 6)
+    .map(url => acquireReaderImage(url, 'prefetch'));
   resources.forEach(resource => { void resource.promise.then(resource.release, resource.release); });
   return () => resources.forEach(resource => resource.release());
 }

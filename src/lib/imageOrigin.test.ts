@@ -48,3 +48,28 @@ it('does not replace an image host failure with a successful HTML challenge', as
  vi.stubGlobal('fetch',send);
  expect((await fetchWithTimeout(url,{})).status).toBe(502);expect(imageOriginRoute(url)?.preferBackup).toBe(false);
 });
+
+
+it('recovers a stalled image body at the alternate origin within the same total deadline', async () => {
+  vi.useFakeTimers();
+  const send = vi.fn().mockImplementationOnce(async (_url, options) => new Response(new ReadableStream({
+    start(stream) { options.signal.addEventListener('abort', () => stream.error(new DOMException('Aborted','AbortError'))); },
+  }), { headers: { 'Content-Type':'image/jpeg' } })).mockResolvedValueOnce(image());
+  vi.stubGlobal('fetch',send);
+  const pending = fetchWithTimeout(url, {}, 25_000);
+  await vi.advanceTimersByTimeAsync(12_000);
+  expect(await(await pending).text()).toBe('bytes');
+  expect(send.mock.calls.map(x=>x[0])).toEqual([url,backup]);
+  expect(imageOriginRoute(url)?.preferBackup).toBe(true);
+});
+
+it('never retries an authorization response whose body stalls', async () => {
+  vi.useFakeTimers();
+  const send = vi.fn().mockImplementation(async (_url, options) => new Response(new ReadableStream({
+    start(stream) { options.signal.addEventListener('abort', () => stream.error(new DOMException('Aborted','AbortError'))); },
+  }), { status:403 }));
+  vi.stubGlobal('fetch',send);
+  const pending = expect(fetchWithTimeout(url, {}, 25_000)).rejects.toMatchObject({name:'AbortError'});
+  await vi.advanceTimersByTimeAsync(12_000);await pending;
+  expect(send).toHaveBeenCalledTimes(1);
+});

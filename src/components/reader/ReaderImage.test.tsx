@@ -2,15 +2,17 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest';
 import ReaderImage from './ReaderImage';
 import * as transport from '@/lib/imageTransport';
+import { clearCoverCache, acquireReaderImage } from '@/lib/coverCache';
 
 afterEach(() => {
   cleanup();
+  clearCoverCache();
   vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
-it('retries a protected QQ download in background and releases its private blob on unmount', async () => {
+it('retries a protected QQ download and clears its cached private blob on access loss', async () => {
   vi.useFakeTimers();
   vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
   vi.stubGlobal('URL', class extends URL {
@@ -30,7 +32,9 @@ it('retries a protected QQ download in background and releases its private blob 
   await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
   expect(request).toHaveBeenCalledTimes(2);
   expect(URL.revokeObjectURL).not.toHaveBeenCalled();
-  view.unmount();expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:reader-private-image');
+  view.unmount();
+  expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+  clearCoverCache();expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:reader-private-image');
 });
 
 it('silently retries transient decode/network errors and stops after a successful page', () => {
@@ -93,4 +97,32 @@ it('lets the QQ proxy finish CDN fallback before retrying an image', () => {
   act(() => vi.advanceTimersByTime(10_000));
   expect(image).toHaveAttribute('src', src);
   expect(screen.queryByText('Không thể tải ảnh')).not.toBeInTheDocument();
+});
+
+
+it('adopts an in-flight preload once and keeps downloading through visibility changes', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+  vi.stubGlobal('URL', class extends URL {
+    static createObjectURL = vi.fn(() => 'blob:shared-reader-page');
+    static revokeObjectURL = vi.fn();
+  });
+  let finish!: (response: Response) => void;
+  const request = vi.spyOn(transport, 'fetchImageResponse').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const api = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  const src = `${api}/api/manga/truyenqq/image/book-123/1/3`;
+  const preload = acquireReaderImage(src, 'prefetch');
+  render(<ReaderImage src={src} alt="Shared page" index={2} imageFit="width" pageGap={0} priority />);
+  await act(async () => {});
+  act(() => document.dispatchEvent(new Event('visibilitychange')));
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(request.mock.calls[0][1]?.signal?.aborted).toBe(false);
+  await act(async () => {
+    finish(new Response('page', { headers: { 'Content-Type': 'image/jpeg' } }));
+    await preload.promise;
+  });
+  preload.release();
+  expect(screen.getByRole('img')).toHaveAttribute('src', 'blob:shared-reader-page');
+  fireEvent.load(screen.getByRole('img'));
+  expect(request).toHaveBeenCalledTimes(1);
 });

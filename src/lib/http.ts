@@ -10,13 +10,36 @@ export async function fetchWithTimeout(url: string, options: RequestInit, timeou
   try {
     const route = imageOriginRoute(url, options.method);
     const first = route?.preferBackup ? route.backup : url;
-    const send = (target: string) => fetch(target, { credentials: 'include', ...options, signal: controller.signal });
+    let canRetryFailure = true;
+    const send = async (target: string) => {
+      canRetryFailure = true;
+      const leg = route ? new AbortController() : controller;
+      const stopLeg = () => leg.abort(controller.signal.reason);
+      if (route) {
+        if (controller.signal.aborted) stopLeg();
+        else controller.signal.addEventListener('abort', stopLeg, { once: true });
+      }
+      // Reserve part of an image's total deadline for its other owned origin.
+      // This covers stalled bodies as well as headers, without racing hosts.
+      const legTimer = route ? setTimeout(() => leg.abort(), Math.min(12_000, timeoutMs)) : undefined;
+      try {
+        const response = await fetch(target, { credentials: 'include', ...options, signal: leg.signal });
+        canRetryFailure = response.ok && !!response.headers.get('Content-Type')?.startsWith('image/') || failedImageHost(response);
+        const bytes = response.body ? await response.arrayBuffer() : null;
+        const result = new Response(bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
+        Object.defineProperty(result, 'url', { value: response.url });
+        return result;
+      } finally {
+        if (legTimer !== undefined) clearTimeout(legTimer);
+        if (route) controller.signal.removeEventListener('abort', stopLeg);
+      }
+    };
     let response: Response;
     let retried = false;
     try {
       response = await send(first);
     } catch (error) {
-      if (!route || controller.signal.aborted) throw error;
+      if (!route || controller.signal.aborted || !canRetryFailure) throw error;
       // Only fixed, application-owned image GET/HEAD endpoints can be retried.
       retried = true;
       response = await send(route.preferBackup ? route.primary : route.backup);
@@ -32,12 +55,7 @@ export async function fetchWithTimeout(url: string, options: RequestInit, timeou
         } else await alternative.body?.cancel();
       } catch { /* Preserve the original response and its diagnostics. */ }
     }
-    // fetch() resolves at headers. Keep the deadline until the API body has
-    // arrived too, so a stalled JSON body cannot leave a query pending forever.
-    const bytes = response.body ? await response.arrayBuffer() : null;
-    const result = new Response(bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
-    Object.defineProperty(result, 'url', { value: response.url });
-    return result;
+    return response;
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener('abort', cancel);

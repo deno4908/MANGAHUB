@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, memo } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { getMangaDexImageFallback } from '@/lib/mangaDexImages';
-import { fetchImageResponse, isProtectedImage } from '@/lib/imageTransport';
+import { acquireReaderImage, canCacheReaderImage, invalidateCover } from '@/lib/coverCache';
 
 interface ReaderImageProps {
   src: string;
@@ -29,6 +29,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
   const [download, setDownload] = useState<{ key: string; url: string }>();
   const imgRef = useRef<HTMLDivElement>(null);
+  const resourceRef = useRef<ReturnType<typeof acquireReaderImage>>();
   const began = useRef(0);
   const onVisibleRef = useRef(onVisible);
   onVisibleRef.current = onVisible;
@@ -57,35 +58,32 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
   const retry = cycle * (RETRY_DELAYS.length + 1) + attempt;
   const url = retry ? `${activeSrc}${activeSrc.includes('?') ? '&' : '?'}retry=${retry}` : activeSrc;
   const key = `${src}:${cycle}:${attempt}`;
-  const managed = isProtectedImage(activeSrc) && typeof URL.createObjectURL === 'function';
-  const failed = useCallback(() => { setLoaded(false);setWaiting(true); }, []);
+  const managed = canCacheReaderImage(activeSrc);
+  const failed = useCallback(() => { invalidateCover(url);setLoaded(false);setWaiting(true); }, [url]);
 
   // Own proxies need the verified website token and QQ relay recovery. Native
   // CDN URLs remain ordinary images, preserving their direct download speed.
   useEffect(() => {
     if (!inView || error || waiting || !managed) return;
-    const controller = new AbortController();
-    let disposed = false, objectUrl: string | undefined;
-    void (async () => {
-      try {
-        const response = await fetchImageResponse(url, { signal: controller.signal, priority: visible || priority ? 'high' : 'auto' });
-        if (!response.ok || !response.headers.get('Content-Type')?.startsWith('image/')) throw new Error('Image unavailable');
-        const blob = await response.blob();
-        if (disposed || !blob.size) { if (!disposed) failed();return; }
-        objectUrl = URL.createObjectURL(blob);
-        setDownload({ key, url: objectUrl });
-      } catch { if (!disposed) failed(); }
-    })();
-    return () => { disposed = true;controller.abort();if (objectUrl) URL.revokeObjectURL(objectUrl); };
+    let disposed = false;
+    const resource = acquireReaderImage(url, visible || priority ? 'visible' : 'prefetch');
+    resourceRef.current = resource;
+    void resource.promise.then(objectUrl => { if (!disposed) setDownload({ key, url: objectUrl }); },
+      () => { if (!disposed) failed(); });
+    return () => { disposed = true;resource.release();if (resourceRef.current === resource) resourceRef.current = undefined; };
     // Visibility only sets the priority at acquisition. Scrolling must not
     // cancel an image that is already downloading or revoke a decoded image.
   }, [key, inView, managed, error, waiting, url, failed]);
 
   useEffect(() => {
-    if (!inView || loaded || error || waiting) return;
+    if (visible || priority) resourceRef.current?.promote('visible');
+  }, [visible, priority]);
+
+  useEffect(() => {
+    if (!inView || loaded || error || waiting || managed) return;
     const timer = window.setTimeout(failed, /\/truyenqq\/image\//.test(activeSrc) ? 25_000 : 18_000);
     return () => window.clearTimeout(timer);
-  }, [key, activeSrc, inView, loaded, error, waiting, failed]);
+  }, [key, activeSrc, inView, loaded, error, waiting, failed, managed]);
 
   useEffect(() => {
     if (!inView || loaded || error) return;
@@ -109,12 +107,12 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
 
   useEffect(() => {
     const recover = () => {
-      if (!loaded && inView && navigator.onLine !== false && document.visibilityState !== 'hidden') setCycle(value => value + 1);
+      if (!loaded && (waiting || error) && inView && navigator.onLine !== false && document.visibilityState !== 'hidden') setCycle(value => value + 1);
     };
     window.addEventListener('online', recover);
     document.addEventListener('visibilitychange', recover);
     return () => { window.removeEventListener('online', recover);document.removeEventListener('visibilitychange', recover); };
-  }, [loaded, inView]);
+  }, [loaded, inView, waiting, error]);
 
   const fitClass = imageFit === 'width' ? 'block w-full h-auto' : imageFit === 'height'
     ? 'block max-h-screen max-w-full w-auto h-auto mx-auto object-contain' : 'block max-w-full h-auto mx-auto';

@@ -537,17 +537,45 @@ async def search_manga(keyword, page=1):
     return await asyncio.to_thread(_remember, key, payload, 60)
 
 
-@coalesce_reads(scope=_source_read_scope)
-async def get_chapter_manifest(slug, number):
-    """Share source-provided page URLs across Vercel instances, never image bytes."""
+async def _load_chapter_manifest(slug, number):
     key = f"truyenqq:chapter-manifest:v1:{slug}:{number}"
-    cached = await asyncio.to_thread(_json_cached, key)
-    if isinstance(cached, dict) and cached.get("images") and cached.get("url"):
-        return cached
     value = await run_live("chapter", slug, number)
     manifest = {field: value[field] for field in ("images", "url", "title")}
+    if not manifest['images'] or not manifest['url']:
+        raise ValueError('Invalid QQ chapter manifest')
     await asyncio.to_thread(cache.set, key, json.dumps(manifest), ttl=300)
+    await asyncio.to_thread(cache.set, key + ':last-good', json.dumps(manifest), ttl=86400)
     return manifest
+
+
+@coalesce_reads(scope=_source_read_scope)
+async def get_chapter_manifest(slug, number):
+    """Keep a reading session alive when the five-minute source cache expires.
+
+    The API still authorizes each reader before these public source URLs are
+    reused. Refresh the last valid manifest in the background, never per image.
+    """
+    key = f"truyenqq:chapter-manifest:v1:{slug}:{number}"
+    cached = await asyncio.to_thread(_json_cached, key)
+    if isinstance(cached, dict) and cached.get('images') and cached.get('url'):
+        return cached
+    stale = await asyncio.to_thread(_json_cached, key + ':last-good')
+    if not isinstance(stale, dict) or not stale.get('images') or not stale.get('url'):
+        return await _load_chapter_manifest(slug, number)
+    retry_key = key + ':refresh:' + str(int(_source_read_scope()))
+    job_key = (asyncio.get_running_loop(), retry_key)
+    if job_key not in _catalog_jobs and not await asyncio.to_thread(cache.get, retry_key):
+        # Shared cooldown prevents every page/instance retrying a blocked source.
+        await asyncio.to_thread(cache.set, retry_key, '1', ttl=60)
+        async def refresh():
+            try:
+                await _load_chapter_manifest(slug, number)
+            except Exception:
+                logger.debug('Retaining last valid QQ chapter manifest after refresh failure')
+            finally:
+                _catalog_jobs.pop(job_key, None)
+        _catalog_jobs[job_key] = create_task(refresh())
+    return stale
 
 
 async def get_chapter_image(slug, number, index):

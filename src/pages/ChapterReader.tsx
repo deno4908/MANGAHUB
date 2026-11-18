@@ -11,7 +11,7 @@ import { adaptChapterPages, adaptMangaDetail, getChapterPageFallback } from '@/l
 import { getMangaDetailPath, normalizeMangaDexId } from '@/lib/mangaLinks';
 import { loadMangaDexChapterPages } from '@/lib/mangaDexImages';
 import { incrementMangaViewsInQueryCache, invalidateMangaRealtimeQueries } from '@/lib/querySync';
-import { retainCachedCover } from '@/lib/coverCache';
+import { retainCachedCover, canCacheReaderImage, warmReaderImages } from '@/lib/coverCache';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import ReaderImage from '@/components/reader/ReaderImage';
@@ -439,6 +439,7 @@ const ChapterReader = () => {
   const readerRef = useRef<HTMLDivElement>(null);
   const autoScrollTimer = useRef<number>();
   const preloadedRef = useRef<Set<string>>(new Set());
+  const privatePreloads = useRef<Set<() => void>>(new Set());
   const prefetchTriggeredRef = useRef(false);
 
   useEffect(() => {
@@ -813,6 +814,10 @@ const ChapterReader = () => {
   }, [store.showControls]);
 
   // ─── Viewport-centric preloading: prioritize pages near current view ───
+  useEffect(() => () => {
+    privatePreloads.current.forEach(release => release());
+    privatePreloads.current.clear();
+  }, [currentChapterId]);
   useEffect(() => {
     if (!pages.length) return;
     const mode = imageLoadingMode;
@@ -820,6 +825,7 @@ const ChapterReader = () => {
     const preloadImageUrl = (url: string, priority: 'high' | 'low') => {
       if (!url || preloadedRef.current.has(url)) return;
       preloadedRef.current.add(url);
+      if (canCacheReaderImage(url)) { privatePreloads.current.add(warmReaderImages([url]));return; }
       const img = new Image();
       img.fetchPriority = priority;
       img.src = url;
@@ -852,6 +858,7 @@ const ChapterReader = () => {
     const preloadImageUrl = (url: string, priority: 'high' | 'low') => {
       if (!url || preloadedRef.current.has(url)) return;
       preloadedRef.current.add(url);
+      if (canCacheReaderImage(url)) { privatePreloads.current.add(warmReaderImages([url]));return; }
       const img = new Image();
       img.fetchPriority = priority;
       img.src = url;
