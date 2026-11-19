@@ -57,7 +57,7 @@ it('recovers a stalled image body at the alternate origin within the same total 
   }), { headers: { 'Content-Type':'image/jpeg' } })).mockResolvedValueOnce(image());
   vi.stubGlobal('fetch',send);
   const pending = fetchWithTimeout(url, {}, 25_000);
-  await vi.advanceTimersByTimeAsync(12_000);
+  await vi.advanceTimersByTimeAsync(6_000);
   expect(await(await pending).text()).toBe('bytes');
   expect(send.mock.calls.map(x=>x[0])).toEqual([url,backup]);
   expect(imageOriginRoute(url)?.preferBackup).toBe(true);
@@ -70,6 +70,40 @@ it('never retries an authorization response whose body stalls', async () => {
   }), { status:403 }));
   vi.stubGlobal('fetch',send);
   const pending = expect(fetchWithTimeout(url, {}, 25_000)).rejects.toMatchObject({name:'AbortError'});
-  await vi.advanceTimersByTimeAsync(12_000);await pending;
+  await vi.advanceTimersByTimeAsync(6_000);await pending;
+  expect(send).toHaveBeenCalledTimes(1);
+});
+
+it('finishes a slow but progressing image without restarting it at another origin', async () => {
+  vi.useFakeTimers();
+  const send = vi.fn().mockImplementation(async (_url, options) => new Response(new ReadableStream({
+    start(stream) {
+      let chunks = 0;
+      const timer = setInterval(() => {
+        stream.enqueue(new TextEncoder().encode('part'));
+        if (++chunks === 4) { clearInterval(timer);stream.close(); }
+      }, 5_000);
+      options.signal.addEventListener('abort', () => { clearInterval(timer);stream.error(new DOMException('Aborted','AbortError')); });
+    },
+  }), { headers: { 'Content-Type':'image/jpeg' } }));
+  vi.stubGlobal('fetch',send);
+  const pending = fetchWithTimeout(url, {}, 25_000);
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(await(await pending).text()).toBe('partpartpartpart');
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(imageOriginRoute(url)?.preferBackup).toBe(false);
+});
+
+it('keeps the total image deadline even when bytes continue arriving', async () => {
+  vi.useFakeTimers();
+  const send = vi.fn().mockImplementation(async (_url, options) => new Response(new ReadableStream({
+    start(stream) {
+      const timer = setInterval(() => stream.enqueue(new Uint8Array([1])), 5_000);
+      options.signal.addEventListener('abort', () => { clearInterval(timer);stream.error(new DOMException('Aborted','AbortError')); });
+    },
+  }), { headers: { 'Content-Type':'image/jpeg' } }));
+  vi.stubGlobal('fetch',send);
+  const pending = expect(fetchWithTimeout(url, {}, 25_000)).rejects.toMatchObject({name:'AbortError'});
+  await vi.advanceTimersByTimeAsync(25_000);await pending;
   expect(send).toHaveBeenCalledTimes(1);
 });

@@ -19,13 +19,36 @@ export async function fetchWithTimeout(url: string, options: RequestInit, timeou
         if (controller.signal.aborted) stopLeg();
         else controller.signal.addEventListener('abort', stopLeg, { once: true });
       }
-      // Reserve part of an image's total deadline for its other owned origin.
-      // This covers stalled bodies as well as headers, without racing hosts.
-      const legTimer = route ? setTimeout(() => leg.abort(), Math.min(12_000, timeoutMs)) : undefined;
+      // Switch origins only when an image stops making progress. A fixed leg
+      // deadline restarted large but healthy downloads on slower connections.
+      let legTimer: ReturnType<typeof setTimeout> | undefined;
+      const progress = () => {
+        if (!route) return;
+        clearTimeout(legTimer);
+        legTimer = setTimeout(() => leg.abort(), Math.min(6_000, timeoutMs));
+      };
+      progress();
       try {
         const response = await fetch(target, { credentials: 'include', ...options, signal: leg.signal });
         canRetryFailure = response.ok && !!response.headers.get('Content-Type')?.startsWith('image/') || failedImageHost(response);
-        const bytes = response.body ? await response.arrayBuffer() : null;
+        let bytes: BodyInit | null = null;
+        if (route && response.body) {
+          progress();
+          const reader = response.body.getReader();
+          const chunks: Uint8Array[] = [];
+          let size = 0;
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (value.byteLength) { chunks.push(value);size += value.byteLength;progress(); }
+            }
+            const joined = new Uint8Array(size);
+            let offset = 0;
+            for (const chunk of chunks) { joined.set(chunk, offset);offset += chunk.byteLength; }
+            bytes = joined.buffer;
+          } finally { reader.releaseLock(); }
+        } else bytes = response.body ? await response.arrayBuffer() : null;
         const result = new Response(bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
         Object.defineProperty(result, 'url', { value: response.url });
         return result;

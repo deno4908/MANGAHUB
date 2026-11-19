@@ -4,7 +4,6 @@ import { isSiteAccessRestricted } from './siteAccessState';
 const EDGE = import.meta.env.VITE_TRUYENQQ_EDGE_URL ||
   'https://mangahub-mangadex-edge.vinhytb3010.workers.dev/api/truyenqq-edge';
 const pending = new Map<string, Promise<boolean>>();
-const warmedUntil = new Map<string, number>();
 type Source = { path: string; keyword?: string };
 
 function source(path: string | null, encodedKeyword?: string | null): Source | null {
@@ -32,23 +31,11 @@ async function warm(value: Source, signal: AbortSignal | null | undefined, timeo
           body: new URLSearchParams({ search: value.keyword, type: '0' }).toString() } : {}),
       }, timeout);
       if (!response.ok) return false;
-      warmedUntil.set(key, Date.now() + 45_000);
-      if (warmedUntil.size > 200) warmedUntil.delete(warmedUntil.keys().next().value!);
       return true;
     } catch { return false; }
   })();
   pending.set(key, job);
   try { return await job; } finally { pending.delete(key); }
-}
-
-function refreshSource(value: unknown, keyword: string | null, signal: AbortSignal | null | undefined, authorization?: string | null) {
-  if (typeof value !== 'string') return;
-  try {
-    const url = new URL(value);
-    if (url.protocol !== 'https:' || url.hostname !== 'truyenqqko.com') return;
-    const hint = source(url.pathname + url.search, keyword ? encodeURIComponent(keyword) : null);
-    if (hint && (warmedUntil.get(JSON.stringify([hint, authorization || ''])) || 0) < Date.now()) void warm(hint, signal, 10_000, authorization);
-  } catch { /* Source hints are optional. */ }
 }
 
 /** Recover public QQ reads without forwarding account credentials to the relay. */
@@ -60,19 +47,19 @@ export async function fetchWithTruyenQQRelay(url: string, options: RequestInit, 
   const deadline = Date.now() + timeout;
   const authorization = isSiteAccessRestricted() ? new Headers(options.headers).get('Authorization') : null;
   let response = await fetchWithTimeout(url, options, timeout);
+  const recovered = new Set<string>();
   for (let attempt = 0; attempt < 2 && response.headers.get('X-TruyenQQ-Error') === 'http-403'; attempt++) {
     const hint = source(response.headers.get('X-TruyenQQ-Source-Path'), response.headers.get('X-TruyenQQ-Search'));
     const remaining = deadline - Date.now();
-    if (!hint || remaining <= 0 || !await warm(hint, options.signal, remaining, authorization)) return response;
+    if (!hint || recovered.has(JSON.stringify(hint)) || remaining <= 0) return response;
+    recovered.add(JSON.stringify(hint));
+    if (!await warm(hint, options.signal, remaining, authorization)) return response;
     const retryRemaining = deadline - Date.now();
     if (retryRemaining <= 0) return response;
     response = await fetchWithTimeout(url, options, retryRemaining);
   }
-  if (response.ok && response.headers.get('content-type')?.includes('application/json')) {
-    const payload = await response.clone().json().catch(() => null);
-    for (const value of [payload, payload?.latest, payload?.ongoing]) {
-      refreshSource(value?.data?.source_url, apiUrl.searchParams.get('keyword'), options.signal, authorization);
-    }
-  }
+  // Healthy backend reads already have their source data. Only an explicit
+  // source denial needs the browser's relay; speculative warming spends quota
+  // and competes with chapter images without improving this response.
   return response;
 }

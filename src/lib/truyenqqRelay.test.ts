@@ -90,3 +90,23 @@ it('authenticates only the owned relay during whitelist recovery', async () => {
   expect(fetcher.mock.calls[1][0]).toBe('https://mangahub-mangadex-edge.vinhytb3010.workers.dev/api/truyenqq-edge/doc-truyen');
   expect(fetcher.mock.calls[1][1]).toMatchObject({ headers: { Authorization: 'Bearer allowed-reader' }, credentials: 'omit' });
 });
+
+it('does not warm Cloudflare after successful catalog or homepage reads', async () => {
+  const data = { data: { source_url: 'https://truyenqqko.com/truyen-moi-cap-nhat/trang-1', items: [] } };
+  const fetcher = vi.fn().mockImplementation(async () => json({ ...data, latest: data, ongoing: data }));
+  vi.stubGlobal('fetch', fetcher);
+  await fetchWithTruyenQQRelay(api, {}, 10_000);
+  await fetchWithTruyenQQRelay('https://api.mangahub.art/api/manga/homepage', {}, 10_000);
+  expect(fetcher.mock.calls.map(call => call[0])).toEqual([api, 'https://api.mangahub.art/api/manga/homepage']);
+});
+
+it('warms a blocked source path once instead of repeating an ineffective recovery', async () => {
+  const blocked = () => json({}, 503, {
+    'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/truyen-tranh/repeated-123-chap-1',
+  });
+  const fetcher = vi.fn().mockResolvedValueOnce(blocked())
+    .mockResolvedValueOnce(new Response('chapter_content')).mockResolvedValueOnce(blocked());
+  vi.stubGlobal('fetch', fetcher);
+  expect((await fetchWithTruyenQQRelay(api, {}, 10_000)).status).toBe(503);
+  expect(fetcher).toHaveBeenCalledTimes(3);
+});
