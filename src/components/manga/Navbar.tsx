@@ -7,8 +7,8 @@ import { mangaApi } from '@/lib/api';
 import { adaptMangaItem } from '@/lib/adapters';
 import { useMangaSuggestions } from '@/hooks/useMangaSuggestions';
 import { useSettingsStore } from '@/store/settingsStore';
-import { Manga } from '@/types/manga';
 import SuggestionCover from '@/components/manga/SuggestionCover';
+import SuggestionChapter from '@/components/manga/SuggestionChapter';
 import { getMangaDetailPath } from '@/lib/mangaLinks';
 import BrandLogo from '@/components/manga/BrandLogo';
 
@@ -19,16 +19,6 @@ function compactAuthorText(author: string): string {
     .filter(Boolean);
   if (parts.length <= 2) return parts.join(', ');
   return `${parts.slice(0, 2).join(', ')}...`;
-}
-
-function chapterBadgeText(manga: Manga): string {
-  const latest = manga.chapters[manga.chapters.length - 1];
-  if (!latest) return 'Đang cập nhật';
-  // -1 = MangaDex placeholder — show title directly
-  if (latest.number === -1) return String(latest.title || 'MangaDex').trim();
-  if (Number.isFinite(latest.number) && latest.number >= 0) return `Chương ${latest.number}`;
-  const title = String(latest.title || '').trim();
-  return title || 'Đang cập nhật';
 }
 
 type NavbarProps = {
@@ -201,7 +191,7 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
                       <SuggestionCover manga={m} />
                       <div className="min-w-0">
                         <p className="text-sm font-semibold line-clamp-1">{m.title}</p>
-                        <p className="text-[10px] text-muted-foreground line-clamp-1">{compactAuthorText(m.author)} · {chapterBadgeText(m)}</p>
+                        <p className="text-[10px] text-muted-foreground line-clamp-1">{compactAuthorText(m.author)} · <SuggestionChapter manga={m} /></p>
                       </div>
                     </Link>
                   ))}
@@ -336,7 +326,7 @@ const Navbar = ({ maintenanceMode = false }: NavbarProps) => {
                     <SuggestionCover manga={m} />
                     <div className="min-w-0">
                       <p className="text-sm font-semibold line-clamp-1">{m.title}</p>
-                      <p className="text-[10px] text-muted-foreground line-clamp-1">{compactAuthorText(m.author)} · {chapterBadgeText(m)}</p>
+                      <p className="text-[10px] text-muted-foreground line-clamp-1">{compactAuthorText(m.author)} · <SuggestionChapter manga={m} /></p>
                     </div>
                   </Link>
                 ))}
