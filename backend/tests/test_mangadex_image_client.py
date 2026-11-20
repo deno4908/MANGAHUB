@@ -66,3 +66,36 @@ def test_image_client_still_rejects_html_instead_of_caching_it(monkeypatch):
         assert error
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('status', [403, 404, 429, 503])
+def test_one_http_error_does_not_close_a_pool_with_other_images_in_flight(monkeypatch, status):
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+        class PageStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                started.set()
+                await release.wait()
+                yield JPEG
+        def upstream(request):
+            if request.url.path.endswith('missing.jpg'):
+                return httpx.Response(status)
+            return httpx.Response(200, headers={'Content-Type':'image/jpeg'}, stream=PageStream())
+        monkeypatch.setattr(images, '_validate_image_url', AsyncMock(return_value=None))
+        async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+            monkeypatch.setattr(images, '_mangadex_http_client', client)
+            # The real reset closes all connections, including the healthy
+            # page body that has not finished yet.
+            reset = AsyncMock(side_effect=client.aclose)
+            monkeypatch.setattr(images, '_reset_client', reset)
+            pending = asyncio.create_task(images._fetch_once_httpx(PAGE))
+            try:
+                await asyncio.wait_for(started.wait(), 1)
+                result = await images._fetch_once_httpx(PAGE.replace('page.jpg','missing.jpg'))
+                assert result[0] is None and f'HTTP {status}' in result[2]
+                assert not client.is_closed
+                reset.assert_not_awaited()
+            finally:
+                release.set()
+            assert (await pending)[0] == JPEG
+    asyncio.run(run())

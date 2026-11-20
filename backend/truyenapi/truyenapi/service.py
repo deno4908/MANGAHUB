@@ -448,7 +448,7 @@ class LiveService:
             def successful(task):
                 value = task.result()
                 with self.image_preference_lock:
-                    self.image_preferred_host = (urlsplit(origins[task]).netloc, time.monotonic() + 60)
+                    self.image_preferred_host = (urlsplit(origins[task]).netloc, time.monotonic() + 300)
                 return value
             try:
                 done, _ = wait(tasks, timeout=0.35)

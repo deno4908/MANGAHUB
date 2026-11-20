@@ -376,11 +376,11 @@ async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=
                         raw = {"items": list(seen.values()), "fetched_at": raw.get("fetched_at"),
                                "source_url": raw.get("source_url")}
                     value = await asyncio.to_thread(_page, raw)
-                    await asyncio.to_thread(cache.set, key, json.dumps({"payload": value, "fresh_until": time.time() + 45}), ttl=1800)
+                    await asyncio.to_thread(cache.set, key, json.dumps({"payload": value, "fresh_until": time.time() + 45}), ttl=21600)
                     return value
                 except Exception:
                     if snapshot:
-                        await asyncio.to_thread(cache.set, key, json.dumps({**snapshot, "fresh_until": time.time() + 10}), ttl=1800)
+                        await asyncio.to_thread(cache.set, key, json.dumps({**snapshot, "fresh_until": time.time() + 30}), ttl=21600)
                     raise
             task = create_task(refresh())
             _catalog_jobs[task_key] = task
@@ -499,13 +499,14 @@ def _cached_detail_identifier(slug):
     return slug
 
 
+def _valid_detail(payload):
+    item = ((payload or {}).get('data') or {}).get('item') if isinstance(payload, dict) else None
+    return isinstance(item, dict) and item.get('source') == 'truyenqq' and 'chapters' in item
+
+
 @coalesce_reads(scope=_source_read_scope)
-async def get_manga_detail(slug):
-    cached = await asyncio.to_thread(_json_cached, f"truyenqq:detail:{slug}")
-    item = ((cached or {}).get("data") or {}).get("item") if isinstance(cached, dict) else None
-    if isinstance(item, dict) and item.get("source") == "truyenqq" and "chapters" in item:
-        payload = deepcopy(cached)
-    else:
+async def _load_manga_detail(slug):
+    try:
         identifier = await asyncio.to_thread(_cached_detail_identifier, slug)
         value = await run_live("comic", identifier)
         item = await asyncio.to_thread(_item, value)
@@ -514,6 +515,41 @@ async def get_manga_detail(slug):
         item["chaptersLatest"] = chapters[:1]
         payload = {"status": "success", "data": {"item": item, "seoOnPage": {"titleHead": item["name"]}}}
         await asyncio.to_thread(_remember, f"truyenqq:detail:{slug}", payload)
+        await asyncio.to_thread(cache.set, f'truyenqq:detail-last-good:{slug}', json.dumps(payload, ensure_ascii=False), ttl=21600)
+        return payload
+    except HTTPException as error:
+        if error.status_code == 404:
+            # A confirmed removal must not remain available through stale data.
+            await asyncio.to_thread(cache.delete, f'truyenqq:detail-last-good:{slug}')
+        raise
+
+
+@coalesce_reads(scope=_source_read_scope)
+async def get_manga_detail(slug):
+    fresh_key = f'truyenqq:detail:{slug}'
+    stale_key = f'truyenqq:detail-last-good:{slug}'
+    retry_key = f'truyenqq:detail-refresh:{slug}:{int(_source_read_scope())}'
+    values = await asyncio.to_thread(cache.get_many, [fresh_key, stale_key, retry_key])
+    cached, stale = _decode_cached(values.get(fresh_key)), _decode_cached(values.get(stale_key))
+    if _valid_detail(cached):
+        payload = deepcopy(cached)
+        if not _valid_detail(stale):
+            await asyncio.to_thread(cache.set, stale_key, json.dumps(cached, ensure_ascii=False), ttl=21600)
+    elif _valid_detail(stale):
+        payload = deepcopy(stale)
+        job_key = (asyncio.get_running_loop(), retry_key)
+        if job_key not in _catalog_jobs and not values.get(retry_key):
+            await asyncio.to_thread(cache.set, retry_key, '1', ttl=30)
+            async def refresh():
+                try:
+                    await _load_manga_detail(slug)
+                except Exception:
+                    logger.debug('Retaining last valid QQ detail during source outage')
+                finally:
+                    _catalog_jobs.pop(job_key, None)
+            _catalog_jobs[job_key] = create_task(refresh())
+    else:
+        payload = await _load_manga_detail(slug)
     item = payload["data"]["item"]
     canonical = item["slug"]
     # Keep existing website IDs so ratings, views, comments and bookmarks keep

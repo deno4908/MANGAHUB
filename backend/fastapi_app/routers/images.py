@@ -768,8 +768,9 @@ async def _fetch_once_httpx(url: str) -> tuple[bytes | None, str | None, str, bo
                     return data, content_type, "", False
 
                 retryable = response.status_code in {403, 404, 408, 425, 429, 500, 502, 503, 504}
-                if retryable:
-                    await _reset_client(mangadex=is_mangadex)
+                # An HTTP error is a completed request, not a broken pool.
+                # Closing the shared client here cancels unrelated page images
+                # that are still downloading and makes the reader retry them.
                 return None, None, f"HTTP {response.status_code}", retryable
         except httpx.HTTPError as error:
             await _reset_client(mangadex=is_mangadex)
@@ -846,7 +847,7 @@ async def _fetch_mangadex_candidate(url):
             host = (urlparse(url).hostname or "").lower()
             if len(_preferred_mangadex_transports) >= 32:
                 _preferred_mangadex_transports.clear()
-            _preferred_mangadex_transports[host] = (result[4], time.monotonic() + 60)
+            _preferred_mangadex_transports[host] = (result[4], time.monotonic() + 300)
         return result
     tasks = [create_task(fetch(transports[0]))]
     try:

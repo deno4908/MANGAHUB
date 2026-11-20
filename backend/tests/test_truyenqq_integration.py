@@ -305,3 +305,74 @@ def test_successful_manifest_refresh_replaces_the_old_page_urls(live, monkeypatc
         assert refreshed['images'][0]['url'] != first['images'][0]['url']
         assert json.loads(store[key + ':last-good']) == refreshed
     asyncio.run(scenario())
+
+
+def test_detail_remains_immediate_during_source_outage_and_shares_refresh(live, monkeypatch):
+    from test_catalog_updates import Cache
+    store = Cache()
+    monkeypatch.setattr(qq, 'cache', store)
+    monkeypatch.setattr(qq, '_catalog_jobs', {})
+    async def scenario():
+        first = await qq.get_manga_detail(SLUG)
+        store.delete(f'truyenqq:detail:{SLUG}')
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = []
+        async def blocked(*args, **kwargs):
+            calls.append(args);started.set();await release.wait()
+            raise HTTPException(503, 'source blocked')
+        monkeypatch.setattr(qq, 'run_live', blocked)
+        try:
+            result = await asyncio.wait_for(qq.get_manga_detail(SLUG), .5)
+            assert result == first
+            await asyncio.wait_for(started.wait(), .5)
+            assert await qq.get_manga_detail(SLUG) == first
+        finally:
+            release.set()
+            await asyncio.gather(*list(qq._catalog_jobs.values()))
+        assert await qq.get_manga_detail(SLUG) == first
+        assert len(calls) == 1
+    asyncio.run(scenario())
+
+
+def test_detail_background_refresh_publishes_new_chapters_without_mutating_previous(live, monkeypatch):
+    from copy import deepcopy
+    from test_catalog_updates import Cache
+    store = Cache()
+    monkeypatch.setattr(qq, 'cache', store)
+    monkeypatch.setattr(qq, '_catalog_jobs', {})
+    original = qq.run_live
+    async def newer(*args, **kwargs):
+        value = deepcopy(await original(*args, **kwargs))
+        chapter = value['chapters'][0]
+        chapter.update(number='99', title='Chapter 99', url=f'https://truyenqqko.com/truyen-tranh/{SLUG}-chap-99')
+        return value
+    async def scenario():
+        previous = await qq.get_manga_detail(SLUG)
+        store.delete(f'truyenqq:detail:{SLUG}')
+        monkeypatch.setattr(qq, 'run_live', newer)
+        assert await qq.get_manga_detail(SLUG) == previous
+        await asyncio.gather(*list(qq._catalog_jobs.values()))
+        current = await qq.get_manga_detail(SLUG)
+        assert current['data']['item']['chaptersLatest'][0]['chapter_name'] == '99'
+        assert previous['data']['item']['chaptersLatest'][0]['chapter_name'] != '99'
+    asyncio.run(scenario())
+
+
+def test_confirmed_removed_detail_is_not_retained_as_available(live, monkeypatch):
+    from test_catalog_updates import Cache
+    store = Cache()
+    monkeypatch.setattr(qq, 'cache', store)
+    monkeypatch.setattr(qq, '_catalog_jobs', {})
+    async def removed(*args, **kwargs):
+        raise HTTPException(404, 'source removed')
+    async def scenario():
+        await qq.get_manga_detail(SLUG)
+        store.delete(f'truyenqq:detail:{SLUG}')
+        monkeypatch.setattr(qq, 'run_live', removed)
+        await qq.get_manga_detail(SLUG)
+        await asyncio.gather(*list(qq._catalog_jobs.values()))
+        with pytest.raises(HTTPException) as result:
+            await qq.get_manga_detail(SLUG)
+        assert result.value.status_code == 404
+        assert store.get(f'truyenqq:detail-last-good:{SLUG}') is None
+    asyncio.run(scenario())
