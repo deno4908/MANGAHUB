@@ -26,10 +26,14 @@ outages. Never publish secrets in frontend variables, logs or headers.
 
 ## Selection and recovery
 
-Health and response times are sampled at the Cloudflare location serving the
-reader. This measures actual edge-to-origin latency, rather than guessing
-from country or geographic distance. Samples are shared within an isolate for
-30 seconds; ordinary reads do not wait for background probes.
+With `DAILY_HEALTH_SHARED=true`, one persisted health snapshot is refreshed
+at most once per 24 hours. Active isolates read that saved file at most once a
+minute; this does not probe both origins for every reader. See
+[DAILY_HEALTH.md](DAILY_HEALTH.md) for the timer, private file and route setup.
+Distance estimates use timings observed at the reader's Cloudflare location,
+not country alone or the daily job's location. Ordinary reads do not wait for
+background snapshot reads. Actual safe-read failures can try the other origin
+once without waiting for tomorrow's snapshot.
 
 While both origins are healthy, the standby receives at most a 10% API share,
 increasing to 25% when measured faster or when the primary reports congestion.
@@ -37,7 +41,9 @@ Frontend navigation only moves proactively when the standby is measured
 faster, or the primary is congested. Shares are intentionally bounded for a
 1 GB machine. No extra share is assigned with low memory, excessive load or
 more than eight active app requests. Actual primary outages take precedence.
-Two healthy samples are required to restore an origin previously marked down.
+A new daily snapshot can restore a previously failed origin; rereading the
+same snapshot does not erase an observed failure. The optional legacy probe
+mode uses its own recovery sampling rules.
 Images retain the healthy Vercel origin to avoid fragmenting its warm cache;
 they still fall back to the VPS on a Vercel failure. Image quality is unchanged.
 

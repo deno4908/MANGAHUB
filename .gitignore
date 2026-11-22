@@ -14,6 +14,8 @@ dist-ssr
 .env
 .env.local
 .env.production
+.env.*
+!.env.example
 
 # Python generated/runtime files
 .auth-credential-key.json
@@ -54,3 +56,22 @@ vite.config.*.timestamp-*.mjs
 *.njsproj
 *.sln
 *.sw?
+
+# One supported database installer in Git; preserve historical SQL locally.
+backend/database/*.sql
+!backend/database/database.sql
+
+# Generated deployment output and private local tooling
+.codex-artifacts/
+.vercel/
+.wrangler/
+cloudflare/.wrangler-dry-run/
+cloudflare/standby-runtime.toml
+
+# Obsolete one-off diagnostics and scratch notes (keep local copies)
+z.md
+backend/_decode_payload.py
+backend/check_api.py
+backend/check_status.py
+backend/test_api.py
+backend/reset_passwords.py
