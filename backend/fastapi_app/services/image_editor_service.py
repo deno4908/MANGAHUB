@@ -12,11 +12,26 @@ import importlib.util
 from pathlib import Path
 from typing import Any
 
-import cv2
 import httpx
-import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from config import config
+
+
+class _EditorModule:
+    """Load native image libraries only when an editor operation needs them.
+
+    Reader/API workers otherwise pay for OpenCV/NumPy mappings even when no
+    uploader opens the studio. Python's import lock shares the real module.
+    """
+    def __init__(self, name):
+        self._name = name
+
+    def __getattr__(self, name):
+        return getattr(importlib.import_module(self._name), name)
+
+
+cv2 = _EditorModule("cv2")
+np = _EditorModule("numpy")
 
 easyocr = None
 torch = None

@@ -1,8 +1,8 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { fetchWithTruyenQQRelay } from './truyenqqRelay';
+import { clearQQRecovery, fetchWithTruyenQQRelay } from './truyenqqRelay';
 import { setSiteAccessRestricted } from './siteAccessState';
 
-afterEach(() => { setSiteAccessRestricted(false); vi.unstubAllGlobals(); });
+afterEach(() => { clearQQRecovery();setSiteAccessRestricted(false); vi.unstubAllGlobals();vi.useRealTimers(); });
 const api = 'https://api.mangahub.art/api/manga/truyenqq-filtered?page=53';
 const json = (body: unknown, status = 200, headers = {}) => new Response(JSON.stringify(body), {
   status, headers: { 'Content-Type': 'application/json', ...headers },
@@ -109,4 +109,36 @@ it('warms a blocked source path once instead of repeating an ineffective recover
   vi.stubGlobal('fetch', fetcher);
   expect((await fetchWithTruyenQQRelay(api, {}, 10_000)).status).toBe(503);
   expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+it('shares failed manifest recovery across sequential chapter images and retries only after cooldown', async () => {
+  vi.useFakeTimers();
+  const blocked = () => json({}, 503, {
+    'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/truyen-tranh/shared-123-chap-1',
+  });
+  const fetcher = vi.fn().mockImplementation(async (url: string) =>
+    url.includes('workers.dev') ? new Response('source denied', { status: 403 }) : blocked());
+  vi.stubGlobal('fetch', fetcher);
+  for (let index = 1; index <= 8; index++) {
+    expect((await fetchWithTruyenQQRelay(`https://api.mangahub.art/api/manga/truyenqq/image/shared-123/1/${index}`, {}, 10_000)).status).toBe(503);
+  }
+  expect(fetcher.mock.calls.filter(([url]) => url.includes('workers.dev'))).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(30_001);
+  await fetchWithTruyenQQRelay(api, {}, 10_000);
+  expect(fetcher.mock.calls.filter(([url]) => url.includes('workers.dev'))).toHaveLength(2);
+});
+
+it('shares successful recovery hints but still asks the backend to authorize each image', async () => {
+  const blocked = () => json({}, 503, {
+    'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/truyen-tranh/successful-123-chap-1',
+  });
+  let apiCalls = 0;
+  const fetcher = vi.fn().mockImplementation(async (url: string) => {
+    if (url.includes('workers.dev')) return new Response('chapter_content');
+    return ++apiCalls % 2 ? blocked() : new Response('page', { headers: { 'Content-Type': 'image/jpeg' } });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  for (let index = 1; index <= 3; index++) expect((await fetchWithTruyenQQRelay(api, {}, 10_000)).ok).toBe(true);
+  expect(apiCalls).toBe(6);
+  expect(fetcher.mock.calls.filter(([url]) => url.includes('workers.dev'))).toHaveLength(1);
 });

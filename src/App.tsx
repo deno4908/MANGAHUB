@@ -5,7 +5,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import SiteAccessGate from '@/components/SiteAccessGate';
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Link, Navigate, Routes, Route, useLocation, useNavigate } from "react-router-dom";
-import { Component, useEffect, lazy, Suspense, useState, type ErrorInfo, type ReactNode } from "react";
+import { useEffect, Suspense, useState } from "react";
 import { AnimatePresence } from "framer-motion";
 import { BookOpen, Clock3, Home, Loader2, Lock, LogIn, RefreshCw, Settings } from "lucide-react";
 import Navbar from "./components/manga/Navbar";
@@ -17,6 +17,7 @@ import { useSettingsStore } from "./store/settingsStore";
 import { authApi, clearBanLock, FORCE_FORBIDDEN_EVENT, FORCE_LOGOUT_EVENT, FORCE_MAINTENANCE_EVENT, getAccessToken, hasBanLock, shouldRefreshSessionNow, systemApi } from "./lib/api";
 import type { MaintenanceState } from "./lib/api";
 import { lazyPage } from './lib/lazyPage';
+import RouteErrorBoundary from './components/RouteErrorBoundary';
 
 // ─── Lazy-loaded pages (code-split per route) ───
 const Index = lazyPage(() => import("./pages/Index"));
@@ -24,33 +25,33 @@ const BrowseManga = lazyPage(() => import("./pages/BrowseManga"));
 const MangaDetail = lazyPage(() => import("./pages/MangaDetail"));
 const ChapterReader = lazyPage(() => import("./pages/ChapterReader"));
 const SearchPage = lazyPage(() => import("./pages/SearchPage"));
-const Profile = lazy(() => import("./pages/Profile"));
-const PublicProfilePage = lazy(() => import("./pages/PublicProfilePage"));
+const Profile = lazyPage(() => import("./pages/Profile"));
+const PublicProfilePage = lazyPage(() => import("./pages/PublicProfilePage"));
 const BookmarksPage = lazyPage(() => import("./pages/BookmarksPage"));
 const HistoryPage = lazyPage(() => import("./pages/HistoryPage"));
-const SettingsPage = lazy(() => import("./pages/SettingsPage"));
-const NotificationsPage = lazy(() => import("./pages/NotificationsPage"));
-const UploadDashboard = lazy(() => import("./pages/UploadDashboard"));
-const UploadChapter = lazy(() => import("./pages/UploadChapter"));
-const UploadTranslationStudio = lazy(() => import("./pages/UploadTranslationStudio"));
-const AdminPanel = lazy(() => import("./pages/AdminPanel"));
-const AdminChapterReview = lazy(() => import("./pages/AdminChapterReview"));
-const RankingsPage = lazy(() => import("./pages/RankingsPage"));
-const LoginPage = lazy(() => import("./pages/LoginPage"));
-const RegisterPage = lazy(() => import("./pages/RegisterPage"));
-const ForgotPasswordPage = lazy(() => import("./pages/ForgotPasswordPage"));
-const SupportPage = lazy(() => import("./pages/SupportPage"));
-const ContactPage = lazy(() => import("./pages/ContactPage"));
-const DisclaimerPage = lazy(() => import("./pages/DisclaimerPage"));
-const AuthCallbackPage = lazy(() => import("./pages/AuthCallbackPage"));
+const SettingsPage = lazyPage(() => import("./pages/SettingsPage"));
+const NotificationsPage = lazyPage(() => import("./pages/NotificationsPage"));
+const UploadDashboard = lazyPage(() => import("./pages/UploadDashboard"));
+const UploadChapter = lazyPage(() => import("./pages/UploadChapter"));
+const UploadTranslationStudio = lazyPage(() => import("./pages/UploadTranslationStudio"));
+const AdminPanel = lazyPage(() => import("./pages/AdminPanel"));
+const AdminChapterReview = lazyPage(() => import("./pages/AdminChapterReview"));
+const RankingsPage = lazyPage(() => import("./pages/RankingsPage"));
+const LoginPage = lazyPage(() => import("./pages/LoginPage"));
+const RegisterPage = lazyPage(() => import("./pages/RegisterPage"));
+const ForgotPasswordPage = lazyPage(() => import("./pages/ForgotPasswordPage"));
+const SupportPage = lazyPage(() => import("./pages/SupportPage"));
+const ContactPage = lazyPage(() => import("./pages/ContactPage"));
+const DisclaimerPage = lazyPage(() => import("./pages/DisclaimerPage"));
+const AuthCallbackPage = lazyPage(() => import("./pages/AuthCallbackPage"));
 const FollowingPage = lazyPage(() => import("./pages/FollowingPage"));
-const ReportPage = lazy(() => import("./pages/ReportPage"));
-const AboutPage = lazy(() => import("./pages/AboutPage"));
-const FaqPage = lazy(() => import("./pages/FaqPage"));
-const BannedPage = lazy(() => import("./pages/BannedPage"));
-const ForbiddenPage = lazy(() => import("./pages/ForbiddenPage"));
-const NotFound = lazy(() => import("./pages/NotFound"));
-const LegalPage = lazy(() => import("./pages/LegalPage"));
+const ReportPage = lazyPage(() => import("./pages/ReportPage"));
+const AboutPage = lazyPage(() => import("./pages/AboutPage"));
+const FaqPage = lazyPage(() => import("./pages/FaqPage"));
+const BannedPage = lazyPage(() => import("./pages/BannedPage"));
+const ForbiddenPage = lazyPage(() => import("./pages/ForbiddenPage"));
+const NotFound = lazyPage(() => import("./pages/NotFound"));
+const LegalPage = lazyPage(() => import("./pages/LegalPage"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -91,68 +92,6 @@ const PageLoader = () => {
     </div>
   );
 };
-
-type RouteErrorBoundaryProps = {
-  children: ReactNode;
-  resetKey: string;
-};
-
-type RouteErrorBoundaryState = {
-  hasError: boolean;
-};
-
-class RouteErrorBoundary extends Component<RouteErrorBoundaryProps, RouteErrorBoundaryState> {
-  state: RouteErrorBoundaryState = { hasError: false };
-
-  static getDerivedStateFromError(): RouteErrorBoundaryState {
-    return { hasError: true };
-  }
-
-  componentDidUpdate(prevProps: RouteErrorBoundaryProps) {
-    if (prevProps.resetKey !== this.props.resetKey && this.state.hasError) {
-      this.setState({ hasError: false });
-    }
-  }
-
-  componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error("Route render failed", error, info);
-  }
-
-  render() {
-    if (!this.state.hasError) return this.props.children;
-
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center px-4 py-12 text-center">
-        <section role="alert" aria-labelledby="route-error-title" className="relative w-full max-w-md overflow-hidden rounded-3xl border border-border/70 bg-card px-6 py-9 shadow-xl shadow-black/5 sm:px-10 sm:py-11 dark:shadow-black/20">
-          <div aria-hidden="true" className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent" />
-          <div aria-hidden="true" className="relative mx-auto mb-7 flex h-20 w-20 items-center justify-center rounded-3xl border border-primary/15 bg-primary/5">
-            <BookOpen className="h-9 w-9 text-primary" strokeWidth={1.5} />
-            <span className="absolute -bottom-1.5 -right-1.5 flex h-8 w-8 items-center justify-center rounded-full border-4 border-card bg-secondary text-muted-foreground">
-              <RefreshCw className="h-3.5 w-3.5" />
-            </span>
-          </div>
-          <h1 id="route-error-title" className="text-xl font-bold tracking-tight text-foreground sm:text-2xl">Không thể tải trang này.</h1>
-          <p className="mx-auto mt-3 max-w-xs text-sm leading-7 text-muted-foreground">
-            Có thể phiên bản frontend vừa được cập nhật hoặc trình duyệt đang giữ cache cũ.
-          </p>
-          <div className="mt-7 flex flex-col justify-center gap-3 sm:flex-row">
-            <button
-              type="button"
-              onClick={() => window.location.reload()}
-              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-primary px-5 py-3 text-sm font-bold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
-            >
-              <RefreshCw className="h-4 w-4" />
-              Tải lại trang
-            </button>
-            <Link to="/" className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-border bg-background/50 px-5 py-3 text-sm font-semibold text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card">
-              <Home className="h-4 w-4" /> Về trang chủ
-            </Link>
-          </div>
-        </section>
-      </div>
-    );
-  }
-}
 
 const cleanMaintenanceText = (value: string | undefined, fallback: string) => {
   const text = String(value || "").trim();

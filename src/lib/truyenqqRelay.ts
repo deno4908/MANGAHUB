@@ -4,6 +4,9 @@ import { isSiteAccessRestricted } from './siteAccessState';
 const EDGE = import.meta.env.VITE_TRUYENQQ_EDGE_URL ||
   'https://mangahub-mangadex-edge.vinhytb3010.workers.dev/api/truyenqq-edge';
 const pending = new Map<string, Promise<boolean>>();
+const recent = new Map<string, { until: number; ok: boolean }>();
+
+export function clearQQRecovery() { recent.clear(); }
 type Source = { path: string; keyword?: string };
 
 function source(path: string | null, encodedKeyword?: string | null): Source | null {
@@ -22,6 +25,8 @@ async function warm(value: Source, signal: AbortSignal | null | undefined, timeo
   const key = JSON.stringify([value, authorization || '']);
   const running = pending.get(key);
   if (running) return running;
+  const previous = recent.get(key);
+  if (previous && previous.until > Date.now()) return previous.ok;
   const job = (async () => {
     try {
       const response = await fetchWithTimeout(EDGE.replace(/\/$/, '') + value.path, {
@@ -35,7 +40,17 @@ async function warm(value: Source, signal: AbortSignal | null | undefined, timeo
     } catch { return false; }
   })();
   pending.set(key, job);
-  try { return await job; } finally { pending.delete(key); }
+  try {
+    const ok = await job;
+    // Chapter images share one manifest. A relay failure must not cause every
+    // page/retry to warm that same source again. Never cache caller aborts.
+    if (!signal?.aborted) {
+      recent.delete(key);
+      recent.set(key, { until: Date.now() + 30_000, ok });
+      while (recent.size > 64) recent.delete(recent.keys().next().value!);
+    }
+    return ok;
+  } finally { pending.delete(key); }
 }
 
 /** Recover public QQ reads without forwarding account credentials to the relay. */

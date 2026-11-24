@@ -1,6 +1,7 @@
 // Private, bounded, in-memory cover bytes. Never persist account assets or use a
 // shared CDN cache; SiteAccessGate and logout discard this cache on access loss.
 import { fetchImageResponse, isProtectedImage } from './imageTransport';
+import { clearQQRecovery } from './truyenqqRelay';
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const TTL = 2 * 60_000;
 const MAX_BYTES = 24 * 1024 * 1024;
@@ -147,6 +148,7 @@ export function acquireCover(key: string, priority: CoverPriority = 'normal', ti
 }
 
 export function clearCoverCache() {
+  clearQQRecovery();
   for (const entry of entries.values()) {
     entry.controller.abort();
     if (!entry.started) entry.reject(new DOMException('Cover cancelled', 'AbortError'));
