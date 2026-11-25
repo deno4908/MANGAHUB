@@ -1,3 +1,4 @@
+import { readReaderMetaFromStorage, writeReaderMetaToStorage, parseChapterNumber, formatChapterNumber, isInvalidMangaSlug, cleanSlug, parseQQChapter, mergeReaderChapters, type ReaderChapter, type PersistedChapterMeta } from '@/lib/readerMetadata';
 import { useParams, useNavigate, Link, useLocation } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useChapter } from '@/hooks/useApi';
@@ -28,7 +29,6 @@ const AUTO_HIDE_DELAY = 3000;
 const VIEW_TRACK_MIN_SECONDS = 12;
 const VIEW_TRACK_MIN_PROGRESS = 15;
 const VIEW_TRACK_MIN_PAGES = 2;
-const READER_META_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const createReadSessionId = () => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -50,171 +50,8 @@ interface ChapterState {
   resumeViewer?: string;
 }
 
-interface ReaderChapter {
-  id: string;
-  number: number;
-  title: string;
-  scanlationGroup?: string;
-  translationSource?: string;
-  translationSourceLabel?: string;
-  scanlationGroups?: Array<{
-    id?: string;
-    name?: string;
-    website?: string;
-    discord?: string;
-  }>;
-  translatedLanguage?: string;
-  isUserUpload?: boolean;
-}
-
-interface PersistedChapterMeta {
-  mangaId?: string;
-  mangaSlug?: string;
-  mangaTitle?: string;
-  mangaThumb?: string;
-  chapters?: ReaderChapter[];
-  chapterSourceFilter?: string;
-  savedAt?: number;
-}
-
 const CHAPTER_SOURCE_ALL = '__all_sources__';
-
-function readerMetaKey(chapterId: string): string {
-  return `reader:chapter-meta:${chapterId}`;
-}
-
-function readerMangaMetaKey(mangaKey: string): string {
-  return `reader:manga-meta:${mangaKey}`;
-}
-
-function readerChapterIndexKey(chapterId: string): string {
-  return `reader:chapter-index:${chapterId}`;
-}
-
-function parseStoredReaderMeta(raw: string | null, store?: Storage, key?: string): PersistedChapterMeta {
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return {};
-    const savedAt = Number(parsed.savedAt || 0);
-    if (savedAt && Date.now() - savedAt > READER_META_TTL_MS) {
-      if (store && key) store.removeItem(key);
-      return {};
-    }
-    return parsed as PersistedChapterMeta;
-  } catch {
-    return {};
-  }
-}
-
-function isUsableReaderMeta(meta: PersistedChapterMeta): boolean {
-  const chapterCount = Array.isArray(meta.chapters)
-    ? new Set(meta.chapters.map((chapter) => String(chapter?.id || '').trim()).filter(Boolean)).size
-    : 0;
-  const slug = cleanSlug(meta.mangaSlug);
-  const mangaId = cleanSlug(meta.mangaId);
-  return chapterCount > 1 || (!!slug && !isInvalidMangaSlug(slug)) || (!!mangaId && !isInvalidMangaSlug(mangaId));
-}
-
-function readReaderMetaFromStorage(chapterIds: Array<string | undefined | null>): PersistedChapterMeta {
-  if (typeof window === 'undefined') return {};
-  const normalizedIds = Array.from(
-    new Set(chapterIds.map((chapterId) => String(chapterId || '').trim()).filter(Boolean)),
-  );
-  const keys = Array.from(
-    new Set(normalizedIds.map(readerMetaKey)),
-  );
-  const stores: Storage[] = [window.localStorage, window.sessionStorage];
-
-  for (const key of keys) {
-    for (const store of stores) {
-      try {
-        const parsed = parseStoredReaderMeta(store.getItem(key), store, key);
-        if (Object.keys(parsed).length && isUsableReaderMeta(parsed)) return parsed;
-      } catch {
-        // Ignore storage errors.
-      }
-    }
-  }
-
-  for (const chapterId of normalizedIds) {
-    const indexKey = readerChapterIndexKey(chapterId);
-    for (const store of stores) {
-      try {
-        const rawIndex = store.getItem(indexKey);
-        if (!rawIndex) continue;
-        const index = JSON.parse(rawIndex);
-        const savedAt = Number(index?.savedAt || 0);
-        if (savedAt && Date.now() - savedAt > READER_META_TTL_MS) {
-          store.removeItem(indexKey);
-          continue;
-        }
-        const mangaKey = String(index?.mangaKey || '').trim();
-        if (!mangaKey) continue;
-        const metaKey = readerMangaMetaKey(mangaKey);
-        const parsed = parseStoredReaderMeta(store.getItem(metaKey), store, metaKey);
-        if (Object.keys(parsed).length && isUsableReaderMeta(parsed)) return parsed;
-      } catch {
-        // Ignore storage errors.
-      }
-    }
-  }
-
-  return {};
-}
-
-function writeReaderMetaToStorage(
-  chapterIds: Array<string | undefined | null>,
-  payload: PersistedChapterMeta,
-) {
-  if (typeof window === 'undefined') return;
-  const normalizedIds = Array.from(
-    new Set(chapterIds.map((chapterId) => String(chapterId || '').trim()).filter(Boolean)),
-  );
-  const keys = Array.from(
-    new Set(normalizedIds.map(readerMetaKey)),
-  );
-  const savedAt = Date.now();
-  const value = JSON.stringify({ ...payload, savedAt });
-  for (const key of keys) {
-    try {
-      window.sessionStorage.setItem(key, value);
-    } catch {
-      // Ignore storage errors.
-    }
-    try {
-      window.localStorage.setItem(key, value);
-    } catch {
-      // Ignore storage errors.
-    }
-  }
-
-  const mangaKey = String(payload.mangaId || payload.mangaSlug || '').trim();
-  if (!mangaKey) return;
-  const metaKey = readerMangaMetaKey(mangaKey);
-  const indexValue = JSON.stringify({ mangaKey, savedAt });
-  const indexedChapterIds = Array.from(
-    new Set([
-      ...normalizedIds,
-      ...(payload.chapters || []).map((chapter) => String(chapter?.id || '').trim()).filter(Boolean),
-    ]),
-  );
-
-  for (const store of [window.sessionStorage, window.localStorage]) {
-    try {
-      store.setItem(metaKey, value);
-    } catch {
-      // Ignore storage errors.
-    }
-    for (const chapterId of indexedChapterIds) {
-      try {
-        store.setItem(readerChapterIndexKey(chapterId), indexValue);
-      } catch {
-        // Ignore storage errors.
-      }
-    }
-  }
-}
+const EMPTY_READER_CHAPTERS: ReaderChapter[] = [];
 
 function normalizeReaderChapter(chapter: any): ReaderChapter {
   const rawNumber = Number(chapter?.number ?? chapter?.chapter_number ?? chapter?.chapter);
@@ -296,25 +133,6 @@ function getReaderChapterGroups(chapter: ReaderChapter): Array<{ id: string; nam
   return [];
 }
 
-function parseChapterNumber(value: unknown): number | undefined {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : undefined;
-  }
-  const raw = String(value || '').trim().replace(',', '.');
-  if (!raw) return undefined;
-  const direct = Number(raw);
-  if (Number.isFinite(direct)) return direct;
-  const match = raw.match(/\d+(?:\.\d+)?/);
-  if (!match) return undefined;
-  const parsed = Number(match[0]);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function formatChapterNumber(value: number | undefined): string {
-  if (!Number.isFinite(value || Number.NaN) || Number(value) <= 0) return '?';
-  return Number(value).toLocaleString('vi-VN', { maximumFractionDigits: 2 });
-}
-
 function chapterSortNumber(value: number | undefined): number {
   return Number.isFinite(value) ? Number(value) : Number.MAX_SAFE_INTEGER;
 }
@@ -357,30 +175,6 @@ function inferReaderChapterFilter(chapter?: ReaderChapter): string {
   return `source:${source}`;
 }
 
-function isInvalidMangaSlug(slug?: string | null): boolean {
-  if (!slug) return true;
-  const s = slug.trim().toLowerCase();
-  if (!s || s.length < 3) return true;
-  // All-numeric slugs are invalid (dates like '20231216', IDs, etc.)
-  if (/^\d+$/.test(s)) return true;
-  // Hex hashes are invalid (MongoDB ObjectIDs, MD5 etc.)
-  if (/^[0-9a-f]{20,}$/.test(s)) return true;
-  // Chapter-like segments (chapter0, chapter1, etc.)
-  if (/^chapter\d*$/.test(s)) return true;
-  const compact = s.replace(/[-_\s.]+/g, '');
-  if (/^(?:c|ch|chap|chapter|chuong|tap|episode|ep)\d/.test(compact)) return true;
-  return ['uploads', 'comics', 'chapters', 'chapter', 'api', 'img', 'images', 'v1', 'data'].includes(s);
-}
-
-function cleanSlug(value?: string | null): string {
-  if (!value) return '';
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/^\/+|\/+$/g, '')
-    .replace(/[^a-z0-9-]/g, '');
-}
-
 function extractSlugFromChapterPath(chapterPath?: string | null): string {
   if (!chapterPath) return '';
   const parts = String(chapterPath).split('/').map(p => p.trim()).filter(Boolean);
@@ -407,6 +201,7 @@ const ChapterReader = () => {
   const location = useLocation();
   const normalizedChapterId = id?.startsWith('mdx-') ? id.slice(4) : id;
   const currentChapterId = normalizeMangaDexId(normalizedChapterId) || normalizedChapterId || '';
+  const qqChapter = parseQQChapter(currentChapterId);
   const chapterState = (location.state || {}) as ChapterState;
   const { data: chapterData, isLoading } = useChapter(currentChapterId || undefined);
   const store = useReaderStore();
@@ -467,21 +262,21 @@ const ChapterReader = () => {
     // Last resort: extract from chapter path (e.g. uploads/comics/{slug}/...)
     const fromPath = extractSlugFromChapterPath(rawItem.chapter_path);
     if (fromPath && !isInvalidMangaSlug(fromPath)) return fromPath;
-    return '';
+    return qqChapter?.slug || '';
   })();
   const fallbackMangaTitle = rawItem.comic_name || rawSeo.titleHead || 'Đang tải...';
   const fallbackMangaThumb = String(rawItem.thumb_url || rawItem.thumb || rawItem.cover_url || '').trim();
-  const fallbackChapterNumber = parseChapterNumber(rawItem.chapter_name);
+  const fallbackChapterNumber = qqChapter?.number ?? parseChapterNumber(rawItem.chapter_name);
   const fallbackChapterTitle = rawItem.chapter_title || '';
-  const rawMangaDetailId = String(chapterState.mangaId || persistedMeta.mangaId || '').trim();
-  const mangaSlug = cleanSlug(chapterState.mangaSlug || persistedMeta.mangaSlug || fallbackMangaSlug || rawMangaDetailId);
+  const rawMangaDetailId = String(qqChapter?.slug || chapterState.mangaId || persistedMeta.mangaId || '').trim();
+  const mangaSlug = cleanSlug(qqChapter?.slug || chapterState.mangaSlug || persistedMeta.mangaSlug || fallbackMangaSlug || rawMangaDetailId);
   const safeMangaSlug = isInvalidMangaSlug(mangaSlug) ? '' : mangaSlug;
   const mangaDetailId = rawMangaDetailId || safeMangaSlug;
   const mangaDetailPath = mangaDetailId ? getMangaDetailPath(mangaDetailId) : '/manga';
   const mangaTitle = chapterState.mangaTitle || persistedMeta.mangaTitle || fallbackMangaTitle;
   const mangaThumb = String(chapterState.mangaThumb || persistedMeta.mangaThumb || fallbackMangaThumb || '').trim();
   useEffect(() => retainCachedCover(mangaThumb), [mangaThumb]);
-  const provisionalChapterNumber = parseChapterNumber(chapterState.chapterNumber) ?? fallbackChapterNumber;
+  const provisionalChapterNumber = qqChapter?.number ?? parseChapterNumber(chapterState.chapterNumber) ?? fallbackChapterNumber;
   const stateChapters = useMemo(
     () => normalizeReaderChapters(chapterState.chapters || []),
     [chapterState.chapters]
@@ -504,7 +299,7 @@ const ChapterReader = () => {
     getUniqueChapterCount(persistedChapters)
   );
 
-  const { data: fallbackChapterList = [], isFetching: isFallbackChapterListLoading } = useQuery({
+  const { data: fallbackChapterList = EMPTY_READER_CHAPTERS, isFetching: isFallbackChapterListLoading } = useQuery({
     queryKey: ['manga', 'detail', safeMangaSlug, 'chapter-list-fallback'],
     queryFn: async ({ signal }) => {
       if (!safeMangaSlug) return [] as ReaderChapter[];
@@ -544,18 +339,16 @@ const ChapterReader = () => {
     initialData: () => knownChapterCount > 1
       ? (stateChapters.length >= persistedChapters.length ? stateChapters : persistedChapters)
       : undefined,
+    // Persisted navigation can render immediately, but its age must survive a
+    // remount. Treating an old list as fresh hid newly published next chapters.
+    initialDataUpdatedAt: stateChapters.length > 1 ? undefined : persistedMeta.savedAt || 0,
+    refetchOnMount: query => query.state.data?.some(chapter => chapterIdMatches(chapter.id, [currentChapterId])) ? true : 'always',
     staleTime: 10 * 60 * 1000,
   });
 
-  const baseChapters = useMemo(() => [stateChapters, persistedChapters, fallbackChapterList].reduce(
-      (best, current) => {
-        const currentCount = getUniqueChapterCount(current);
-        const bestCount = getUniqueChapterCount(best);
-        return currentCount > bestCount ? current : best;
-      },
-    [] as ReaderChapter[]
-    ),
-    [stateChapters, persistedChapters, fallbackChapterList]
+  const baseChapters = useMemo(() => mergeReaderChapters(
+    [persistedChapters, stateChapters, fallbackChapterList], currentChapterId),
+    [stateChapters, persistedChapters, fallbackChapterList, currentChapterId]
   );
 
   const chapters = useMemo(() => {
@@ -569,7 +362,7 @@ const ChapterReader = () => {
     [chapters, currentChapterId, id, normalizedChapterId]
   );
   const chapterNumber = currentChapterFromList?.number ?? provisionalChapterNumber;
-  const chapterNumberLabel = formatChapterNumber(chapterNumber);
+  const chapterNumberLabel = qqChapter && chapterNumber === undefined ? qqChapter.label : formatChapterNumber(chapterNumber);
   const chapterTitle = currentChapterFromList?.title ?? chapterState.chapterTitle ?? fallbackChapterTitle;
   const chapterFallbackLabel = chapterNumberLabel !== '?' ? `Chương ${chapterNumberLabel}` : 'Chương hiện tại';
   const cleanChapterTitle = String(chapterTitle || '').trim();
@@ -666,7 +459,7 @@ const ChapterReader = () => {
   ));
   const currentChapterIndex = chapterIndex >= 0
     ? chapterIndex
-    : Number(chapterNumber) > 0
+    : Number.isFinite(chapterNumber) && Number(chapterNumber) >= 0
       ? orderedChapters.findIndex(c => c.number === chapterNumber)
       : -1;
   const prevChapter = currentChapterIndex > 0 ? orderedChapters[currentChapterIndex - 1] : undefined;

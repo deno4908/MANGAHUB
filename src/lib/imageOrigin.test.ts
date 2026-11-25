@@ -36,6 +36,18 @@ it('moves an image off a deployment disabled by Vercel without adding a health p
   expect(send.mock.calls.map(x=>x[0])).toEqual([url,backup]);
   expect(imageOriginRoute(url)?.preferBackup).toBe(true);
 });
+it('on standby downloads directly from the local proxy and remembers primary recovery if it fails', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('window', { location: new URL('https://standby.mangahub.art/chapter/qq--book-1--2') });
+  await vi.advanceTimersByTimeAsync(60_001);
+  const send = vi.fn().mockImplementation(async () => image()); vi.stubGlobal('fetch', send);
+  await fetchWithTimeout(url, {});
+  expect(send.mock.calls.map(call => call[0])).toEqual([backup]);
+  send.mockReset().mockResolvedValueOnce(new Response('down', { status: 502 })).mockResolvedValueOnce(image());
+  await fetchWithTimeout(url, {});
+  expect(send.mock.calls.map(call => call[0])).toEqual([backup, url]);
+  expect(imageOriginRoute(url)?.preferBackup).toBe(false);
+});
 it('leaves QQ source recovery on its original host and never retries writes or external URLs', async()=>{
   const send=vi.fn().mockImplementation(async()=>new Response('blocked',{status:503,headers:{'X-TruyenQQ-Error':'http-403'}}));vi.stubGlobal('fetch',send);
   await fetchWithTimeout(url,{});expect(send).toHaveBeenCalledTimes(1);
