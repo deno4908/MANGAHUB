@@ -2302,6 +2302,7 @@ const BrowseManga = () => {
     queryKey: [
       'manga',
       'otruyen-filtered',
+      'v2-rating-sequence',
       directOTruyenFilterGenreSlugs,
       filters.status,
       filters.sort,
@@ -5464,6 +5465,14 @@ const BrowseManga = () => {
                   {qqRankingRefreshExhausted && <button type="button" className="font-semibold text-primary hover:underline"
                     onClick={() => { void otruyenFilteredServerQuery.refetch(); }}>Thử lại</button>}
                 </p>
+              )}
+              {useOTruyenFilteredServerMode && filters.sort !== 'popular' && otruyenFilteredServerQuery.data?.sourceUnavailable && (
+                <div role="alert" className="rounded-xl border border-border bg-secondary/40 p-4 mb-4 text-center space-y-2">
+                  <p className="text-sm text-muted-foreground">Chưa tải đủ danh sách từ TruyenQQ. Các truyện đã tải vẫn được giữ lại.</p>
+                  <button type="button" disabled={otruyenFilteredServerQuery.isFetching}
+                    className="text-sm font-semibold text-primary hover:underline disabled:opacity-50"
+                    onClick={() => { void otruyenFilteredServerQuery.refetch(); }}>Thử lại danh sách</button>
+                </div>
               )}
               {activeBrowseQuery.isError && (
                 <div role="alert" className="rounded-xl border border-border bg-secondary/40 p-5 mb-4 text-center space-y-3">

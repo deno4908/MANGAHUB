@@ -169,3 +169,23 @@ def test_empty_source_genres_never_replace_a_verified_filter_list(stored, monkey
         asyncio.run(qq.get_categories())
     assert 'truyenqq:genres:v1' not in stored.values
     assert 'truyenqq:genres:last-good:v1' not in stored.values
+
+
+def test_verified_catalog_survives_a_temporary_source_denial_without_another_foreground_wait(stored, monkeypatch):
+    async def run():
+        first = await qq.get_filtered(page=3, overlay_latest=False)
+        key = next(key for key in stored.values if key.startswith('truyenqq:page-snapshot:'))
+        snapshot = json.loads(stored.values[key])
+        snapshot['fresh_until'] = 0
+        stored.values[key] = json.dumps(snapshot)
+        failure = AsyncMock(side_effect=RuntimeError('temporary source denial'))
+        monkeypatch.setattr(qq, 'run_live', failure)
+        second = await qq.get_filtered(page=3, overlay_latest=False)
+        assert second == first
+        jobs = list(qq._catalog_jobs.values())
+        if jobs:
+            await asyncio.gather(*jobs, return_exceptions=True)
+        assert await qq.get_filtered(page=3, overlay_latest=False) == first
+        failure.assert_awaited_once()
+        assert qq.CATALOG_LAST_GOOD_SECONDS == 7 * 86400
+    asyncio.run(run())

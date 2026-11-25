@@ -130,6 +130,17 @@ it('keeps native QQ popularity order for zero-view titles after promoting local 
   await waitFor(() => expect(screen.getByTestId('ranked-cards')).toHaveTextContent('Local top:90|QQ first:0|QQ next:0|'));
 });
 
+it('shows a retry for an incomplete QQ rating page instead of treating two rated titles as the whole catalog', async () => {
+  vi.mocked(mangaApi.getOTruyenFiltered).mockResolvedValue({ data: {
+    ...page([{ slug: 'rated-1', name: 'Cached rated title', source: 'truyenqq' }]).data,
+    ranking_pending: true, source_error: { status: 503, code: 'http-403' },
+  } });
+  show('/manga?source=truyenqq&sort=rating');
+  await screen.findByText('Cached rated title:0|');
+  expect(screen.getByRole('alert')).toHaveTextContent('Chưa tải đủ danh sách từ TruyenQQ');
+  expect(screen.getByRole('button', { name: 'Thử lại danh sách' })).toBeEnabled();
+});
+
 it('uses the complete canonical catalog for rating order and receives its covers in the page', async () => {
   const cover = `https://uploads.mangadex.org/covers/${mdx}/fast.jpg.256.jpg`;
   vi.mocked(mangaApi.getMangaDexLatestFeed).mockResolvedValue(page([{

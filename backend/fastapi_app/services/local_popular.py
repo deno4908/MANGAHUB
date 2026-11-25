@@ -18,6 +18,23 @@ logger = logging.getLogger(__name__)
 SOURCE_WAIT_SECONDS = 30.0
 SOURCE_REFRESH_SECONDS = 26.0
 SNAPSHOT_TTL = 90
+SOURCE_SIZE_KEY = "qq:browse-source-size:v1"
+
+
+def _cached_source_size():
+    value = card_metadata._read(SOURCE_SIZE_KEY)
+    size = value.get("size") if isinstance(value, dict) else None
+    return size if type(size) is int and 1 <= size <= 96 else None
+
+
+def _remember_source_size(payload, number):
+    if number != 1:
+        return
+    pagination = ((payload.get("data") or {}).get("params") or {}).get("pagination") or {}
+    size, pages = pagination.get("totalItemsPerPage"), pagination.get("totalPages")
+    # A short, single-page genre result must never shrink the native page size.
+    if type(size) is int and 1 <= size <= 96 and isinstance(pages, int) and pages > 1:
+        card_metadata.cache.set(SOURCE_SIZE_KEY, json.dumps({"size": size}), ttl=86400)
 
 
 def _frozen(key, value=None):
@@ -37,11 +54,13 @@ async def _source_page(genres, status, number, snapshot_key, source_sort="views_
     key = f"{snapshot_key}:source:{number}"
     previous = await asyncio.to_thread(_frozen, key)
     if previous is not None:
+        await asyncio.to_thread(_remember_source_size, previous, number)
         return previous
     value = await truyenqq_service.get_filtered(genres=list(genres), page=number,
                                                 sort=source_sort, status=status or None,
                                                 overlay_latest=False, background_refresh=source_sort != "views_desc",
                                                 refresh_timeout=SOURCE_REFRESH_SECONDS)
+    await asyncio.to_thread(_remember_source_size, value, number)
     return await asyncio.to_thread(_frozen, key, value)
 
 
@@ -65,9 +84,11 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
                 else _source_page(tuple(genres), status, number, source_key, source_sort))
         return await asyncio.wait_for(read, SOURCE_WAIT_SECONDS)
 
+    known_source_size = await asyncio.to_thread(_cached_source_size) if sort not in {"popular", "rating"} else None
+    initial_number = ((page - 1) * limit // known_source_size + 1) if known_source_size else 1
     # Start the source before moderation, DB ranking or saved-title hydration.
     # Moderation still completes before a single card can be returned.
-    first_source_task = create_task(source(1))
+    first_source_task = create_task(source(initial_number))
     first_source_task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
     if inspect.isawaitable(hidden):
         hidden = await hidden
@@ -189,8 +210,8 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
             }
         return {"data": data}
 
-    source_tasks = {1: first_source_task}
-    if limit == 42 and page > 1 and len(rows) < offset + limit:
+    source_tasks = {initial_number: first_source_task}
+    if initial_number == 1 and limit == 42 and page > 1 and len(rows) < offset + limit:
         # Older callers can still request native-sized pages. The 24-title UI
         # uses the measured source size below, never an assumed page size.
         source_tasks[page] = create_task(source(page))
@@ -198,7 +219,7 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
         task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
 
     try:
-        first_source_page = await source_tasks[1]
+        first_source_page = await source_tasks[initial_number]
     except asyncio.TimeoutError as error:
         if not rows[offset:offset + limit]:
             raise HTTPException(504, "TruyenQQ phản hồi quá chậm, vui lòng thử lại.",
@@ -224,13 +245,24 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
     # that title's original slot. Random access needs only the small prefix
     # and the requested source page(s), independent of the target page number.
     pagination = ((first_source_page.get("data") or {}).get("params") or {}).get("pagination") or {}
-    source_size = max(1, manga._safe_int(pagination.get("totalItemsPerPage"))
+    source_size = known_source_size or max(1, manga._safe_int(pagination.get("totalItemsPerPage"))
                       or len((first_source_page.get("data") or {}).get("items") or []) or limit)
     source_pages = max(1, manga._otruyen_payload_total_pages(first_source_page))
     total = pagination.get("totalItems")
     source_total = manga._safe_int(total) if total is not None else source_pages * source_size
     uploads = sum(row.get("source") == "uploaded" for row in rows)
     total_items = source_total + uploads
+    if sort == "rating":
+        from fastapi_app.services import qq_rating
+        def visible_rating(item):
+            return bool(item and item.get("slug") and manga._otruyen_item_matches_filters(
+                item, required_genres=set(), status_value="", show_mature=show_mature, hidden=hidden))
+        selected, source_error, exact = await qq_rating.page(number=page, limit=limit, ranked=rows,
+            first=first_source_page, source=source, visible=visible_rating, snapshot_key=snapshot_key,
+            source_pages=source_pages, total_bound=total_items + len(rows))
+        return response(selected, refreshing=pending or source_error is not None,
+            total=exact if exact is not None else total_items if total is not None else None,
+            pages=max(1, math.ceil((exact if exact is not None else total_items) / limit)), source_error=source_error)
     if len(selected) == limit:
         return response(selected, refreshing=pending, total=total_items if total is not None else None,
                         pages=max(1, math.ceil(total_items / limit)))
@@ -240,9 +272,9 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
     end = max(start, offset + limit - uploads)
     prefix_pages = set(range(1, math.ceil(prefix_size / source_size) + 1))
     requested_pages = set(range(start // source_size + 1, math.ceil(end / source_size) + 1))
-    numbers = sorted((prefix_pages | requested_pages) - {1})
+    numbers = sorted((prefix_pages | requested_pages) - {initial_number})
     numbers = [number for number in numbers if number <= source_pages]
-    payloads = {1: first_source_page}
+    payloads = {initial_number: first_source_page}
     source_failure = None
     results = await asyncio.gather(*(source_tasks[number] if number in source_tasks else source(number)
                                      for number in numbers), return_exceptions=True)
@@ -304,6 +336,11 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
             item.update(views=0, view_count=0, local_view_count=0)
             selected.append(item)
     require_page_data()
+    if source_pages in payloads:
+        # The last source page provides an exact count even when QQ omits its
+        # total. This also removes empty trailing 24-title pages.
+        source_total = (source_pages - 1) * source_size + len((payloads[source_pages].get("data") or {}).get("items") or [])
+        total = source_total
     total_items = source_total + uploads
     return response(selected, refreshing=pending, total=total_items if total is not None else None,
                     pages=max(1, math.ceil(total_items / limit)), source_error=source_failure)

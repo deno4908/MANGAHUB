@@ -8,13 +8,18 @@ from fastapi import HTTPException
 from fastapi.responses import Response
 
 from fastapi_app.routers import manga, ratings
-from fastapi_app.services import card_metadata, local_popular
+from fastapi_app.services import card_metadata, local_popular, qq_rating
 
 
 @pytest.fixture(autouse=True)
 def isolated_popularity_snapshots(monkeypatch):
     original = local_popular.truyenqq_service.get_filtered
     monkeypatch.setattr(local_popular, "_frozen", lambda key, value=None: value)
+    monkeypatch.setattr(local_popular, "_cached_source_size", lambda: None)
+    monkeypatch.setattr(local_popular, "_remember_source_size", lambda *args: None)
+    monkeypatch.setattr(qq_rating, "_read", lambda key: None)
+    monkeypatch.setattr(qq_rating, "_save_page", lambda key, value: value)
+    monkeypatch.setattr(qq_rating, "_checkpoints", lambda key, page: None)
     monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", AsyncMock(return_value={"data": {"items": []}}))
     return original
 
@@ -106,7 +111,7 @@ def test_rated_qq_prefix_fills_to_24_with_latest_and_does_not_forge_views(monkey
     assert len(first) == 24 and len(second) == 18
     assert first[0]["slug"] == "book-30" and first[0]["rating_average"] == 4.8
     assert first[0]["views"] == 0
-    assert [row["slug"] for row in first[1:]] == [f"book-{index}" for index in range(1, 24)]
+    assert [row["slug"] for row in first[1:]] == [f"book-{index}" for index in range(23)]
     assert len({row["slug"] for row in first + second}) == 42
 
 
@@ -123,7 +128,9 @@ def test_source_filtered_cards_need_no_extra_detail_reads_for_missing_genre_labe
     assert source.call_args.kwargs["status"] == "ongoing"
 
 
-def test_jumping_to_page_300_with_24_titles_does_not_walk_the_catalog(monkeypatch):
+@pytest.mark.parametrize("known_size, expected", [(None, [1, 171, 172]), (42, [171, 172])])
+def test_jumping_to_page_300_with_24_titles_does_not_walk_the_catalog(monkeypatch, known_size, expected):
+    monkeypatch.setattr(local_popular, "_cached_source_size", lambda: known_size)
     calls = []
     async def listing(**kwargs):
         number = kwargs["page"]
@@ -135,7 +142,7 @@ def test_jumping_to_page_300_with_24_titles_does_not_walk_the_catalog(monkeypatc
     result = asyncio.run(local_popular.qq_popular(page=300, limit=24, genres=[], status="",
         show_mature=True, hidden={}, db=EmptyDB(), sort="latest"))["data"]
     assert [row["slug"] for row in result["items"]] == [f"book-{index}" for index in range(7176, 7200)]
-    assert calls == [1, 171, 172]
+    assert calls == expected
 
 
 def test_qq_popular_paginates_local_counts_before_source_order_and_keeps_alias_views(monkeypatch):

@@ -831,6 +831,7 @@ export function adaptListData(data: any): {
   currentPage: number;
   totalPages: number;
   rankingPending: boolean;
+  sourceUnavailable: boolean;
 } {
   const items = data?.data?.items || [];
   const params = data?.data?.params || {};
@@ -844,6 +845,7 @@ export function adaptListData(data: any): {
     totalItems,
     currentPage,
     rankingPending: data?.data?.ranking_pending === true,
+    sourceUnavailable: Boolean(data?.data?.source_error),
     totalPages: Number(params.pagination?.totalPages) || (itemsPerPage > 0 ? Math.ceil(totalItems / itemsPerPage) : 1),
   };
 }

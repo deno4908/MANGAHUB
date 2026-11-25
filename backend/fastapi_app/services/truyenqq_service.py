@@ -48,6 +48,7 @@ _reader_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="qq-read
 _card_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="qq-card-chapter")
 _random_pool: list[dict] = []
 _catalog_jobs = {}
+CATALOG_LAST_GOOD_SECONDS = 7 * 86400
 _COLLECTIONS = {
     "truyen-moi": "latest", "dang-phat-hanh": "ongoing",
     "hoan-thanh": "completed", "sap-ra-mat": "new",
@@ -377,11 +378,11 @@ async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=
                         raw = {"items": list(seen.values()), "fetched_at": raw.get("fetched_at"),
                                "source_url": raw.get("source_url")}
                     value = await asyncio.to_thread(_page, raw)
-                    await asyncio.to_thread(cache.set, key, json.dumps({"payload": value, "fresh_until": time.time() + 45}), ttl=21600)
+                    await asyncio.to_thread(cache.set, key, json.dumps({"payload": value, "fresh_until": time.time() + 45}), ttl=CATALOG_LAST_GOOD_SECONDS)
                     return value
                 except Exception:
                     if snapshot:
-                        await asyncio.to_thread(cache.set, key, json.dumps({**snapshot, "fresh_until": time.time() + 30}), ttl=21600)
+                        await asyncio.to_thread(cache.set, key, json.dumps({**snapshot, "fresh_until": time.time() + 30}), ttl=CATALOG_LAST_GOOD_SECONDS)
                     raise
             task = create_task(refresh())
             _catalog_jobs[task_key] = task
