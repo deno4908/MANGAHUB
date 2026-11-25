@@ -450,3 +450,47 @@ test('an observed primary outage overrides an existing signed primary navigation
   assert.equal(result.headers.get('Location'),null);
   await Promise.all(jobs);await source.done();
 });
+
+test('a cold connection can read the saved daily decision without performing health probes',async()=>{
+  const calls=[];
+  const snapshot={checkedAt:900,primary:Object.fromEntries(['mangahub.art','api.mangahub.art','auth.mangahub.art'].map(h=>[h,{ok:false}])),backup:{ok:true,capacity:true}};
+  const worker=createStandbyWorker(async(input,options={})=>{
+    const r=typeof input==='string'?new Request(input,options):input;
+    calls.push(new URL(r.url).pathname);
+    if(new URL(r.url).pathname==='/internal/router-health') {
+      await new Promise((resolve,reject)=>{
+        const timer=setTimeout(resolve,650);
+        const signal=options.signal||r.signal;
+        signal.addEventListener('abort',()=>{clearTimeout(timer);reject(new DOMException('Aborted','AbortError'));},{once:true});
+      });
+      return Response.json(snapshot);
+    }
+    assert.equal(new URL(r.url).hostname,'standby.example');
+    return new Response('<html>backup</html>',{headers:{'Content-Type':'text/html'}});
+  },()=>1000);
+  const result=await worker.fetch(request('standby.mangahub.art','/',{headers:{accept:'text/html'}}),
+    {...env,DAILY_HEALTH_SHARED:'true'},{waitUntil:()=>{}});
+  assert.equal(result.status,200);
+  assert.equal(result.headers.get('Location'),null);
+  assert.deepEqual(calls,['/internal/router-health','/']);
+});
+
+test('returns standby navigation to Vercel when the next saved daily decision confirms recovery',async()=>{
+  let clock=1000,healthy=false;
+  const calls=[];
+  const worker=createStandbyWorker(async(input,options={})=>{
+    const r=typeof input==='string'?new Request(input,options):input;
+    const path=new URL(r.url).pathname;calls.push(path);
+    if(path==='/internal/router-health')return Response.json({checkedAt:clock-100,
+      primary:Object.fromEntries(['mangahub.art','api.mangahub.art','auth.mangahub.art'].map(h=>[h,{ok:healthy}])),backup:{ok:true,capacity:true}});
+    return new Response('<html>backup</html>',{headers:{'Content-Type':'text/html'}});
+  },()=>clock);
+  const shared={...env,DAILY_HEALTH_SHARED:'true'};
+  const navigation=()=>request('standby.mangahub.art','/chapter/qq--book-1--2',{headers:{accept:'text/html'}});
+  assert.equal((await worker.fetch(navigation(),shared,{waitUntil:()=>{}})).status,200);
+  healthy=true;clock+=24*60*60*1000;
+  const recovery=await worker.fetch(navigation(),shared,{waitUntil:()=>{}});
+  assert.equal(recovery.status,307);
+  assert.equal(recovery.headers.get('Location'),'https://mangahub.art/chapter/qq--book-1--2');
+  assert.deepEqual(calls,['/internal/router-health','/chapter/qq--book-1--2','/internal/router-health']);
+});

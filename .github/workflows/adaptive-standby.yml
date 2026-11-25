@@ -68,12 +68,15 @@ jobs:
         if: inputs.operation == 'update'
         run: |
           python3 - <<'PY'
-          import os,json,urllib.request
+          import os,json,urllib.request,time
           base='https://standby.mangahub.art/internal/router-probe'
           for query in ['kind=daily-health','kind=readiness','kind=frontend&target=backup','kind=api&target=backup','kind=auth&target=backup']:
               request=urllib.request.Request(base+'?'+query,headers={'X-MangaHub-Probe-Secret':os.environ['STANDBY_ORIGIN_SECRET'],'User-Agent':'MangaHub-Standby-Operator/1.0'})
-              with urllib.request.urlopen(request,timeout=20) as response: result=json.load(response)
-              valid=result.get('initialized') and result.get('shared') if query=='kind=daily-health' else result.get('ok') if query=='kind=readiness' else result.get('status')==200
+              for attempt in range(3):
+                  with urllib.request.urlopen(request,timeout=20) as response: result=json.load(response)
+                  valid=result.get('initialized') and result.get('shared') if query=='kind=daily-health' else result.get('ok') if query=='kind=readiness' else result.get('status')==200
+                  if valid:break
+                  if attempt<2:time.sleep(1)
               print(json.dumps({'probe':query,'healthy':bool(valid)}))
               assert valid,'Standby verification failed'
           PY

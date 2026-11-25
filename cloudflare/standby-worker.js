@@ -99,7 +99,9 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       const { value, milliseconds } = await timed(backupOrigin(env) + '/internal/router-health', {
         headers: { 'X-MangaHub-Origin-Secret': env.STANDBY_ORIGIN_SECRET,
           'Cache-Control': 'no-cache' }, cf: { cacheTtl: 0 },
-      }, 500);
+      // A cold edge-to-Sydney TLS connection can exceed 500 ms. This reads
+      // only the saved file; it never issues additional application probes.
+      }, 1500);
       if (!validSnapshot(value)) return null;
       // Measure distance from this edge, not from the VPS writing the file.
       return { ...value, backup: { ...value.backup, milliseconds, frontendMilliseconds: milliseconds } };
