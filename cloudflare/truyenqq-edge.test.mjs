@@ -43,6 +43,18 @@ test('a challenge of the policy endpoint is unavailable, never a false whitelist
   }
 });
 
+test('policy denial diagnostics expose only fixed categories without leaking user data',async()=>{
+  for (const [code,reason] of [['COUNTRY_NOT_SUPPORTED','country'],['ACCESS_TICKET_REVOKED','ticket'],
+    ['WHITELIST_REQUIRED','whitelist'],['private-user-data','authentication']]) {
+    const env={ACCESS_ROUTER:{fetch:async()=>Response.json({code,detail:'private-user-data'},{status:403})}};
+    globalThis.fetch=()=>{throw new Error('Denied request must not reach source');};
+    const r=await worker.fetch(new Request(edge+'/doc-truyen'),env);
+    assert.equal(r.status,403);
+    assert.equal(r.headers.get('X-Site-Access-Denial'),reason);
+    assert.doesNotMatch(await r.text(),/private-user-data/);
+  }
+});
+
 test('QQ filters relay to the fixed source with the full page and query', async () => {
   mockFetch(async (url, options) => {
     assert.equal(url, 'https://truyenqqko.com/tim-kiem-nang-cao/trang-7?sort=4&category=26');

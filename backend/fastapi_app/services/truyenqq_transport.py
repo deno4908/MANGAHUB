@@ -17,6 +17,9 @@ def _relay_failure_kind(result):
     if result.headers.get('x-site-access-error') == 'edge-challenge':
         return 'edge-challenge'
     if b'whitelist_required' in content:
+        denial = result.headers.get('x-site-access-denial')
+        if denial in {'country', 'ticket', 'whitelist', 'authentication'}:
+            return 'denied-' + denial
         reason = result.headers.get('x-site-access-error')
         return reason if reason in {'http-401', 'http-403', 'policy-authenticated', 'policy-anonymous'} else 'access-denied'
     if any(marker in content for marker in [b'cf-chl-', b'challenge-platform', b'just a moment']):

@@ -30,6 +30,13 @@ def test_policy_edge_challenge_is_classified_without_the_challenge_html():
     assert transport._relay_failure_kind(value) == 'edge-challenge'
 
 
+@pytest.mark.parametrize('denial', ['country', 'ticket', 'whitelist', 'authentication'])
+def test_policy_denial_categories_do_not_include_credentials(denial):
+    value = SimpleNamespace(status_code=403, content=b'{"code":"WHITELIST_REQUIRED"}',
+                            headers=httpx.Headers({'X-Site-Access-Denial': denial}))
+    assert transport._relay_failure_kind(value) == 'denied-' + denial
+
+
 @pytest.fixture
 def browser(monkeypatch):
     monkeypatch.setattr(transport.site_access, 'get_state', lambda: {'enabled': False})

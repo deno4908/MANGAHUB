@@ -21,7 +21,13 @@ async function checkSiteAccess(request, env) {
       throw new Error('Access endpoint challenged');
     }
     if (response.status === 401 || response.status === 403) {
-      return json({ code: 'WHITELIST_REQUIRED', detail: 'Bạn không nằm trong whitelist của website.' }, 403, { 'Cache-Control': 'no-store', 'X-Site-Access-Error': 'http-' + response.status });
+      const denied = await response.json().catch(() => null);
+      const reason = ({ COUNTRY_NOT_SUPPORTED: 'country', ACCESS_TICKET_REVOKED: 'ticket',
+        WHITELIST_REQUIRED: 'whitelist' })[denied?.code] || 'authentication';
+      return json({ code: 'WHITELIST_REQUIRED', detail: 'Bạn không nằm trong whitelist của website.' }, 403, {
+        'Cache-Control': 'no-store', 'X-Site-Access-Error': 'http-' + response.status,
+        'X-Site-Access-Denial': reason,
+      });
     }
     failure = 'http-' + response.status;
     if (!response.ok) throw new Error('Access policy unavailable');
