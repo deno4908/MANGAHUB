@@ -19,7 +19,8 @@ HEALTH_BYPASS = {'mangahub.art/index.html', 'standby.mangahub.art/index.html',
                 'api.mangahub.art/health', 'auth.mangahub.art/auth/health',
                 'standby.mangahub.art/internal/origin-status*',
                 'standby.mangahub.art/internal/router-health'}
-ALL_BYPASS = BYPASS | HEALTH_BYPASS
+SOURCE_ACCESS_BYPASS = {'standby.mangahub.art/internal/source-access'}
+ALL_BYPASS = BYPASS | HEALTH_BYPASS | SOURCE_ACCESS_BYPASS
 COUNTRY_EXPRESSION = ('(http.host in {"mangahub.art" "standby.mangahub.art"} '
     'and ip.src.country ne "VN" and cf.worker.upstream_zone ne "mangahub.art" '
     'and not starts_with(http.request.uri.path, "/internal/") '
@@ -105,7 +106,8 @@ def main():
     if not protected and os.environ.get('COUNTRY_GUARD_CONFIRMED') == 'true':
         protected = True
     current = apply(zone, previous, protected)
-    print(json.dumps({'image_and_static_bypasses': len(BYPASS), 'health_bypasses': len(HEALTH_BYPASS), 'country_guard_independent': protected,
+    print(json.dumps({'image_and_static_bypasses': len(BYPASS), 'health_bypasses': len(HEALTH_BYPASS),
+        'source_access_bypasses': len(SOURCE_ACCESS_BYPASS), 'country_guard_independent': protected,
         'frontend_fail_open': protected, 'api_auth_fail_open': True,
         'routes': [{k: r.get(k) for k in ['pattern', 'script', 'request_limit_fail_open']} for r in current]}))
     if not protected:

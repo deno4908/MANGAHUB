@@ -67,6 +67,25 @@ server {
     if ($mh_public_host = "") { return 404; }
     # Daily health metadata is private, never an application proxy or a URL
     # selected by the caller. The server-level origin-secret gate applies.
+    # Fixed policy check for the source relay. This stays behind the same
+    # origin-secret and Cloudflare ingress gates as private readiness reads.
+    # Only the backend decides whether the forwarded reader is allowed.
+    location = /internal/source-access {
+        limit_except GET { deny all; }
+        proxy_pass http://127.0.0.1:8000/api/site-access;
+        proxy_http_version 1.1;
+        proxy_set_header Host api.mangahub.art;
+        proxy_set_header Cookie "";
+        proxy_set_header X-Real-IP $mh_client_ip;
+        proxy_set_header X-Forwarded-For $mh_client_ip;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host api.mangahub.art;
+        proxy_set_header CF-Connecting-IP "";
+        proxy_hide_header X-MangaHub-Origin;
+        proxy_buffering off;
+        proxy_read_timeout 10s;
+        proxy_connect_timeout 2s;
+    }
     location = /internal/router-health {
         limit_except GET { deny all; }
         default_type application/json;

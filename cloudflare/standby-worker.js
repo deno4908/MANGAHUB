@@ -175,7 +175,12 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       url = 'https://' + FRONT + source.pathname + source.search;
     }
     if (target === 'backup') {
-      url = backupOrigin(env) + source.pathname + source.search;
+      // The policy relay can originate in workers.dev, without a VN browser
+      // country. Its fixed, secret-protected endpoint bypasses the public
+      // frontend Worker; the backend still verifies the reader and whitelist.
+      const path = source.hostname===API && source.pathname==='/api/site-access'
+        ? '/internal/source-access' : source.pathname;
+      url = backupOrigin(env) + path + source.search;
       headers.set('X-MangaHub-Origin-Secret', env.STANDBY_ORIGIN_SECRET);
       headers.set('X-MangaHub-Public-Host', source.hostname === STANDBY ? FRONT : source.hostname);
       headers.set('X-MangaHub-Client-IP', request.headers.get('CF-Connecting-IP') || 'unknown');

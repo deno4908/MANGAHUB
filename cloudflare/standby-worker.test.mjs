@@ -415,14 +415,16 @@ test('a cold source access check uses the saved standby decision before its sing
       return Response.json(snapshot);
     }
     assert.equal(u.hostname,'standby.example');
-    assert.equal(u.pathname,'/api/site-access');
+    assert.equal(u.pathname,'/internal/source-access');
     assert.equal(r.headers.get('Authorization'),'AccessTicket fixture');
+    assert.equal(r.headers.get('X-MangaHub-Origin-Secret'),env.STANDBY_ORIGIN_SECRET);
     return Response.json({enabled:true,allowed:true,authenticated:true});
   },()=>1000);
-  const result=await worker.fetch(request(undefined,'/api/site-access',{headers:{Authorization:'AccessTicket fixture'}}),
+  // Service-binding requests do not carry a browser's country metadata.
+  const result=await worker.fetch(new Request('https://api.mangahub.art/api/site-access',{headers:{Authorization:'AccessTicket fixture'}}),
     {...env,DAILY_HEALTH_SHARED:'true'},{waitUntil:()=>{}});
   assert.equal(result.status,200);
-  assert.deepEqual(calls,['/internal/router-health','/api/site-access']);
+  assert.deepEqual(calls,['/internal/router-health','/internal/source-access']);
 });
 
 test('Vercel deployment-disabled 402 fails over a read and remembers the outage',async()=>{
