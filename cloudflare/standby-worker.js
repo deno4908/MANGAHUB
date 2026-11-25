@@ -318,7 +318,10 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
         const job = refresh(s, env);
         // Load the saved decision before selecting an origin for a mutation. Never
         // repeat a submitted write, even after a network error or a 5xx.
-        if (!SAFE(request.method) || b.test || host===STANDBY) await job;
+        // A source service binding starts without a routing lease. Select its
+        // access-policy origin from the saved decision before the first read;
+        // a primary edge challenge must not become a false whitelist denial.
+        if (!SAFE(request.method) || b.test || host===STANDBY || incoming.pathname==='/api/site-access') await job;
         else ctx.waitUntil(job);
       }
       const frontend = [FRONT, STANDBY].includes(host);

@@ -12,6 +12,14 @@ async function checkSiteAccess(request, env) {
       redirect: 'manual', signal: AbortSignal.timeout(6000),
     };
     const response = env?.ACCESS_ROUTER ? await env.ACCESS_ROUTER.fetch(new Request(SITE_ACCESS_URL,accessOptions)) : await fetch(SITE_ACCESS_URL,accessOptions);
+    // An edge challenge is not a decision by our access policy. Keep access
+    // closed without telling an approved reader that their grant was revoked.
+    if (response.headers.get('cf-mitigated') === 'challenge' ||
+        ([401, 403].includes(response.status) && response.headers.get('Content-Type')?.includes('text/html'))) {
+      failure = 'edge-challenge';
+      await response.body?.cancel();
+      throw new Error('Access endpoint challenged');
+    }
     if (response.status === 401 || response.status === 403) {
       return json({ code: 'WHITELIST_REQUIRED', detail: 'Bạn không nằm trong whitelist của website.' }, 403, { 'Cache-Control': 'no-store', 'X-Site-Access-Error': 'http-' + response.status });
     }

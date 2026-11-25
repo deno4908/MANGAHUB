@@ -24,6 +24,12 @@ def test_gateway_diagnostic_contains_only_a_bounded_category(body, kind):
     assert transport._relay_failure_kind(value) is None
 
 
+def test_policy_edge_challenge_is_classified_without_the_challenge_html():
+    value = SimpleNamespace(status_code=503, content=b'{"error":"Access check unavailable"}',
+                            headers=httpx.Headers({'X-Site-Access-Error': 'edge-challenge'}))
+    assert transport._relay_failure_kind(value) == 'edge-challenge'
+
+
 @pytest.fixture
 def browser(monkeypatch):
     monkeypatch.setattr(transport.site_access, 'get_state', lambda: {'enabled': False})

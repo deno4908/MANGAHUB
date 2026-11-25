@@ -25,6 +25,24 @@ test('source access checks use the router binding and still fail closed',async()
   assert.equal(r.status,403);assert.equal(called,1);
 });
 
+test('a challenge of the policy endpoint is unavailable, never a false whitelist revocation',async()=>{
+  for (const headers of [
+    {'Content-Type':'text/html','cf-mitigated':'challenge'},
+    {'Content-Type':'text/html; charset=UTF-8'},
+  ]) {
+    let checks=0;
+    const env={ACCESS_ROUTER:{fetch:async()=>{
+      checks++;return new Response('private edge challenge',{status:403,headers});
+    }}};
+    globalThis.fetch=()=>{throw new Error('A challenged policy must not reach source');};
+    const r=await worker.fetch(new Request(edge+'/doc-truyen'),env);
+    assert.equal(r.status,503);assert.equal(checks,1);
+    assert.equal(r.headers.get('X-Site-Access-Error'),'edge-challenge');
+    assert.equal(r.headers.get('Cache-Control'),'no-store');
+    assert.doesNotMatch(await r.text(),/WHITELIST_REQUIRED|private edge challenge/);
+  }
+});
+
 test('QQ filters relay to the fixed source with the full page and query', async () => {
   mockFetch(async (url, options) => {
     assert.equal(url, 'https://truyenqqko.com/tim-kiem-nang-cao/trang-7?sort=4&category=26');

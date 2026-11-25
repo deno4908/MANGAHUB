@@ -14,6 +14,8 @@ def _relay_failure_kind(result):
     if result.status_code not in {401, 403, 429, 503} or result.headers.get('x-truyenqq-relay') == '1':
         return None
     content = result.content[:12000].lower()
+    if result.headers.get('x-site-access-error') == 'edge-challenge':
+        return 'edge-challenge'
     if b'whitelist_required' in content:
         reason = result.headers.get('x-site-access-error')
         return reason if reason in {'http-401', 'http-403', 'policy-authenticated', 'policy-anonymous'} else 'access-denied'
