@@ -351,3 +351,27 @@ def test_both_egresses_failing_keep_the_relay_source_hints(browser, monkeypatch,
         assert browser.request.call_count == 2
     finally:
         client.close()
+
+
+def test_confirmed_direct_challenge_is_not_retried_for_every_card_but_recovers_later(browser, monkeypatch):
+    monkeypatch.setenv('TRUYENQQ_PREFER_EDGE', '1')
+    clock = [100.0]
+    monkeypatch.setattr(transport.time, 'monotonic', lambda: clock[0])
+    blocked = SimpleNamespace(status_code=403, content=b'QQ source challenge',
+        headers=httpx.Headers({'X-TruyenQQ-Relay': '1', 'X-TruyenQQ-Block': 'challenge'}))
+    direct_blocked = SimpleNamespace(status_code=403, content=b'<html>Just a moment challenge-platform</html>',
+                                     headers=httpx.Headers())
+    success = browser.request.return_value
+    browser.request.side_effect = [blocked, direct_blocked, blocked, blocked, success]
+    client = httpx.Client(transport=transport.TruyenQQTransport(edge_url='https://worker.example/api/truyenqq-edge'))
+    try:
+        url = 'https://truyenqqko.com/doc-truyen'
+        assert client.get(url).status_code == 403
+        assert browser.request.call_count == 2
+        assert client.get(url).status_code == 403
+        assert browser.request.call_count == 3  # one relay, no repeat of the failed direct egress
+        clock[0] += 301
+        assert client.get(url).status_code == 200
+        assert browser.request.call_count == 5
+    finally:
+        client.close()

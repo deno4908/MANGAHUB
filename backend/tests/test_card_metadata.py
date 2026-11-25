@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from fastapi import HTTPException
 
 from fastapi_app.routers import manga
 from fastapi_app.services import card_metadata as cards, mangadex_service as mdx, truyenqq_service as qq
@@ -18,6 +19,7 @@ TITLE = "Vợ Trong Game Của Tôi Là Idol Nổi Tiếng Ngoài Đời"
 
 @pytest.fixture
 def memory(monkeypatch):
+    cards._qq_retry_after.clear()
     values = {}
     monkeypatch.setattr(cards.cache, "get", lambda key: values.get(key))
     monkeypatch.setattr(cards.cache, "set", lambda key, value, **kwargs: values.__setitem__(key, value))
@@ -31,6 +33,43 @@ def native_qq():
     return {"id": "18078", "url": f"https://truyenqqno.com/truyen-tranh/{LEGACY}-18078",
             "title": TITLE, "genres": ["Romance"], "cover_urls": ["https://example.com/cover.jpg"],
             "view_count": 90000000}
+
+
+def test_blocked_legacy_metadata_backs_off_without_hiding_a_new_valid_label(memory, monkeypatch):
+    source = AsyncMock(side_effect=HTTPException(503, 'source denied', headers={
+        'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Transport': 'edge-source'}))
+    monkeypatch.setattr(qq, 'run_live', source)
+    async def run():
+        assert await cards.get_many([LEGACY]) == {}
+        assert await cards.get_many([LEGACY]) == {}
+        source.assert_awaited_once()
+        qq._item(native_qq())
+        assert (await cards.get_many([LEGACY]))[LEGACY]['title'] == TITLE
+        source.assert_awaited_once()
+    asyncio.run(run())
+
+
+def test_blocked_legacy_metadata_can_recover_after_its_short_backoff(memory, monkeypatch):
+    monkeypatch.setattr(cards, '_QQ_RETRY_SECONDS', .01)
+    source = AsyncMock(side_effect=[HTTPException(503, 'source denied', headers={
+        'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Transport': 'edge-source'}), native_qq()])
+    monkeypatch.setattr(qq, 'run_live', source)
+    async def run():
+        assert await cards.get_many([LEGACY]) == {}
+        await asyncio.sleep(.02)
+        assert (await cards.get_many([LEGACY]))[LEGACY]['title'] == TITLE
+        assert source.await_count == 2
+    asyncio.run(run())
+
+
+def test_metadata_does_not_back_off_another_readers_policy_denial(memory, monkeypatch):
+    source = AsyncMock(side_effect=HTTPException(503, 'access denied', headers={
+        'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Transport': 'edge-gateway'}))
+    monkeypatch.setattr(qq, 'run_live', source)
+    async def run():
+        await cards.get_many([LEGACY]);await cards.get_many([LEGACY])
+        assert source.await_count == 2
+    asyncio.run(run())
 
 
 def test_native_qq_card_warms_legacy_alias_without_chapter_crawl(memory, monkeypatch):

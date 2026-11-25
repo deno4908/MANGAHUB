@@ -3,6 +3,8 @@ import asyncio
 from serverless_runtime import create_task
 import json
 import re
+import time
+from collections import OrderedDict
 from contextvars import ContextVar
 
 from fastapi import HTTPException
@@ -15,6 +17,8 @@ _pending_reads = set()
 _pending_identifiers = {}
 _BATCH_WAIT_SECONDS = 3.0
 _interactive_deadline = ContextVar("card_metadata_deadline", default=None)
+_qq_retry_after = OrderedDict()
+_QQ_RETRY_SECONDS = 30
 
 
 def _retain(task, identifiers=()):
@@ -87,6 +91,11 @@ async def _qq_metadata(identifier, title=None, *, source_timeout=None):
         return None
     if re.fullmatch(r"[0-9a-f]{24}", identifier):
         return None  # An old OTruyen ObjectId does not identify a QQ book.
+    retry_key = (asyncio.get_running_loop(), qq._source_read_scope(), identifier, title)
+    retry = _qq_retry_after.get(retry_key)
+    if retry and retry[0] > time.monotonic():
+        raise HTTPException(503, "Nguồn QQ tạm thời chưa sẵn sàng.", headers=dict(retry[1]))
+    _qq_retry_after.pop(retry_key, None)
     async def fetch():
         async with _qq_slots:
             deadline = _interactive_deadline.get()
@@ -102,6 +111,15 @@ async def _qq_metadata(identifier, title=None, *, source_timeout=None):
             except HTTPException as error:
                 if error.status_code == 404:
                     return None
+                headers = error.headers or {}
+                if headers.get('X-TruyenQQ-Error') == 'http-403' and headers.get('X-TruyenQQ-Transport') in {'edge-source', 'direct'}:
+                    # Do not repeatedly resolve the same blocked legacy card.
+                    # A valid label learned by any normal read wins above this
+                    # short backoff; account/gateway denials never enter it.
+                    _qq_retry_after[retry_key] = (time.monotonic() + _QQ_RETRY_SECONDS, dict(headers))
+                    _qq_retry_after.move_to_end(retry_key)
+                    while len(_qq_retry_after) > 512:
+                        _qq_retry_after.popitem(last=False)
                 raise
     # Include time queued for the source semaphore in an interactive deadline.
     deadline = _interactive_deadline.get()

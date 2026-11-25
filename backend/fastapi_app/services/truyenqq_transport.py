@@ -39,6 +39,7 @@ class TruyenQQTransport(httpx.BaseTransport):
             "https://mangahub-mangadex-edge.vinhytb3010.workers.dev/api/truyenqq-edge",
         )).rstrip("/")
         self._edge_until = 0.0
+        self._direct_denied_until = {}
         # Cold Vercel instances otherwise repeat a slow direct request before
         # discovering that their datacenter must use the existing owned relay.
         self._prefer_edge = os.getenv("TRUYENQQ_PREFER_EDGE", os.getenv("VERCEL", "0")).lower() in {"1", "true", "yes"}
@@ -105,10 +106,17 @@ class TruyenQQTransport(httpx.BaseTransport):
                 # rejected its egress. The direct egress can still be healthy.
                 # Gateway/whitelist denials never carry this source marker and
                 # must not be retried around their access check.
-                try:
-                    direct = fetch(max_read_seconds=5)
-                except RequestException:
-                    direct = None
+                direct = None
+                kind = request.method == 'POST'
+                if time.monotonic() >= self._direct_denied_until.get(kind, 0):
+                    try:
+                        direct = fetch(max_read_seconds=5)
+                    except RequestException:
+                        pass
+                    if direct is not None and direct.status_code == 403 and any(
+                        marker in direct.content[:12000].lower() for marker in
+                        (b'cf-chl-', b'challenge-platform', b'just a moment')):
+                        self._direct_denied_until[kind] = time.monotonic() + 300
                 if direct is not None and direct.status_code == 200:
                     result = direct
                     relay = False

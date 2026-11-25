@@ -26,6 +26,29 @@ class EmptyDB:
         return lambda *args, **kwargs: self
 
 
+def test_qq_source_page_starts_while_uncached_cards_are_still_being_resolved(monkeypatch):
+    monkeypatch.setattr(manga, '_fetch_local_views_lookup', lambda db: {'rated-1': 10})
+    monkeypatch.setattr(local_popular, '_cached_labels', lambda ids: {})
+    monkeypatch.setattr(local_popular, 'remember_matches', lambda values: None)
+    async def run():
+        source_started = asyncio.Event()
+        async def source(**kwargs):
+            source_started.set()
+            return {'data': {'items': [{'slug': 'latest-2'}], 'params': {'pagination': {
+                'totalItemsPerPage': 42, 'totalItems': 1, 'totalPages': 1}}}}
+        async def metadata(ids, **kwargs):
+            await asyncio.wait_for(source_started.wait(), .5)
+            return {'rated-1': qq('rated-1')}
+        fetch = AsyncMock(side_effect=source)
+        monkeypatch.setattr(local_popular.truyenqq_service, 'get_filtered', fetch)
+        monkeypatch.setattr(card_metadata, 'get_many', AsyncMock(side_effect=metadata))
+        result = await local_popular.qq_popular(page=1, limit=42, genres=[], status='',
+                                               show_mature=True, hidden={}, db=EmptyDB())
+        assert result['data']['items'][0]['slug'] == 'rated-1'
+        fetch.assert_awaited_once()
+    asyncio.run(run())
+
+
 def qq(slug, **extra):
     return {"id": slug, "slug": slug, "source": "truyenqq", "title": slug,
             "cover_url": f"/api/manga/truyenqq/cover/{slug}", "genres": ["Action"], **extra}

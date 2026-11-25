@@ -60,6 +60,13 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
     snapshot_key = "qq:local-popular:v5-source-popular:" + hashlib.sha256(json.dumps(
         [sorted(genres), status, show_mature, hidden], sort_keys=True).encode()).hexdigest()
     snapshot = await asyncio.to_thread(_frozen, snapshot_key + ":ranking")
+    async def source(number):
+        return await asyncio.wait_for(_source_page(tuple(genres), status, number, snapshot_key), SOURCE_WAIT_SECONDS)
+
+    # The source page and saved-title verification are independent. Start the
+    # same catalog read now so slow legacy metadata does not delay every page.
+    first_source_task = create_task(source(1))
+    first_source_task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
     aliases = [slug for slug, views in lookup.items() if views > 0
                and not manga._extract_mangadex_id(slug) and not manga._is_invalid_manga_slug(slug)
                and not manga._hidden_reason_for_slug(hidden, slug)]
@@ -149,12 +156,7 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
             }
         return {"data": data}
 
-    async def source(number):
-        # The complete shared read, including its initial Redis lookup, survives
-        # the response timeout and continues warming the source page.
-        return await asyncio.wait_for(_source_page(tuple(genres), status, number, snapshot_key), SOURCE_WAIT_SECONDS)
-
-    source_tasks = {1: create_task(source(1))}
+    source_tasks = {1: first_source_task}
     if limit == 42 and page > 1 and len(rows) < offset + limit:
         # The UI uses QQ's native 42-item pages. Load the catalog header and
         # requested page together, so two cold reads do not add their latency.
