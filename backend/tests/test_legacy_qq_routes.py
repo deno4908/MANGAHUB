@@ -18,6 +18,7 @@ URL = "https://truyenqqko.com/truyen-tranh/" + CANONICAL
 def cached(monkeypatch):
     values = {}
     monkeypatch.setattr(qq.cache, "get", values.get)
+    monkeypatch.setattr(qq.cache, "get_many", lambda keys: {key: values.get(key) for key in keys})
     monkeypatch.setattr(qq.cache, "set", lambda key, value, *args, **kwargs: values.__setitem__(key, value))
     monkeypatch.setattr(qq.cache, "set_many", lambda items, **kwargs: values.update(items))
     return values
@@ -72,8 +73,9 @@ def test_verified_alternative_title_survives_another_function_cold_start(cached,
         assert item["source_slug"] == CANONICAL
         await qq.get_cover_info(alias)
     asyncio.run(run())
-    assert source.await_args_list[0].args == ("comic", CANONICAL)
-    assert source.await_args_list[1].args == ("basic", CANONICAL)
+    # The detail read just stored verified cover hints. Reuse them instead of
+    # spending a second source request merely to recover the same cover.
+    source.assert_awaited_once_with("comic", CANONICAL)
 
 
 def test_legacy_route_cannot_bypass_a_hidden_native_qq_comic(cached, monkeypatch):

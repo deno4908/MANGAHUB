@@ -93,7 +93,29 @@ it('sorts QQ popularity by the displayed local views rather than the source page
   ]));
   show('/manga?source=truyenqq&sort=popular');
   await waitFor(() => expect(screen.getByTestId('ranked-cards')).toHaveTextContent('High views:90|Low views:2|'));
-  expect(mangaApi.getOTruyenFiltered).toHaveBeenCalledWith(expect.objectContaining({ limit: 42 }));
+  expect(mangaApi.getOTruyenFiltered).toHaveBeenCalledWith(expect.objectContaining({ limit: 24 }));
+});
+
+it('keeps 24 QQ rating cards, including the latest unrated tail, in server order', async () => {
+  const rated = { slug: 'rated-1', name: 'Weighted rating first', source: 'truyenqq',
+    rating_average: 4.5, rating_count: 20, thumb_url: '/no-cover.svg' };
+  const nextRated = { slug: 'rated-2', name: 'Higher average fewer votes', source: 'truyenqq',
+    rating_average: 5, rating_count: 1, thumb_url: '/no-cover.svg' };
+  const tail = Array.from({ length: 22 }, (_, index) => ({
+    slug: `latest-${index + 3}`, name: `Latest ${index + 3}`, source: 'truyenqq',
+    thumb_url: '/no-cover.svg', rating_average: 0, rating_count: 0,
+  }));
+  vi.mocked(mangaApi.getOTruyenFiltered).mockResolvedValue(page([rated, nextRated, ...tail]));
+  show('/manga?source=truyenqq&sort=rating');
+  await waitFor(() => expect(screen.getByTestId('ranked-cards').children).toHaveLength(24));
+  const cards = screen.getByTestId('ranked-cards');
+  expect(cards.children[0]).toHaveTextContent('Weighted rating first');
+  expect(cards.children[1]).toHaveTextContent('Higher average fewer votes');
+  expect(cards.children[2]).toHaveTextContent('Latest 3');
+  expect(cards.children[23]).toHaveTextContent('Latest 24');
+  expect(mangaApi.getOTruyenFiltered).toHaveBeenCalledWith(expect.objectContaining({ sort: 'rating', limit: 24 }));
+  expect(ratingApi.getTopRatedManga).not.toHaveBeenCalled();
+  expect(mangaApi.getList).not.toHaveBeenCalled();
 });
 
 it('keeps native QQ popularity order for zero-view titles after promoting local views', async () => {

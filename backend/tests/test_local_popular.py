@@ -54,6 +54,90 @@ def qq(slug, **extra):
             "cover_url": f"/api/manga/truyenqq/cover/{slug}", "genres": ["Action"], **extra}
 
 
+@pytest.mark.parametrize("sort", ["latest", "popular", "rating"])
+def test_24_title_pages_share_native_pages_without_losing_or_repeating_books(monkeypatch, sort):
+    snapshots = {}
+    def frozen(key, value=None):
+        if value is not None:
+            snapshots.setdefault(key, deepcopy(value))
+        return deepcopy(snapshots.get(key))
+    monkeypatch.setattr(local_popular, "_frozen", frozen)
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: {})
+    monkeypatch.setattr(ratings, "get_top_rated_manga", AsyncMock(return_value={"items": []}))
+    calls = []
+    async def listing(**kwargs):
+        assert kwargs["sort"] == ("views_desc" if sort == "popular" else "updated_desc")
+        assert kwargs["genres"] == ["action"] and kwargs["status"] == "ongoing"
+        calls.append(kwargs["page"])
+        start = (kwargs["page"] - 1) * 42
+        return {"data": {"items": [{"slug": f"book-{index}", "status": "ongoing",
+            "category": [{"slug": "action", "name": "Action"}]} for index in range(start, min(start + 42, 100))],
+            "params": {"pagination": {"totalItemsPerPage": 42, "totalPages": 3, "totalItems": 100}}}}
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", listing)
+    async def run():
+        rows = []
+        for number in range(1, 6):
+            result = (await local_popular.qq_popular(page=number, limit=24, genres=["action"], status="ongoing",
+                show_mature=True, hidden={}, db=EmptyDB(), sort=sort))["data"]
+            assert len(result["items"]) == (24 if number < 5 else 4)
+            assert result["params"]["pagination"]["totalPages"] == 5
+            assert result["params"]["pagination"]["totalItemsPerPage"] == 24
+            rows.extend(row["slug"] for row in result["items"])
+        return rows
+    assert asyncio.run(run()) == [f"book-{index}" for index in range(100)]
+    assert calls == [1, 2, 3]  # crossing a UI page reuses the same native source snapshot
+
+
+def test_rated_qq_prefix_fills_to_24_with_latest_and_does_not_forge_views(monkeypatch):
+    monkeypatch.setattr(ratings, "get_top_rated_manga", AsyncMock(return_value={"items": [
+        {"manga_slug": "book-30", "average": 4.8, "count": 5, "weighted_score": 4.5}]}))
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: pytest.fail("Rating must not load view ranking"))
+    monkeypatch.setattr(local_popular, "_cached_labels", lambda ids: {key: qq(key) for key in ids})
+    monkeypatch.setattr(local_popular, "remember_matches", lambda value: None)
+    async def listing(**kwargs):
+        assert kwargs["sort"] == "updated_desc"
+        return {"data": {"items": [{"slug": f"book-{index}"} for index in range(42)],
+            "params": {"pagination": {"totalItemsPerPage": 42, "totalItems": 42, "totalPages": 1}}}}
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", listing)
+    async def run():
+        args = dict(limit=24, genres=[], status="", show_mature=True, hidden={}, db=EmptyDB(), sort="rating")
+        return [(await local_popular.qq_popular(page=number, **args))["data"]["items"] for number in (1, 2)]
+    first, second = asyncio.run(run())
+    assert len(first) == 24 and len(second) == 18
+    assert first[0]["slug"] == "book-30" and first[0]["rating_average"] == 4.8
+    assert first[0]["views"] == 0
+    assert [row["slug"] for row in first[1:]] == [f"book-{index}" for index in range(1, 24)]
+    assert len({row["slug"] for row in first + second}) == 42
+
+
+def test_source_filtered_cards_need_no_extra_detail_reads_for_missing_genre_labels(monkeypatch):
+    monkeypatch.setattr(card_metadata, "get_many", AsyncMock(side_effect=AssertionError("No per-title detail crawl")))
+    source = AsyncMock(return_value={"data": {"items": [{"slug": f"book-{index}"} for index in range(42)],
+        "params": {"pagination": {"totalItemsPerPage": 42, "totalPages": 1}}}})
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", source)
+    result = asyncio.run(local_popular.qq_popular(page=1, limit=24, genres=["action"], status="ongoing",
+        show_mature=True, hidden={}, db=EmptyDB(), sort="latest"))["data"]
+    assert len(result["items"]) == 24
+    source.assert_awaited_once()
+    assert source.call_args.kwargs["genres"] == ["action"]
+    assert source.call_args.kwargs["status"] == "ongoing"
+
+
+def test_jumping_to_page_300_with_24_titles_does_not_walk_the_catalog(monkeypatch):
+    calls = []
+    async def listing(**kwargs):
+        number = kwargs["page"]
+        calls.append(number)
+        start = (number - 1) * 42
+        return {"data": {"items": [{"slug": f"book-{index}"} for index in range(start, start + 42)],
+            "params": {"pagination": {"totalItemsPerPage": 42, "totalPages": 445}}}}
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", listing)
+    result = asyncio.run(local_popular.qq_popular(page=300, limit=24, genres=[], status="",
+        show_mature=True, hidden={}, db=EmptyDB(), sort="latest"))["data"]
+    assert [row["slug"] for row in result["items"]] == [f"book-{index}" for index in range(7176, 7200)]
+    assert calls == [1, 171, 172]
+
+
 def test_qq_popular_paginates_local_counts_before_source_order_and_keeps_alias_views(monkeypatch):
     monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: {
         "slow-source-1": 4, "top-book-2": 90, "old-top-book": 11, "third-book-3": 3})

@@ -1,10 +1,11 @@
-"""Rank verified QQ titles by local views; old unsynced rows stay hidden."""
+"""Page the QQ catalog, promoting verified local rankings without a full crawl."""
 import asyncio
 import copy
 import logging
 import math
 import hashlib
 import json
+import inspect
 from serverless_runtime import create_task
 
 from fastapi import HTTPException
@@ -32,14 +33,14 @@ def _frozen(key, value=None):
 
 
 @coalesce_reads(scope=truyenqq_service._source_read_scope)
-async def _source_page(genres, status, number, snapshot_key):
+async def _source_page(genres, status, number, snapshot_key, source_sort="views_desc"):
     key = f"{snapshot_key}:source:{number}"
     previous = await asyncio.to_thread(_frozen, key)
     if previous is not None:
         return previous
     value = await truyenqq_service.get_filtered(genres=list(genres), page=number,
-                                                sort="views_desc", status=status or None,
-                                                overlay_latest=False, background_refresh=False,
+                                                sort=source_sort, status=status or None,
+                                                overlay_latest=False, background_refresh=source_sort != "views_desc",
                                                 refresh_timeout=SOURCE_REFRESH_SECONDS)
     return await asyncio.to_thread(_frozen, key, value)
 
@@ -51,22 +52,42 @@ def _cached_labels(identifiers):
             if (item := card_metadata.cached_metadata(identifier, values)) and item.get("source") == "truyenqq"}
 
 
-async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, http_response=None):
+async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, http_response=None, sort="popular"):
     from fastapi_app.routers import manga
 
-    lookup = await asyncio.to_thread(manga._fetch_local_views_lookup, db)
-    # Reading another chapter must not invalidate every source-page read while
-    # a client is waiting for this ranking snapshot to finish.
-    snapshot_key = "qq:local-popular:v5-source-popular:" + hashlib.sha256(json.dumps(
-        [sorted(genres), status, show_mature, hidden], sort_keys=True).encode()).hexdigest()
-    snapshot = await asyncio.to_thread(_frozen, snapshot_key + ":ranking")
+    source_sort = {"popular": "views_desc", "newest": "created_desc", "oldest": "created_asc"}.get(sort, "updated_desc")
+    # Public source pages are identical across moderation/maturity/rating
+    # selections. Share their cache rather than fetching each variant again.
+    source_key = "qq:browse-source:v1:" + hashlib.sha256(json.dumps(
+        [source_sort, sorted(genres), status], sort_keys=True).encode()).hexdigest()
     async def source(number):
-        return await asyncio.wait_for(_source_page(tuple(genres), status, number, snapshot_key), SOURCE_WAIT_SECONDS)
+        read = (_source_page(tuple(genres), status, number, source_key) if source_sort == "views_desc"
+                else _source_page(tuple(genres), status, number, source_key, source_sort))
+        return await asyncio.wait_for(read, SOURCE_WAIT_SECONDS)
 
-    # The source page and saved-title verification are independent. Start the
-    # same catalog read now so slow legacy metadata does not delay every page.
+    # Start the source before moderation, DB ranking or saved-title hydration.
+    # Moderation still completes before a single card can be returned.
     first_source_task = create_task(source(1))
     first_source_task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+    if inspect.isawaitable(hidden):
+        hidden = await hidden
+
+    rating_rows = {}
+    if sort == "rating":
+        from fastapi_app.routers import ratings
+        rated = await asyncio.to_thread(_frozen, "qq:browse:ratings:v1")
+        if rated is None:
+            rated = await ratings.get_top_rated_manga(limit=120, db=db)
+            rated = await asyncio.to_thread(_frozen, "qq:browse:ratings:v1", rated)
+        rating_rows = {item["manga_slug"]: item for item in rated.get("items", [])}
+        lookup = {slug: len(rating_rows) - index for index, slug in enumerate(rating_rows)}
+    else:
+        lookup = await asyncio.to_thread(manga._fetch_local_views_lookup, db) if sort == "popular" else {}
+    # Reading another chapter must not invalidate every source-page read while
+    # a client is waiting for this ranking snapshot to finish.
+    snapshot_key = "qq:browse:v6:" + hashlib.sha256(json.dumps(
+        [sort, sorted(genres), status, show_mature, hidden], sort_keys=True).encode()).hexdigest()
+    snapshot = await asyncio.to_thread(_frozen, snapshot_key + ":ranking")
     aliases = [slug for slug, views in lookup.items() if views > 0
                and not manga._extract_mangadex_id(slug) and not manga._is_invalid_manga_slug(slug)
                and not manga._hidden_reason_for_slug(hidden, slug)]
@@ -110,16 +131,28 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
                     "thumb_url": label.get("cover_url", ""), "status": label.get("status", "ongoing"),
                     "category": [{"name": name, "slug": manga._slugify_loose(name)} for name in label.get("genres", [])],
                     "chaptersLatest": label.get("chapters_latest", []), "content_rating": label.get("content_rating", ""),
-                    "views": lookup[alias], "view_count": lookup[alias], "local_view_count": lookup[alias]}
+                    "views": lookup[alias] if sort == "popular" else 0,
+                    "view_count": lookup[alias] if sort == "popular" else 0,
+                    "local_view_count": lookup[alias] if sort == "popular" else 0}
+            if sort == "rating":
+                rating = rating_rows[alias]
+                item.update(rating_average=rating["average"], rating_count=rating["count"],
+                            rating_weighted_score=rating.get("weighted_score", 0))
             if not manga._otruyen_item_matches_filters(item, required_genres=set(genres),
                                                        status_value=status, show_mature=show_mature, hidden=hidden):
                 continue
             existing = ranked.get(slug)
-            if existing:
+            if existing and sort == "popular":
                 existing["views"] += lookup[alias]
                 existing["view_count"] = existing["local_view_count"] = existing["views"]
-            else:
+            elif existing is None:
                 ranked[slug] = item
+        if sort == "rating":
+            # The ratings service already applies the same weighted score and
+            # alias de-duplication as the public rating list.
+            priority = {labels[alias]["slug"]: value for alias, value in reversed(list(lookup.items()))
+                        if labels.get(alias)}
+            return sorted(ranked.values(), key=lambda row: (-priority[row["slug"]], row["slug"])), excluded
         return sorted(ranked.values(), key=lambda row: (-row["views"], row["slug"])), excluded
 
     def native_pending():
@@ -158,8 +191,8 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
 
     source_tasks = {1: first_source_task}
     if limit == 42 and page > 1 and len(rows) < offset + limit:
-        # The UI uses QQ's native 42-item pages. Load the catalog header and
-        # requested page together, so two cold reads do not add their latency.
+        # Older callers can still request native-sized pages. The 24-title UI
+        # uses the measured source size below, never an assumed page size.
         source_tasks[page] = create_task(source(page))
     for task in source_tasks.values():
         task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
@@ -227,8 +260,12 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
             payloads[number] = value
 
     def visible(item):
+        # These cards already came from the source's genre/status query. QQ
+        # often omits those labels on listing cards; re-applying the local
+        # metadata filter would discard an otherwise valid filtered page.
+        # Local promoted titles were checked against the full filters above.
         return bool(item and item.get("slug") and manga._otruyen_item_matches_filters(
-            item, required_genres=set(genres), status_value=status,
+            item, required_genres=set(), status_value="",
             show_mature=show_mature, hidden=hidden))
 
     def require_page_data():

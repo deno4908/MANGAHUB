@@ -1844,7 +1844,9 @@ const BrowseManga = () => {
     filters.sort === 'rating' &&
     !hasLocalClientFilters &&
     mangaDexHasServerQueryableFilters;
-  const useGlobalTopRatedMode = filters.sort === 'rating' && !useMangaDexServerRatingMode && !useMangaDexLatestFeedMode;
+  const useQQServerRatingMode = isOTruyenSourceTab && filters.sort === 'rating' &&
+    !hasSearch && !hasLocalClientFilters && directOTruyenFilterGenreSlugs.length === filters.genres.length;
+  const useGlobalTopRatedMode = filters.sort === 'rating' && !useMangaDexServerRatingMode && !useMangaDexLatestFeedMode && !useQQServerRatingMode;
   const useMangaDexServerSearchMode =
     isMangaDexSourceTab &&
     !useMangaDexLatestFeedMode &&
@@ -2006,7 +2008,6 @@ const BrowseManga = () => {
     !isClientPaginationMode &&
     !hasSearch &&
     !hasLocalClientFilters &&
-    (Boolean(filters.status) || filters.sort === 'popular' || directOTruyenFilterGenreSlugs.length > 0) &&
     directOTruyenFilterGenreSlugs.length === filters.genres.length &&
     !useCombinedList &&
     !useGlobalClientSortMode;
@@ -2306,7 +2307,7 @@ const BrowseManga = () => {
       filters.sort,
       requestedPage,
       showMatureContent,
-      42,
+      BROWSE_PAGE_SIZE,
     ],
     queryFn: async ({ signal }: { signal: AbortSignal }) => {
       const requestPage = async (sort: SortOption | string) => {
@@ -2315,9 +2316,8 @@ const BrowseManga = () => {
           status: filters.status,
           sort,
           page: requestedPage,
-          // QQ's native catalog contains 42 titles per page. Keep every sort
-          // on that same page size instead of inflating popularity pagination.
-          limit: 42,
+          // The backend maps native source pages to MangaHub's 24-title pages.
+          limit: BROWSE_PAGE_SIZE,
           showMature: showMatureContent,
           baseSlug: directOTruyenFilterGenreSlugs[0] || activeCategorySlug,
           attachRatings: filters.sort === 'rating' && sort === filters.sort,
@@ -3350,7 +3350,9 @@ const BrowseManga = () => {
     switch (filters.sort) {
       case 'popular': items.sort(useOTruyenFilteredServerMode ? compareByLocalViews : compareByPopular); break;
       case 'latest': items.sort((a, b) => getLatestSortTimestamp(b) - getLatestSortTimestamp(a)); break;
-      case 'rating': items.sort((a, b) => b.rating - a.rating); break;
+      case 'rating':
+        if (!useQQServerRatingMode) items.sort((a, b) => b.rating - a.rating);
+        break;
       case 'alphabetical':
         if (!useGlobalClientSortMode) {
           items = sortAlphabeticalItems(items);
@@ -3360,6 +3362,7 @@ const BrowseManga = () => {
     return items;
   }, [
     useGlobalClientSortMode,
+    useQQServerRatingMode,
     globalSortedItems,
     useOTruyenFilteredServerMode,
     useOTruyenStatusFillMode,
@@ -4710,6 +4713,12 @@ const BrowseManga = () => {
       return stableMergedFiltered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
     }
 
+    if (useQQServerRatingMode) {
+      // The server includes the unrated catalog tail. Appending personal
+      // overlays or sorting this slice again would change page boundaries.
+      return filtered;
+    }
+
     // Server mode: OTruyen items only (active source tab = OTruyen)
     const combined =
       filters.sort === 'rating'
@@ -4763,6 +4772,7 @@ const BrowseManga = () => {
     filters.sort,
     filtered,
     useOTruyenFilteredServerMode,
+    useQQServerRatingMode,
     useOTruyenStatusFillMode,
     otruyenStatusFillItems.length,
     myRatedOverlayItemsForSource,

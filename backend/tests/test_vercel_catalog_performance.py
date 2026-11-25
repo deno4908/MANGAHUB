@@ -12,12 +12,18 @@ from fastapi_app.services.request_coalescing import coalesce_reads
 
 def test_qq_browse_overlaps_moderation_and_source_and_enriches_views_only_once(monkeypatch):
     from fastapi_app.routers import manga
+    from fastapi_app.services import local_popular
+    monkeypatch.setattr(local_popular, '_frozen', lambda key, value=None: value)
     source_started, hidden_started = asyncio.Event(), asyncio.Event()
-    payload = {"data": {"items": [{"slug": "visible-1"}, {"slug": "hidden-2"}]}}
+    pagination = {"totalItemsPerPage": 42, "totalPages": 2, "totalItems": 44}
+    payload = {"data": {"items": [{"slug": "visible-1"}, {"slug": "hidden-2"}],
+        "params": {"pagination": pagination}}}
     async def source(**kwargs):
         source_started.set()
         await hidden_started.wait()
-        return payload
+        return payload if kwargs['page'] == 2 else {"data": {
+            "items": [{"slug": f"previous-{index}"} for index in range(42)],
+            "params": {"pagination": pagination}}}
     async def hidden(db):
         hidden_started.set()
         await source_started.wait()

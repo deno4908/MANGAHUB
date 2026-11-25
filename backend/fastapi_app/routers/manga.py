@@ -2974,22 +2974,12 @@ async def otruyen_filtered_manga(
         return {"status": "success", "data": {"items": [], "params": {"pagination": {
             "currentPage": page, "totalItemsPerPage": limit, "totalItems": 0, "totalPages": 1}}}}
 
-    if normalized_sort == "popular":
-        hidden = await _get_hidden_slugs(db)
-        from fastapi_app.services.local_popular import qq_popular
-        payload = await qq_popular(page=page, limit=limit, genres=genre_values, status=normalized_status,
-                                   show_mature=show_mature, hidden=hidden, db=db, http_response=response)
-    else:
-        # Source loading and moderation lookup are independent. Filter the
-        # completed source page before enriching it, and read local views once.
-        payload, hidden = await asyncio.gather(
-            truyenqq_service.get_filtered(
-                genres=genre_values, page=page,
-                sort={"newest": "created_desc", "oldest": "created_asc"}.get(normalized_sort, "updated_desc"),
-                status=normalized_status if normalized_status in {"ongoing", "completed"} else None,
-            ),
-            _get_hidden_slugs(db),
-        )
+    from fastapi_app.services.local_popular import qq_popular
+    hidden_read = create_task(_get_hidden_slugs(db))
+    payload = await qq_popular(page=page, limit=limit, genres=genre_values, status=normalized_status,
+                               show_mature=show_mature, hidden=hidden_read, db=db, http_response=response,
+                               sort=normalized_sort)
+    hidden = await hidden_read
     items = payload["data"]["items"]
     payload["data"]["items"] = _filter_hidden(items, hidden)
     if not show_mature:
