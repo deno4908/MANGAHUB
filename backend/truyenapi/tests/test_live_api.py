@@ -173,6 +173,19 @@ def test_saved_legacy_title_resolves_a_unique_source_provided_alternative_title(
         service.close()
 
 
+def test_legacy_slug_can_match_the_dedicated_search_alternative_names_without_detail_crawls():
+    def handler(request):
+        assert request.url.path == '/frontend/search/search'
+        return httpx.Response(200, text='<li><a href="/truyen-tranh/one-piece-1-128"><div class="search_info">'
+            '<p class="name">One Piece</p><p class="name_other">Vua Hải Tặc; Đảo Hải Tặc</p></div></a></li>')
+    service, calls = setup_service(handler)
+    try:
+        assert service.resolve('dao-hai-tac') == BASE + '/truyen-tranh/one-piece-1-128'
+        assert len(calls) == 1
+    finally:
+        service.close()
+
+
 def test_saved_metadata_checks_the_full_source_alternative_names(monkeypatch):
     service, calls = setup_service(lambda request: httpx.Response(500))
     monkeypatch.setattr(service, "search", lambda title, limit: {"items": [{"url": BASE + "/truyen-tranh/one-piece-1-128"}]})

@@ -2,7 +2,7 @@ import { useMemo, useEffect, useState, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { loadHomeCardMetadata } from '@/lib/homeCardMetadata';
+import { loadHomeCardMetadata, cardMetadataRetryInterval } from '@/lib/homeCardMetadata';
 import { useHomepageCombined } from '@/hooks/useApi';
 import { useSettingsStore } from '@/store/settingsStore';
 import { useUserStore } from '@/store/userStore';
@@ -1351,7 +1351,7 @@ const Index = () => {
       ready => queryClient.setQueryData(queryKey, ready)),
     enabled: guestTopRatedMissingSlugs.length > 0,
     staleTime: 10 * 60 * 1000,
-    refetchInterval: query => guestTopRatedMissingSlugs.some(id => !(id in (query.state.data || {}))) ? 5000 : false,
+    refetchInterval: query => cardMetadataRetryInterval(query, guestTopRatedMissingSlugs),
     retry: 0,
     placeholderData: (previousData) => previousData,
   });

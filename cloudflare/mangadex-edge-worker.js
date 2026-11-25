@@ -13,7 +13,7 @@ async function checkSiteAccess(request, env) {
     };
     const response = env?.ACCESS_ROUTER ? await env.ACCESS_ROUTER.fetch(new Request(SITE_ACCESS_URL,accessOptions)) : await fetch(SITE_ACCESS_URL,accessOptions);
     if (response.status === 401 || response.status === 403) {
-      return json({ code: 'WHITELIST_REQUIRED', detail: 'Bạn không nằm trong whitelist của website.' }, 403, { 'Cache-Control': 'no-store' });
+      return json({ code: 'WHITELIST_REQUIRED', detail: 'Bạn không nằm trong whitelist của website.' }, 403, { 'Cache-Control': 'no-store', 'X-Site-Access-Error': 'http-' + response.status });
     }
     failure = 'http-' + response.status;
     if (!response.ok) throw new Error('Access policy unavailable');
@@ -21,7 +21,7 @@ async function checkSiteAccess(request, env) {
     const policy = await response.json();
     failure = 'invalid-policy';
     if (typeof policy.enabled !== 'boolean' || typeof policy.allowed !== 'boolean') throw new Error('Invalid access policy');
-    if (!policy.allowed) return json({ code: 'WHITELIST_REQUIRED', detail: policy.message }, 403, { 'Cache-Control': 'no-store' });
+    if (!policy.allowed) return json({ code: 'WHITELIST_REQUIRED', detail: policy.message }, 403, { 'Cache-Control': 'no-store', 'X-Site-Access-Error': policy.authenticated ? 'policy-authenticated' : 'policy-anonymous' });
     return null;
   } catch {
     return json({ error: 'Không thể kiểm tra quyền truy cập.' }, 503, { 'Cache-Control': 'no-store', 'X-Site-Access-Error': failure });

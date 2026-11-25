@@ -28,13 +28,13 @@ def normalized(value):
 
 
 class LiveService:
-    def __init__(self, settings: Settings, client=None):
+    def __init__(self, settings: Settings, client=None, *, read_scope=None):
         self.settings = settings
         self.client = client or SourceClient(settings)
-        self.cache = MemoryCache(settings.cache_max_entries)
+        self.cache = MemoryCache(settings.cache_max_entries, loading_scope=read_scope)
         self.card_cache = MemoryCache(settings.cache_max_entries)
         self.reference_cache = MemoryCache(settings.cache_max_entries * 2)
-        self.html_cache = MemoryCache(settings.html_cache_entries)
+        self.html_cache = MemoryCache(settings.html_cache_entries, loading_scope=read_scope)
         self.image_cache = MemoryCache(settings.cache_max_entries, max_bytes=settings.image_cache_bytes,
                                        sizeof=lambda value: len(value[0]))
         self.fetch_pool = ThreadPoolExecutor(max_workers=settings.fetch_concurrency, thread_name_prefix="truyen-fetch")
@@ -158,7 +158,8 @@ class LiveService:
                 matches = {}
                 for candidate in candidates:
                     stem, cid, chapter = identity(candidate["url"])
-                    source_titles = re.split(r"\s*;\s*", candidate.get("title", ""))
+                    source_titles = [part for value in (candidate.get("title", ""), candidate.get("alternative_names", ""))
+                                     for part in re.split(r"\s*;\s*", value or "")]
                     if chapter is None and (stem == identifier or any(normalized(title) == normalized(identifier) for title in source_titles)):
                         matches[cid] = candidate
                 if len(matches) == 1:

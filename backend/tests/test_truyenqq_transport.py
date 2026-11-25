@@ -11,6 +11,19 @@ from truyenapi.truyenapi.config import Settings
 from truyenapi.truyenapi.service import LiveService
 
 
+@pytest.mark.parametrize('body,kind', [
+    (b'{"code":"WHITELIST_REQUIRED"}', 'access-denied'),
+    (b'<html>Just a moment <script>challenge-platform</script></html>', 'edge-challenge'),
+    (b'Error 1027 daily requests limit', 'worker-quota'),
+    (b'Other response', 'gateway-error'),
+])
+def test_gateway_diagnostic_contains_only_a_bounded_category(body, kind):
+    value = SimpleNamespace(status_code=403, content=body, headers=httpx.Headers())
+    assert transport._relay_failure_kind(value) == kind
+    value.headers['x-truyenqq-relay'] = '1'
+    assert transport._relay_failure_kind(value) is None
+
+
 @pytest.fixture
 def browser(monkeypatch):
     monkeypatch.setattr(transport.site_access, 'get_state', lambda: {'enabled': False})

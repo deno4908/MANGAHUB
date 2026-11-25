@@ -75,7 +75,7 @@ def cached_metadata(identifier, values=None):
     return _read(f"catalog:card-metadata:v1:{identifier}", values)
 
 
-@coalesce_reads
+@coalesce_reads(scope=qq._source_read_scope)
 async def _qq_metadata(identifier, title=None, *, source_timeout=None):
     existing = await asyncio.to_thread(cached_metadata, identifier)
     if existing:

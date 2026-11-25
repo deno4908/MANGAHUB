@@ -31,7 +31,7 @@ def _frozen(key, value=None):
     return card_metadata._read(key) or value
 
 
-@coalesce_reads
+@coalesce_reads(scope=truyenqq_service._source_read_scope)
 async def _source_page(genres, status, number, snapshot_key):
     key = f"{snapshot_key}:source:{number}"
     previous = await asyncio.to_thread(_frozen, key)

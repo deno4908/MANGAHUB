@@ -6,7 +6,7 @@ import { History as HistoryIcon, Trash2, X, Loader2 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import OptimizedImage from '@/components/ui/OptimizedImage';
 import { toast } from 'sonner';
-import { getMangaDetailPath } from '@/lib/mangaLinks';
+import { getSavedMangaDetailPath } from '@/lib/savedManga';
 import { useReaderStore } from '@/store/readerStore';
 import { useUserStore } from '@/store/userStore';
 import { removeReadingHistoryCache } from '@/lib/readingHistory';
@@ -97,11 +97,11 @@ const HistoryPage = () => {
               transition={{ delay: Math.min(i, 5) * 0.03 }}
               className="flex items-center gap-3 p-3 rounded-xl bg-card border border-border/50 hover:border-primary/20 transition-all group"
             >
-              <Link to={getMangaDetailPath(item.manga_slug)} className="shrink-0">
+              <Link to={getSavedMangaDetailPath(item)} className="shrink-0">
                 <OptimizedImage src={item.manga_thumb || ''} fallbackSrc={item.manga_thumb_fallback || undefined} alt="" priority={i < 4} className="w-12 h-16 rounded-lg object-cover border border-border" />
               </Link>
               <div className="flex-1 min-w-0">
-                <Link to={getMangaDetailPath(item.manga_slug)} className="text-sm font-bold line-clamp-1 hover:text-primary transition-colors">
+                <Link to={getSavedMangaDetailPath(item)} className="text-sm font-bold line-clamp-1 hover:text-primary transition-colors">
                   {item.manga_title}
                 </Link>
                 <p className="text-[11px] text-muted-foreground mt-0.5">

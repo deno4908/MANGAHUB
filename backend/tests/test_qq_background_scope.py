@@ -6,6 +6,57 @@ from fastapi_app.services import truyenqq_service as qq
 from site_access import source_authorization
 
 
+def test_nested_html_and_parsed_caches_do_not_share_a_denied_background_future(monkeypatch):
+    """The async wrapper alone cannot isolate the nested synchronous caches."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    import httpx
+    from truyenapi.truyenapi.client import SourceClient
+    from truyenapi.truyenapi.config import Settings
+    from truyenapi.truyenapi.service import LiveService
+
+    started, release = threading.Event(), threading.Event()
+    calls = []
+    def source(request):
+        approved = bool(source_authorization.get())
+        calls.append(approved)
+        if not approved:
+            started.set()
+            assert release.wait(2)
+            return httpx.Response(403)
+        return httpx.Response(200, text='<a href="/the-loai/action-26">Action</a>')
+    client = SourceClient(Settings(request_delay=0, retries=1))
+    client.http.close()
+    client.http = httpx.Client(transport=httpx.MockTransport(source))
+    service = LiveService(client.settings, client, read_scope=qq._source_read_scope)
+    def load(authorization):
+        marker = source_authorization.set(authorization)
+        try:
+            return service.genres()
+        finally:
+            source_authorization.reset(marker)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            background = pool.submit(load, None)
+            assert started.wait(1)
+            try:
+                reader = pool.submit(load, 'Bearer approved-fixture')
+                assert reader.result(timeout=.5)[0]['slug'] == 'action-26'
+                assert calls == [False, True]
+            finally:
+                release.set()
+                try:
+                    background.result()
+                except httpx.HTTPStatusError:
+                    pass
+            # The verified public data is still shared without another fetch.
+            assert load('Bearer second-approved-reader')[0]['name'] == 'Action'
+            assert len(calls) == 2
+    finally:
+        release.set()
+        service.close()
+
+
 def test_approved_reader_does_not_join_anonymous_native_warmup(monkeypatch):
     """Native lifespan warmups have no reader token, unlike request-scoped work."""
     monkeypatch.setattr(qq, "cache", SimpleNamespace(get=lambda *a: None, set=lambda *a, **kw: None))
@@ -19,7 +70,7 @@ def test_approved_reader_does_not_join_anonymous_native_warmup(monkeypatch):
                 started.set()
                 await release.wait()
                 raise HTTPException(502, "anonymous relay denied")
-            return []
+            return [{'id': '26', 'slug': 'action-26', 'name': 'Action'}]
         monkeypatch.setattr(qq, "run_live", load)
         token = source_authorization.set(None)
         background = asyncio.create_task(qq.get_categories())
@@ -47,7 +98,7 @@ def test_approved_readers_still_share_one_public_source_read(monkeypatch):
             calls.append(True)
             started.set()
             await release.wait()
-            return []
+            return [{'id': '26', 'slug': 'action-26', 'name': 'Action'}]
         monkeypatch.setattr(qq, "run_live", load)
         token = source_authorization.set("Bearer reader-a")
         first = asyncio.create_task(qq.get_categories())

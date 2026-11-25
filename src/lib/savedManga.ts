@@ -98,5 +98,9 @@ export function resolveSavedMangaCover(identifier: string, cover?: string, store
 
 export function getSavedMangaDetailPath(record: SavedRecord): string {
   const original = savedMangaId(record);
-  return getMangaDetailPath(normalizeOTruyenObjectId(original) && record.manga_source_slug ? record.manga_source_slug : original);
+  const matched = String(record.manga_source_slug || '').trim().toLowerCase();
+  // Keep the database key for follow/bookmark/history mutations, but open the
+  // exact source identity already verified by metadata (including old slugs).
+  return getMangaDetailPath(!normalizeMangaDexId(original) && record.source !== 'uploaded' && !record.is_user_upload &&
+    /^[a-z0-9]+(?:-+[a-z0-9]+)*-\d+$/.test(matched) ? matched : original);
 }

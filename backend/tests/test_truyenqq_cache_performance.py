@@ -138,3 +138,34 @@ def test_cached_genres_do_not_block_the_event_loop(stored):
     stored.values['truyenqq:genres:v1'] = json.dumps(expected)
     assert asyncio.run(qq.get_categories()) == expected
     qq.run_live.assert_not_awaited()
+
+
+def test_verified_genres_remain_available_and_share_one_background_refresh(stored, monkeypatch):
+    expected = {'status': 'success', 'data': {'items': [{'name': 'Action', 'slug': 'action'}]}}
+    stored.values['truyenqq:genres:last-good:v1'] = json.dumps(expected)
+    started, release = asyncio.Event(), asyncio.Event()
+    async def unavailable(*args):
+        started.set()
+        await release.wait()
+        raise RuntimeError('source temporarily unavailable')
+    monkeypatch.setattr(qq, 'run_live', AsyncMock(side_effect=unavailable))
+    async def run():
+        first = await qq.get_categories()
+        await asyncio.wait_for(started.wait(), .5)
+        second = await qq.get_categories()
+        assert first == second == expected and first is not second
+        assert qq.run_live.await_count == 1
+        release.set()
+        await asyncio.gather(*list(qq._catalog_jobs.values()))
+        assert await qq.get_categories() == expected
+        assert qq.run_live.await_count == 1
+    asyncio.run(run())
+
+
+def test_empty_source_genres_never_replace_a_verified_filter_list(stored, monkeypatch):
+    from fastapi import HTTPException
+    monkeypatch.setattr(qq, 'run_live', AsyncMock(return_value=[]))
+    with pytest.raises(HTTPException):
+        asyncio.run(qq.get_categories())
+    assert 'truyenqq:genres:v1' not in stored.values
+    assert 'truyenqq:genres:last-good:v1' not in stored.values

@@ -59,7 +59,7 @@ def get_live() -> LiveService:
     with _lock:
         if _live is None:
             settings = Settings()
-            _live = LiveService(settings, SourceClient(settings, transport=TruyenQQTransport()))
+            _live = LiveService(settings, SourceClient(settings, transport=TruyenQQTransport()), read_scope=_source_read_scope)
         return _live
 
 
@@ -142,13 +142,14 @@ def _log_source_error(method, error):
     response = getattr(error, "response", None)
     # Exclude query strings, request bodies, headers, and response content.
     logger.warning(
-        "TruyenQQ source failed operation=%s error=%s host=%s path=%s status=%s auth=%s transport=%s colo=%s block=%s reason=%s",
+        "TruyenQQ source failed operation=%s error=%s host=%s path=%s status=%s auth=%s transport=%s colo=%s block=%s gateway=%s reason=%s",
         method, type(error).__name__, request.url.host if request else "-",
         request.url.path if request else "-", response.status_code if response is not None else "-",
         bool(source_authorization.get()),
         _source_error_headers(error).get("X-TruyenQQ-Transport", "-"),
         _source_error_headers(error).get("X-TruyenQQ-Colo", "-"),
         _source_error_headers(error).get("X-TruyenQQ-Block", "-"),
+        response.extensions.get('truyenqq_gateway') if response is not None else '-',
         re.sub(r"https?://[^\s;]+", "[source URL]", str(error))[:160] if isinstance(error, ValueError) else "-",
     )
 
@@ -426,16 +427,45 @@ def invalidate_live_catalog(slugs, preserve_latest=False):
 
 
 @coalesce_reads(scope=_source_read_scope)
-async def get_categories():
-    raw = await asyncio.to_thread(cache.get, "truyenqq:genres:v1")
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except ValueError:
-            await asyncio.to_thread(cache.delete, "truyenqq:genres:v1")
+async def _load_categories():
     payload = {"status": "success", "data": {"items": [_genre(g) for g in await run_live("genres")]}}
-    await asyncio.to_thread(cache.set, "truyenqq:genres:v1", json.dumps(payload, ensure_ascii=False), ttl=3600)
+    if not _valid_categories(payload):
+        raise HTTPException(502, "Không tải được thể loại TruyenQQ.")
+    raw = json.dumps(payload, ensure_ascii=False)
+    def save():
+        cache.set('truyenqq:genres:last-good:v1', raw, ttl=30 * 86400)
+        cache.set('truyenqq:genres:v1', raw, ttl=3600)
+    await asyncio.to_thread(save)
     return payload
+
+
+def _valid_categories(value):
+    items = ((value or {}).get('data') or {}).get('items') if isinstance(value, dict) else None
+    return isinstance(items, list) and bool(items) and all(
+        isinstance(item, dict) and item.get('slug') and item.get('name') for item in items)
+
+
+@coalesce_reads(scope=_source_read_scope)
+async def get_categories():
+    fresh = await asyncio.to_thread(_json_cached, 'truyenqq:genres:v1')
+    if _valid_categories(fresh):
+        return fresh
+    stale = await asyncio.to_thread(_json_cached, 'truyenqq:genres:last-good:v1')
+    if not _valid_categories(stale):
+        return await _load_categories()
+    retry_key = 'truyenqq:genres:refresh:' + str(int(_source_read_scope()))
+    job_key = (asyncio.get_running_loop(), retry_key)
+    if job_key not in _catalog_jobs and not await asyncio.to_thread(cache.get, retry_key):
+        await asyncio.to_thread(cache.set, retry_key, '1', ttl=60)
+        async def refresh():
+            try:
+                await _load_categories()
+            except Exception:
+                logger.debug('Retaining verified QQ genres during source outage')
+            finally:
+                _catalog_jobs.pop(job_key, None)
+        _catalog_jobs[job_key] = create_task(refresh())
+    return deepcopy(stale)
 
 
 @coalesce_reads(scope=_source_read_scope)

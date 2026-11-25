@@ -10,6 +10,20 @@ from site_access import source_authorization
 import site_access
 
 
+def _relay_failure_kind(result):
+    if result.status_code not in {401, 403, 429, 503} or result.headers.get('x-truyenqq-relay') == '1':
+        return None
+    content = result.content[:12000].lower()
+    if b'whitelist_required' in content:
+        reason = result.headers.get('x-site-access-error')
+        return reason if reason in {'http-401', 'http-403', 'policy-authenticated', 'policy-anonymous'} else 'access-denied'
+    if any(marker in content for marker in [b'cf-chl-', b'challenge-platform', b'just a moment']):
+        return 'edge-challenge'
+    if b'1027' in content or b'daily requests limit' in content:
+        return 'worker-quota'
+    return 'gateway-error'
+
+
 class TruyenQQTransport(httpx.BaseTransport):
     def __init__(self, *, edge_url=None):
         self._local = threading.local()
@@ -104,6 +118,7 @@ class TruyenQQTransport(httpx.BaseTransport):
                             if k.lower() not in {"content-encoding", "content-length", "transfer-encoding"}]
         return httpx.Response(result.status_code, headers=response_headers,
                               content=result.content, request=request, extensions={
+                                  "truyenqq_gateway": _relay_failure_kind(result) if relay else None,
                                   "truyenqq_transport": "edge-source" if relay and result.headers.get("x-truyenqq-relay") == "1"
                                   else "edge-gateway" if relay else "direct",
                               })

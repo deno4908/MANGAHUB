@@ -7,7 +7,7 @@ from concurrent.futures import Future
 class MemoryCache:
     """Bounded RAM cache. Concurrent readers share both results and failures."""
 
-    def __init__(self, max_entries=128, *, max_bytes=None, sizeof=None):
+    def __init__(self, max_entries=128, *, max_bytes=None, sizeof=None, loading_scope=None):
         self.max_entries = max_entries
         self.max_bytes = max_bytes
         self.sizeof = sizeof or (lambda value: 0)
@@ -15,6 +15,7 @@ class MemoryCache:
         self.values = OrderedDict()
         self.loading = {}
         self.lock = threading.RLock()
+        self.loading_scope = loading_scope
 
     def _remove(self, key):
         entry = self.values.pop(key, None)
@@ -47,14 +48,17 @@ class MemoryCache:
     def invalidate(self, key):
         with self.lock:
             self._remove(key)
-            self.loading.pop(key, None)
+            for loading_key in list(self.loading):
+                source_key = loading_key[0] if self.loading_scope else loading_key
+                if source_key == key:
+                    self.loading.pop(loading_key, None)
 
     def invalidate_matching(self, predicate):
         with self.lock:
-            for key in set(self.values) | set(self.loading):
+            keys = set(self.values) | {key[0] if self.loading_scope else key for key in self.loading}
+            for key in keys:
                 if predicate(key):
-                    self._remove(key)
-                    self.loading.pop(key, None)
+                    self.invalidate(key)
 
     def put(self, key, ttl, value):
         if ttl <= 0:
@@ -70,6 +74,9 @@ class MemoryCache:
                 self._remove(next(iter(self.values)))
 
     def get(self, key, ttl, loader, *, refresh=False):
+        # Successful source data remains public/cacheable. In-flight failures
+        # from an anonymous warmup must not be shared with an approved reader.
+        loading_key = (key, self.loading_scope()) if self.loading_scope else key
         with self.lock:
             if refresh:
                 self._remove(key)
@@ -77,17 +84,17 @@ class MemoryCache:
                 value = self._peek(key)
                 if value is not None:
                     return value
-            future = self.loading.get(key)
+            future = self.loading.get(loading_key)
             owner = future is None
             if owner:
                 future = Future()
-                self.loading[key] = future
+                self.loading[loading_key] = future
         if not owner:
             return future.result()
         try:
             value = loader()
             with self.lock:
-                if self.loading.get(key) is future:
+                if self.loading.get(loading_key) is future:
                     self.put(key, ttl() if callable(ttl) else ttl, value)
             future.set_result(value)
             return value
@@ -96,5 +103,5 @@ class MemoryCache:
             raise
         finally:
             with self.lock:
-                if self.loading.get(key) is future:
-                    self.loading.pop(key, None)
+                if self.loading.get(loading_key) is future:
+                    self.loading.pop(loading_key, None)

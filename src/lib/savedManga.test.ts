@@ -10,6 +10,11 @@ it('uses the manga identifier rather than a bookmark or follow row UUID', () => 
   expect(getSavedMangaDetailPath({ id: 'row', manga_slug: `mangadex:${mdx}` })).toBe(`/manga/${mdx}`);
   expect(resolveSavedMangaCover(`mangadex:${mdx}`, `/api/manga/mangadex-cover/${mdx}`).primary).toContain(`/api/manga/mangadex-cover/${mdx}`);
   expect(getSavedMangaDetailPath({ manga_slug: objectId, manga_source_slug: 'matched-book-123' })).toBe('/manga/matched-book-123');
+  const old = { manga_slug: 'old-alternative-title', manga_source_slug: 'current-title-123', source: 'truyenqq' };
+  expect(getSavedMangaDetailPath(old)).toBe('/manga/current-title-123');
+  expect(old.manga_slug).toBe('old-alternative-title');
+  expect(getSavedMangaDetailPath({ ...old, source: 'uploaded' })).toBe('/manga/old-alternative-title');
+  expect(getSavedMangaDetailPath({ ...old, manga_source_slug: 'https://untrusted.example/book-1' })).toBe('/manga/old-alternative-title');
 });
 
 it('recovers Mongo and encoded OTruyen IDs only from a usable stored title', () => {

@@ -5,6 +5,15 @@ import { requestCardMetadata } from './cardMetadata';
 
 /** Home ranking cards share metadata batches with visible cards, without chapter feeds. */
 type MetadataCards = Record<string, Manga | null>;
+const retryWindows = new WeakMap<object, number>();
+
+/** Incomplete source reads get a short recovery window, never an endless poll. */
+export function cardMetadataRetryInterval(query: { state: { data?: MetadataCards } }, ids: string[]): number | false {
+  if (ids.every(id => id in (query.state.data || {}))) return false;
+  let until = retryWindows.get(query);
+  if (until === undefined) { until = Date.now() + 20_000; retryWindows.set(query, until); }
+  return Date.now() < until ? 5000 : false;
+}
 export async function loadHomeCardMetadata(ids: string[], client: QueryClient,
   publish?: (ready: MetadataCards) => void): Promise<MetadataCards> {
   const result: Record<string, Manga | null> = {};

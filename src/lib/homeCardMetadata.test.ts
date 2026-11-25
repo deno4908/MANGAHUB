@@ -1,7 +1,20 @@
 import { QueryClient } from '@tanstack/react-query';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mangaApi } from './api';
-import { loadHomeCardMetadata } from './homeCardMetadata';
+import { loadHomeCardMetadata, cardMetadataRetryInterval } from './homeCardMetadata';
+
+it('bounds incomplete ranking recovery and never polls confirmed missing titles', () => {
+  vi.useFakeTimers();
+  try {
+    const query = { state: { data: {} } };
+    expect(cardMetadataRetryInterval(query, ['pending'])).toBe(5000);
+    vi.advanceTimersByTime(20_000);
+    expect(cardMetadataRetryInterval(query, ['pending'])).toBe(false);
+    expect(cardMetadataRetryInterval({ state: { data: { missing: null } } }, ['missing'])).toBe(false);
+    // A different selection gets its own bounded retry budget.
+    expect(cardMetadataRetryInterval({ state: { data: {} } }, ['other'])).toBe(5000);
+  } finally { vi.useRealTimers(); }
+});
 
 afterEach(() => vi.restoreAllMocks());
 

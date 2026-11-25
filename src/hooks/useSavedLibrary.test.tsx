@@ -40,7 +40,7 @@ it('refreshes stale covers with valid titles across bookmarks, follows and histo
   });
   for (const query of result.current) {
     expect(query.data?.[0]).toMatchObject({ manga_slug: `mdx-${mdx}`, chapter_id: 'saved-chapter', progress: 62, manga_title: 'A valid saved title' });
-    expect(getSavedMangaDetailPath(query.data![1])).toBe('/manga/'+legacy);
+    expect(getSavedMangaDetailPath(query.data![1])).toBe('/manga/'+legacy+'-23163');
     expect(getSavedMangaDetailPath(query.data![2])).toBe('/manga/one-piece-1-128');
     expect(query.data?.[0].manga_thumb_fallback).toContain(`/api/manga/mangadex-cover/${mdx}`);
   }

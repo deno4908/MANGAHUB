@@ -6,7 +6,7 @@ import { useSettingsStore } from '@/store/settingsStore';
 import { useUserStore } from '@/store/userStore';
 import { useCategoryManga, useCategories } from '@/hooks/useApi';
 import { mangaApi, ratingApi } from '@/lib/api';
-import { loadHomeCardMetadata } from '@/lib/homeCardMetadata';
+import { loadHomeCardMetadata, cardMetadataRetryInterval } from '@/lib/homeCardMetadata';
 import { resolveSavedMangaCover } from '@/lib/savedManga';
 import { canCacheCover, warmCovers } from '@/lib/coverCache';
 import { adaptListData, adaptMangaDetail, thumbFallbackUrl, thumbUrl } from '@/lib/adapters';
@@ -3858,7 +3858,7 @@ const BrowseManga = () => {
       ready => queryClient.setQueryData(queryKey, ready)),
     enabled: browseUrlReady && useGlobalTopRatedMode && guestTopRatedMissingSlugs.length > 0,
     staleTime: 10 * 60 * 1000,
-    refetchInterval: query => guestTopRatedMissingSlugs.some(id => !(id in (query.state.data || {}))) ? 5000 : false,
+    refetchInterval: query => cardMetadataRetryInterval(query, guestTopRatedMissingSlugs),
     retry: 0,
     placeholderData: (previousData) => previousData,
   });
