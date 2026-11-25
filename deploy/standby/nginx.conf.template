@@ -71,7 +71,7 @@ server {
     # origin-secret and Cloudflare ingress gates as private readiness reads.
     # Only the backend decides whether the forwarded reader is allowed.
     location = /internal/source-access {
-        limit_except GET { deny all; }
+        limit_except GET OPTIONS { deny all; }
         proxy_pass http://127.0.0.1:8000/api/site-access;
         proxy_http_version 1.1;
         proxy_set_header Host api.mangahub.art;

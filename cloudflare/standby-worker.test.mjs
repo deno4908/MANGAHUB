@@ -427,6 +427,25 @@ test('a cold source access check uses the saved standby decision before its sing
   assert.deepEqual(calls,['/internal/router-health','/internal/source-access']);
 });
 
+test('browser access checks and their CORS preflights retain the public API path',async()=>{
+  const snapshot={checkedAt:900,primary:Object.fromEntries(['mangahub.art','api.mangahub.art','auth.mangahub.art'].map(h=>[h,{ok:false}])),backup:{ok:true,capacity:true}};
+  const worker=createStandbyWorker(async(input,options={})=>{
+    const r=typeof input==='string'?new Request(input,options):input,u=new URL(r.url);
+    if(u.pathname==='/internal/router-health')return Response.json(snapshot);
+    assert.equal(u.hostname,'standby.example');assert.equal(u.pathname,'/api/site-access');
+    assert.equal(r.headers.get('Origin'),'https://mangahub.art');
+    return new Response(null,{status:204,headers:{'Access-Control-Allow-Origin':'https://mangahub.art',
+      'Access-Control-Allow-Credentials':'true','Access-Control-Allow-Methods':'GET, OPTIONS',
+      'Access-Control-Allow-Headers':'Authorization'}});
+  },()=>1000);
+  for(const method of ['OPTIONS','GET']){
+    const result=await worker.fetch(request(undefined,'/api/site-access',{method,headers:{Origin:'https://standby.mangahub.art'}}),
+      {...env,DAILY_HEALTH_SHARED:'true'},{waitUntil:()=>{}});
+    assert.equal(result.status,204);
+    assert.equal(result.headers.get('Access-Control-Allow-Origin'),'https://standby.mangahub.art');
+  }
+});
+
 test('Vercel deployment-disabled 402 fails over a read and remembers the outage',async()=>{
   const f=setup({handle:r=>new URL(r.url).hostname==='standby.example' ? new Response('backup') :
     new Response('paused',{status:402,headers:{'X-Vercel-Error':'DEPLOYMENT_DISABLED'}})});

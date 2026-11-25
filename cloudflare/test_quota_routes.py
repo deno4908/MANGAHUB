@@ -64,7 +64,7 @@ class QuotaRoutingTests(unittest.TestCase):
         block=text.split('location = /internal/source-access {',1)[1].split('location = /internal/router-health',1)[0]
         self.assertIn('proxy_pass http://127.0.0.1:8000/api/site-access;',block)
         self.assertIn('proxy_set_header Cookie "";',block)
-        self.assertIn('limit_except GET { deny all; }',block)
+        self.assertIn('limit_except GET OPTIONS { deny all; }',block)
         self.assertIn('if ($mh_request_allowed = 0) { return 404; }',text)
 
 if __name__=='__main__':unittest.main()

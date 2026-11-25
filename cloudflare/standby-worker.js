@@ -178,7 +178,8 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       // The policy relay can originate in workers.dev, without a VN browser
       // country. Its fixed, secret-protected endpoint bypasses the public
       // frontend Worker; the backend still verifies the reader and whitelist.
-      const path = source.hostname===API && source.pathname==='/api/site-access'
+      const path = source.hostname===API && source.pathname==='/api/site-access' &&
+        request.method==='GET' && !headers.has('Origin')
         ? '/internal/source-access' : source.pathname;
       url = backupOrigin(env) + path + source.search;
       headers.set('X-MangaHub-Origin-Secret', env.STANDBY_ORIGIN_SECRET);
