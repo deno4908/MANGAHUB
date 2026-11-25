@@ -54,7 +54,7 @@ write. A request already in flight during an outage can still fail.
 ## Deployment and rollback
 
 `Manage adaptive standby router` is manual, with `inspect`, `prepare`,
-`activate` and `rollback` operations. Inspect does not change routing. Prepare
+`activate`, `update` and `rollback` operations. Inspect does not change routing. Prepare
 deploys detached and verifies both origins. Prepare refuses to detach an already
 active router. Activate retains its current routes while deploying, then verifies
 that all four hostnames are Cloudflare proxied and preserves the more-specific
@@ -66,6 +66,13 @@ VPS service and private Nginx configuration, and verify that the VPS frontend
 matches the current deployed Vercel frontend. Retain old hashed assets across
 frontend updates. Update the VPS release whenever deploying application changes.
 Never copy `.env` files or virtual environments into a release archive.
+
+During a primary-provider incident, `update` deploys the tested router on its
+existing routes and preserves their failure policies, then verifies the saved
+daily snapshot and standby frontend/API/auth. It does not require the primary
+to be healthy or attach additional routes. A Vercel 402 carrying its explicit
+deployment-disabled marker counts as an origin outage; an application's normal
+402 does not. Safe reads may fail over once; submitted writes are not replayed.
 
 VPS origin requests require both the Cloudflare address allowlist and a private
 origin credential injected by the Worker. The public standby frontend is also

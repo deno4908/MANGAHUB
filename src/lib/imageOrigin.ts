@@ -25,5 +25,6 @@ export function rememberImageOrigin(backup: boolean) {
 export function failedImageHost(response: Response) {
   // A source/authorization error must keep its existing recovery behavior.
   return !response.headers.has('X-TruyenQQ-Error') &&
-    [500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526].includes(response.status);
+    ([500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526].includes(response.status) ||
+      response.status === 402 && ['DEPLOYMENT_DISABLED', 'DEPLOYMENT_PAUSED'].includes(response.headers.get('X-Vercel-Error') || ''));
 }

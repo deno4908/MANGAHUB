@@ -5,6 +5,8 @@ const STANDBY = 'standby.mangahub.art';
 const HOSTS = [FRONT, API, AUTH, STANDBY];
 const SAFE = method => ['GET', 'HEAD'].includes(method);
 const FAILED = status => [500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526].includes(status);
+const ORIGIN_FAILED = response => FAILED(response.status) || (response.status === 402 &&
+  ['DEPLOYMENT_DISABLED', 'DEPLOYMENT_PAUSED'].includes(response.headers.get('X-Vercel-Error')));
 const TTL = 24 * 60 * 60_000;
 const SHARED_READ_TTL = 60_000;
 const BUSY_TTL = 30_000;
@@ -112,10 +114,10 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
         : env.HEALTH_PROBE_MODE === 'operator' ? await measure(env) : null;
       if (validSnapshot(snapshot) && snapshot.checkedAt > (s.checkedAt ?? -1)) {
         s.primary = Object.fromEntries([FRONT, API, AUTH].map(host => [host, {
-          ...snapshot.primary[host], ok: (s.failures[host] ?? -1) > snapshot.checkedAt ? false : snapshot.primary[host].ok,
+          ...snapshot.primary[host], ok: (s.failures[host] ?? -1) >= snapshot.checkedAt ? false : snapshot.primary[host].ok,
           milliseconds: env.DAILY_HEALTH_SHARED === 'true'
             ? s.primary[host]?.milliseconds : snapshot.primary[host].milliseconds }]));
-        s.backup = { ...snapshot.backup, ok: (s.failures.backup ?? -1) > snapshot.checkedAt ? false : snapshot.backup.ok };
+        s.backup = { ...snapshot.backup, ok: (s.failures.backup ?? -1) >= snapshot.checkedAt ? false : snapshot.backup.ok };
         s.checkedAt = snapshot.checkedAt;
       }
       if (validSnapshot(snapshot) && snapshot.checkedAt === s.checkedAt && env.DAILY_HEALTH_SHARED === 'true') {
@@ -333,7 +335,9 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       // Health and latency samples are local to an isolate. Carry a short,
       // signed decision across domains so a different isolate cannot reverse
       // the redirect immediately. Actual origin errors can still fail over.
-      if (lease) target = lease;
+      // A sticky navigation must never keep a user on an observed failed host.
+      if (lease && !(lease === 'primary' && [FRONT, API, AUTH].some(host => s.primary[host]?.ok === false)) &&
+          !(lease === 'backup' && s.backup.ok === false)) target = lease;
       if ([API, AUTH].includes(host) && request.headers.get('Origin') === 'https://' + STANDBY &&
           s.backup.ok && (s.backup.capacity || s.primary[host]?.ok === false)) target='backup';
       const image = incoming.pathname.startsWith('/api/images/') ||
@@ -362,14 +366,14 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       // QQ failures are source failures with browser recovery hints, not an
       // outage of Vercel/VPS. Authorization and ordinary client errors pass on.
       const sourceFailure = response?.headers.has('X-TruyenQQ-Error');
-      if (env.DAILY_HEALTH_SHARED === 'true' && response && !FAILED(response.status) && response.status !== 429) {
+      if (env.DAILY_HEALTH_SHARED === 'true' && response && !ORIGIN_FAILED(response) && response.status !== 429) {
         const measured = Math.max(0, now() - started);
         const current = target === 'primary' ? (s.primary[primaryHost] ||= {}) : s.backup;
         current.milliseconds = current.milliseconds === undefined ? measured : current.milliseconds * .6 + measured * .4;
         if (target === 'backup' && frontend) current.frontendMilliseconds = current.milliseconds;
       }
-      if (response && (!FAILED(response.status) || sourceFailure || !SAFE(request.method))) {
-        if (FAILED(response.status) && !sourceFailure) failedOrigin(target);
+      if (response && (!ORIGIN_FAILED(response) || sourceFailure || !SAFE(request.method))) {
+        if (ORIGIN_FAILED(response) && !sourceFailure) failedOrigin(target);
         if (response.status === 429 && !sourceFailure) s.busyUntil = now() + BUSY_TTL;
         if (host === FRONT && target === 'primary' && response.ok) s.primary[FRONT] = { ...s.primary[FRONT], ok: true };
         const result = publicResponse(response, request, b);

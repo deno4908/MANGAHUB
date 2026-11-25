@@ -25,9 +25,16 @@ it('recovers back to the primary when the standby connection fails, with at most
   await fetchWithTimeout(url,{});expect(send.mock.calls.map(x=>x[0])).toEqual([backup,url]);
   expect(imageOriginRoute(url)?.preferBackup).toBe(false);
 });
-it.each([401,403,404,429])('keeps authorization, missing image and rate limit status %s intact', async status=>{
+it.each([401,402,403,404,429])('keeps authorization, missing image and rate limit status %s intact', async status=>{
   const send=vi.fn().mockResolvedValue(new Response('error',{status}));vi.stubGlobal('fetch',send);
   expect((await fetchWithTimeout(url,{})).status).toBe(status);expect(send).toHaveBeenCalledTimes(1);
+});
+it('moves an image off a deployment disabled by Vercel without adding a health probe', async()=>{
+  const send=vi.fn().mockResolvedValueOnce(new Response('paused',{status:402,headers:{'X-Vercel-Error':'DEPLOYMENT_DISABLED'}}))
+    .mockResolvedValueOnce(image());vi.stubGlobal('fetch',send);
+  expect(await(await fetchWithTimeout(url,{})).text()).toBe('bytes');
+  expect(send.mock.calls.map(x=>x[0])).toEqual([url,backup]);
+  expect(imageOriginRoute(url)?.preferBackup).toBe(true);
 });
 it('leaves QQ source recovery on its original host and never retries writes or external URLs', async()=>{
   const send=vi.fn().mockImplementation(async()=>new Response('blocked',{status:503,headers:{'X-TruyenQQ-Error':'http-403'}}));vi.stubGlobal('fetch',send);

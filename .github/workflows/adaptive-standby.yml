@@ -4,7 +4,7 @@ on:
     inputs:
       operation:
         type: choice
-        options: [inspect, prepare, activate, rollback, quota-relief]
+        options: [inspect, prepare, activate, update, rollback, quota-relief]
         default: inspect
         required: true
       country_guard_confirmed:
@@ -48,11 +48,13 @@ jobs:
         if: inputs.operation == 'inspect'
         run: node cloudflare/traffic-tail.mjs
       - name: Prepare router configuration
-        if: inputs.operation == 'prepare' || inputs.operation == 'activate'
+        if: inputs.operation == 'prepare' || inputs.operation == 'activate' || inputs.operation == 'update'
         run: |
           test -n "$STANDBY_ORIGIN_SECRET"
           umask 077
-          python3 cloudflare/manage-standby.py "config-$OPERATION"
+          router_mode="$OPERATION"
+          if [ "$router_mode" = update ]; then router_mode=activate; fi
+          python3 cloudflare/manage-standby.py "config-$router_mode"
           python3 - <<'PY'
           import json,os
           from pathlib import Path
@@ -62,6 +64,19 @@ jobs:
           npx --yes wrangler@4 deploy --config cloudflare/standby-runtime.toml
           python3 cloudflare/manage-standby.py restore-failure-policy
           python3 cloudflare/manage-standby.py probe
+      - name: Verify standby during a primary provider incident
+        if: inputs.operation == 'update'
+        run: |
+          python3 - <<'PY'
+          import os,json,urllib.request
+          base='https://standby.mangahub.art/internal/router-probe'
+          for query in ['kind=daily-health','kind=readiness','kind=frontend&target=backup','kind=api&target=backup','kind=auth&target=backup']:
+              request=urllib.request.Request(base+'?'+query,headers={'X-MangaHub-Probe-Secret':os.environ['STANDBY_ORIGIN_SECRET']})
+              with urllib.request.urlopen(request,timeout=20) as response: result=json.load(response)
+              valid=result.get('initialized') and result.get('shared') if query=='kind=daily-health' else result.get('ok') if query=='kind=readiness' else result.get('status')==200
+              print(json.dumps({'probe':query,'healthy':bool(valid)}))
+              assert valid,'Standby verification failed'
+          PY
       - name: Check actual standby dependencies and both origins
         if: inputs.operation == 'prepare' || inputs.operation == 'activate'
         run: |

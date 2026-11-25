@@ -403,3 +403,50 @@ test('missing shared metadata does not launch probes or block a healthy read',as
   assert.equal(await r.text(),'reader');await Promise.all(jobs);
   assert.deepEqual(calls.sort(),['/api/manga/homepage','/internal/router-health'].sort());
 });
+
+test('Vercel deployment-disabled 402 fails over a read and remembers the outage',async()=>{
+  const f=setup({handle:r=>new URL(r.url).hostname==='standby.example' ? new Response('backup') :
+    new Response('paused',{status:402,headers:{'X-Vercel-Error':'DEPLOYMENT_DISABLED'}})});
+  assert.equal(await(await f.worker.fetch(request(),env,f.ctx)).text(),'backup');await f.done();
+  assert.equal(f.calls.length,2);
+  f.calls.length=0;
+  assert.equal(await(await f.worker.fetch(request(),env,f.ctx)).text(),'backup');
+  assert.equal(f.calls.length,1);
+  assert.equal(new URL(f.calls[0].url).hostname,'standby.example');
+});
+
+test('an ordinary application 402 passes through without a standby retry',async()=>{
+  const f=setup({handle:()=>new Response('payment required by app',{status:402})});
+  assert.equal((await f.worker.fetch(request(),env,f.ctx)).status,402);await f.done();
+  assert.equal(f.calls.length,1);
+});
+
+test('a submitted write is not replayed after Vercel pauses, and the next write uses standby',async()=>{
+  const f=setup({handle:r=>new URL(r.url).hostname==='standby.example' ? new Response('written once') :
+    new Response('paused',{status:402,headers:{'X-Vercel-Error':'DEPLOYMENT_DISABLED'}})});
+  const write=()=>request(undefined,'/api/bookmarks/',{method:'POST',body:'one-write'});
+  assert.equal((await f.worker.fetch(write(),env,f.ctx)).status,402);
+  assert.equal(f.calls.length,1);
+  assert.equal(await(await f.worker.fetch(write(),env,f.ctx)).text(),'written once');
+  assert.equal(f.calls.length,2);
+  assert.equal(new URL(f.calls[1].url).hostname,'standby.example');
+});
+
+test('an observed primary outage overrides an existing signed primary navigation lease',async()=>{
+  const source=setup();
+  const redirect=await source.worker.fetch(request('standby.mangahub.art','/',{headers:{accept:'text/html'}}),env,source.ctx);
+  const cookie=redirectCookies(redirect);
+  const snapshot={checkedAt:900,primary:Object.fromEntries(['mangahub.art','api.mangahub.art','auth.mangahub.art'].map(h=>[h,{ok:false}])),backup:{ok:true,capacity:true}};
+  const jobs=[];
+  const worker=createStandbyWorker(async(input,options={})=>{
+    const r=typeof input==='string'?new Request(input,options):input;
+    if(new URL(r.url).pathname==='/internal/router-health')return Response.json(snapshot);
+    assert.equal(new URL(r.url).hostname,'standby.example');
+    return new Response('<html>backup</html>',{headers:{'Content-Type':'text/html'}});
+  },()=>1000);
+  const result=await worker.fetch(request('standby.mangahub.art','/',{headers:{accept:'text/html',cookie}}),
+    {...env,DAILY_HEALTH_SHARED:'true'},{waitUntil:p=>jobs.push(p)});
+  assert.equal(result.status,200);
+  assert.equal(result.headers.get('Location'),null);
+  await Promise.all(jobs);await source.done();
+});
