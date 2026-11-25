@@ -5292,7 +5292,7 @@ const BrowseManga = () => {
         : withVisibleRatings;
 
     const ratingModeItems =
-      filters.sort === 'rating' && canUseUserRatings && !useMangaDexLatestFeedMode
+      filters.sort === 'rating' && canUseUserRatings && !useMangaDexLatestFeedMode && !useQQServerRatingMode
         ? withMyRatings.filter(hasTrustedRatingSignal)
         : withMyRatings;
 
@@ -5316,6 +5316,7 @@ const BrowseManga = () => {
     filters.sort,
     useMangaDexLatestFeedMode,
     canUseUserRatings,
+    useQQServerRatingMode,
     myRatedScoreMap,
   ]);
 

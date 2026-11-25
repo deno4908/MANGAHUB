@@ -96,7 +96,9 @@ it('sorts QQ popularity by the displayed local views rather than the source page
   expect(mangaApi.getOTruyenFiltered).toHaveBeenCalledWith(expect.objectContaining({ limit: 24 }));
 });
 
-it('keeps 24 QQ rating cards, including the latest unrated tail, in server order', async () => {
+it.each([false, true])('keeps 24 QQ rating cards and their latest tail in server order when loggedIn=%s', async loggedIn => {
+  viewer.loggedIn = loggedIn;
+  vi.spyOn(ratingApi, 'getMyRatedManga').mockResolvedValue({ items: [] });
   const rated = { slug: 'rated-1', name: 'Weighted rating first', source: 'truyenqq',
     rating_average: 4.5, rating_count: 20, thumb_url: '/no-cover.svg' };
   const nextRated = { slug: 'rated-2', name: 'Higher average fewer votes', source: 'truyenqq',
@@ -116,6 +118,23 @@ it('keeps 24 QQ rating cards, including the latest unrated tail, in server order
   expect(mangaApi.getOTruyenFiltered).toHaveBeenCalledWith(expect.objectContaining({ sort: 'rating', limit: 24 }));
   expect(ratingApi.getTopRatedManga).not.toHaveBeenCalled();
   expect(mangaApi.getList).not.toHaveBeenCalled();
+});
+
+it('keeps an entirely unrated second QQ rating page for a signed-in reader', async () => {
+  viewer.loggedIn = true;
+  vi.spyOn(ratingApi, 'getMyRatedManga').mockResolvedValue({ items: [] });
+  vi.mocked(mangaApi.getOTruyenFiltered).mockImplementation(async options => ({ data: {
+    items: Array.from({ length: 24 }, (_, index) => ({
+      slug: `tail-${options.page}-${index}`, name: `Page ${options.page} latest ${index + 1}`,
+      source: 'truyenqq', thumb_url: '/no-cover.svg', rating_average: 0, rating_count: 0,
+    })),
+    params: { pagination: { currentPage: options.page, totalItemsPerPage: 24, totalItems: 240, totalPages: 10 } },
+  } }));
+  show('/manga?source=truyenqq&sort=rating&page=2');
+  await waitFor(() => expect(screen.getByTestId('ranked-cards').children).toHaveLength(24));
+  expect(screen.getByTestId('ranked-cards').children[0]).toHaveTextContent('Page 2 latest 1');
+  expect(screen.getByTestId('ranked-cards').children[23]).toHaveTextContent('Page 2 latest 24');
+  expect(mangaApi.getOTruyenFiltered).toHaveBeenCalledWith(expect.objectContaining({ page: 2, sort: 'rating', limit: 24 }));
 });
 
 it('keeps native QQ popularity order for zero-view titles after promoting local views', async () => {
