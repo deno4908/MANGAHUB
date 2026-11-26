@@ -1694,13 +1694,16 @@ async def _warmup_mangadex_catalog() -> None:
         await asyncio.sleep(2)  # Let server finish startup first
         # The native lifecycle already runs this warmup once. Decode the
         # indexed browser catalog here instead of on the first reader's visit.
-        from fastapi_app.services import mangadex_release_index
-        try:
-            started = time.monotonic()
-            prepared = await asyncio.to_thread(mangadex_release_index.warm_index)
-            logger.info('MangaDex index startup warmup prepared=%s seconds=%.3f', prepared, time.monotonic() - started)
-        except Exception:
-            logger.debug('MangaDex index warmup deferred; normal reads remain available')
+        if not config.IS_VERCEL:
+            from fastapi_app.services import mangadex_release_index
+            try:
+                started = time.monotonic()
+                prepared = await asyncio.to_thread(mangadex_release_index.warm_index)
+                logger.info('MangaDex index startup warmup prepared=%s seconds=%.3f', prepared, time.monotonic() - started)
+            except Exception:
+                logger.debug('MangaDex index warmup deferred; normal reads remain available')
+        if not MANGADEX_STARTUP_WARMUP_ENABLED:
+            return
         catalog = await mangadex_service.get_vi_catalog(max_chapters=120)
         mangas: list[dict] = catalog.get("mangas", []) if isinstance(catalog, dict) else []
         if not mangas:
@@ -1793,7 +1796,7 @@ async def _warmup_mangadex_catalog() -> None:
 def schedule_startup_warmup() -> None:
     """Schedule background warmup of MangaDex catalog (idempotent)."""
     global _startup_warmup_task
-    if not MANGADEX_STARTUP_WARMUP_ENABLED:
+    if config.IS_VERCEL and not MANGADEX_STARTUP_WARMUP_ENABLED:
         return
     if _startup_warmup_task and not _startup_warmup_task.done():
         return

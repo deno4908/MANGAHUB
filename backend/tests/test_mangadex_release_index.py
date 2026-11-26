@@ -92,6 +92,24 @@ def test_native_startup_prepares_first_page_without_fetching_upstream_or_changin
     source.assert_not_called()
 
 
+def test_native_index_warms_even_when_old_http_cover_warmup_is_disabled(store, monkeypatch):
+    from fastapi_app.routers import manga
+    monkeypatch.setattr(manga.config, 'IS_VERCEL', False)
+    monkeypatch.setattr(manga, 'MANGADEX_STARTUP_WARMUP_ENABLED', False)
+    monkeypatch.setattr(manga, '_startup_warmup_task', None)
+    warm = Mock(return_value=True)
+    monkeypatch.setattr(index, 'warm_index', warm)
+    http = AsyncMock(side_effect=AssertionError('Disabled HTTP warmup must stay disabled'))
+    monkeypatch.setattr(mdx, 'get_vi_catalog', http)
+    async def run():
+        manga.schedule_startup_warmup()
+        assert manga._startup_warmup_task is not None
+        await asyncio.wait_for(manga._startup_warmup_task, 4)
+    asyncio.run(run())
+    warm.assert_called_once()
+    http.assert_not_awaited()
+
+
 def test_hidden_mature_genre_and_status_filters_are_applied_before_slicing(store):
     rows = [chapter(n) for n in range(1, 101)]
     for row in rows[70:]:
