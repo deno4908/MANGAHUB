@@ -1,0 +1,40 @@
+name: Verify image proxy latency and URL validation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - backend/fastapi_app/routers/images.py
+      - backend/tests/test_image_validation_performance.py
+      - backend/tests/test_mangadex_image_client.py
+      - .github/workflows/image-proxy.yml
+  pull_request:
+    paths:
+      - backend/fastapi_app/routers/images.py
+      - backend/tests/test_image_validation_performance.py
+      - backend/tests/test_mangadex_image_client.py
+      - .github/workflows/image-proxy.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify-images:
+    runs-on: ubuntu-latest
+    env:
+      FLASK_SECRET_KEY: ci-only-not-a-production-secret
+      JWT_SECRET_KEY: ci-only-not-a-production-secret
+      FLASK_DEBUG: 'true'
+      FRONTEND_URL: http://localhost:8080
+      SECURITY_REQUIRE_REDIS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - run: python -m pip install -r backend/requirements-test.txt
+      - name: Test cached covers under load, cold DNS and image recovery
+        working-directory: backend
+        run: python -m pytest tests/test_image_validation_performance.py tests/test_mangadex_image_client.py tests/test_image_catalog_performance.py -q

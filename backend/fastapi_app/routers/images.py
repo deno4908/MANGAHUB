@@ -117,6 +117,7 @@ MANGADEX_IMAGE_CACHE_VERSION = (
 )
 _mangadex_image_semaphore = asyncio.Semaphore(MANGADEX_IMAGE_UPSTREAM_CONCURRENCY)
 _curl_executor = ThreadPoolExecutor(max_workers=IMAGE_PROXY_CURL_WORKERS)
+_image_dns_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="image-dns")
 
 
 async def _get_client() -> httpx.AsyncClient:
@@ -628,24 +629,47 @@ def _validate_host_dns_sync(host: str) -> str | None:
     return error
 
 
-def _validate_image_url_sync(url: str) -> str | None:
+def _image_url_host(url: str) -> tuple[str, str | None]:
     parsed = urlparse(str(url or "").strip())
     if parsed.scheme.lower() != "https":
-        return "Only HTTPS image URLs are allowed"
+        return "", "Only HTTPS image URLs are allowed"
     host = _normalized_hostname(parsed.hostname)
     if not host:
-        return "Missing image host"
+        return "", "Missing image host"
     if parsed.username or parsed.password:
-        return "Userinfo is not allowed in image URLs"
+        return "", "Userinfo is not allowed in image URLs"
     if parsed.port not in (None, 443):
-        return "Custom image ports are not allowed"
+        return "", "Custom image ports are not allowed"
     if not parsed.path or parsed.path == "/":
-        return "Image URL path is required"
+        return "", "Image URL path is required"
+    if not _is_allowed_image_host(host):
+        return "", "Image host is not allowed"
+    return host, None
+
+
+def _validate_image_url_sync(url: str) -> str | None:
+    host, error = _image_url_host(url)
+    if error:
+        return error
     return _validate_host_dns_sync(host)
 
 
 async def _validate_image_url(url: str) -> str | None:
-    return await asyncio.to_thread(_validate_image_url_sync, url)
+    host, error = _image_url_host(url)
+    if error:
+        return error
+    # A new cover URL usually uses a host already checked by earlier covers.
+    # Reuse exactly the existing DNS TTL, including negative results, without
+    # queuing every image behind unrelated blocking catalog/database work.
+    with _host_validation_lock:
+        cached = _host_validation_cache.get(host)
+    if cached and cached[0] > time.time():
+        return cached[1]
+    # Cold DNS remains off the event loop, bounded independently of catalogs.
+    # URL, host allowlist and public-address checks still run for every read.
+    return await asyncio.get_running_loop().run_in_executor(
+        _image_dns_executor, _validate_host_dns_sync, host
+    )
 
 
 def _is_mangadex_host(host: str) -> bool:
