@@ -1,18 +1,19 @@
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import ChapterReader from './ChapterReader';
 import { mangaApi } from '@/lib/api';
 import { writeReaderMetaToStorage } from '@/lib/readerMetadata';
+import * as imageCache from '@/lib/coverCache';
 
 const chapter = vi.hoisted(() => ({ result: {} as any, retry: vi.fn() }));
 vi.mock('@/hooks/useApi', () => ({ useChapter: () => chapter.result }));
 vi.mock('@/hooks/useReaderProgress', () => ({ useReaderProgress: vi.fn() }));
 vi.mock('@/store/userStore', () => ({ useUserStore: () => ({ user: { role: 'admin' }, isLoggedIn: true }) }));
 vi.mock('@/store/settingsStore', () => ({ useSettingsStore: (select: any) => select({ settings: { reader: { imageLoading: 'lazy' }, privacy: { silentViewTracking: true } } }) }));
-vi.mock('@/lib/api', () => ({ mangaApi: { getDetail: vi.fn() } }));
-vi.mock('@/components/reader/ReaderImage', () => ({ default: () => <div>Page</div> }));
+vi.mock('@/lib/api', () => ({ mangaApi: { getDetail: vi.fn(), getChapter: vi.fn() } }));
+vi.mock('@/components/reader/ReaderImage', () => ({ default: ({ index, onVisible }: any) => <button data-testid={`reader-image-${index}`} onClick={() => onVisible?.(index)}>Page</button> }));
 vi.mock('@/components/manga/CommentSection', () => ({ default: () => null }));
 vi.mock('@/components/reader/ReaderSettings', () => ({ default: () => null }));
 
@@ -37,7 +38,36 @@ beforeEach(() => {
     slug, name: 'Reader comic', source: 'truyenqq', chapters: [{ server_name: 'TruyenQQ', server_data: chapters.map(ch => ({ chapter_name: String(ch.number), chapter_api_data: `/api/manga/chapter/${ch.id}` })) }],
   } } });
 });
-afterEach(() => { cleanup(); client.clear(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); client.clear(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+it.each([false, true])('preloads at most the first next-chapter image and respects saveData=%s', async saveData => {
+  const previousConnection = Object.getOwnPropertyDescriptor(navigator, 'connection');
+  Object.defineProperty(navigator, 'connection', { configurable: true, value: { saveData, effectiveType: '4g' } });
+  try {
+    vi.stubGlobal('URL', class extends URL { static createObjectURL = vi.fn();static revokeObjectURL = vi.fn(); });
+    const warm = vi.spyOn(imageCache, 'warmReaderImages').mockImplementation(() => vi.fn());
+    vi.mocked(mangaApi.getChapter).mockReset().mockResolvedValue({ data: { item: { chapter_image: [
+      { image_file: `/api/manga/truyenqq/image/${slug}/2/1` }, { image_file: `/api/manga/truyenqq/image/${slug}/2/2` },
+    ] } } });
+    chapter.result.data.pages = Array.from({ length: 5 }, (_, n) => `https://images.example/${n}.jpg`);
+    open(1);
+    await screen.findByRole('button', { name: 'Chương sau' });
+    fireEvent.click(screen.getByTestId('reader-image-3'));
+    await waitFor(() => expect(mangaApi.getChapter).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+    const api = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+    const next = `${api}/api/manga/truyenqq/image/${slug}/2/1`;
+    const nextCalls = warm.mock.calls.filter(([urls]) => urls.includes(next));
+    expect(nextCalls).toHaveLength(saveData ? 0 : 1);
+    if (!saveData) expect(nextCalls[0][0]).toEqual([next]);
+    fireEvent.click(screen.getByTestId('reader-image-4'));
+    await act(async () => {});
+    expect(mangaApi.getChapter).toHaveBeenCalledTimes(1);
+  } finally {
+    if (previousConnection) Object.defineProperty(navigator, 'connection', previousConnection);
+    else Reflect.deleteProperty(navigator, 'connection');
+  }
+});
 
 it('offers recovery for a temporary source outage instead of claiming the next chapter is missing', async () => {
   chapter.result.data = undefined;

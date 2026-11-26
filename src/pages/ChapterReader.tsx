@@ -11,7 +11,7 @@ import type { ReadingHistory } from '@/lib/readingHistory';
 import { adaptMangaDetail, getChapterPageFallback } from '@/lib/adapters';
 import { getMangaDetailPath, normalizeMangaDexId } from '@/lib/mangaLinks';
 import { chapterQueryOptions } from '@/lib/chapterQuery';
-import { getPreferredMangaDexImageUrl } from '@/lib/mangaDexImages';
+import { getPreferredMangaDexImageUrl, isMangaDexImageUrl } from '@/lib/mangaDexImages';
 import { incrementMangaViewsInQueryCache, invalidateMangaRealtimeQueries } from '@/lib/querySync';
 import { retainCachedCover, canCacheReaderImage, warmReaderImages } from '@/lib/coverCache';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -202,6 +202,12 @@ const ChapterReader = () => {
   const location = useLocation();
   const normalizedChapterId = id?.startsWith('mdx-') ? id.slice(4) : id;
   const currentChapterId = normalizeMangaDexId(normalizedChapterId) || normalizedChapterId || '';
+  const activeChapterRef = useRef(currentChapterId);
+  activeChapterRef.current = currentChapterId;
+  useEffect(() => {
+    activeChapterRef.current = currentChapterId;
+    return () => { activeChapterRef.current = ''; };
+  }, [currentChapterId]);
   const qqChapter = parseQQChapter(currentChapterId);
   const chapterState = (location.state || {}) as ChapterState;
   const { data: chapterData, isLoading, isFetching: isChapterFetching, error: chapterError, refetch: retryChapter } = useChapter(currentChapterId || undefined);
@@ -648,7 +654,7 @@ const ChapterReader = () => {
     }
   }, [visiblePage, pages, imageLoadingMode]);
 
-  // ─── Prefetch next chapter metadata only when the reader is near the end ───
+  // ─── Prepare the next chapter only when the reader is near the end ───
   useEffect(() => {
     if (imageLoadingMode === 'standard') return;
     if (prefetchTriggeredRef.current || !nextChapter || totalPages === 0) return;
@@ -659,8 +665,24 @@ const ChapterReader = () => {
 
     prefetchTriggeredRef.current = true;
     const nextChapterId = normalizeMangaDexId(nextChapter.id) || nextChapter.id;
-    queryClient.prefetchQuery(chapterQueryOptions(nextChapterId));
-  }, [visiblePage, totalPages, nextChapter, queryClient, imageLoadingMode]);
+    const options = chapterQueryOptions(nextChapterId);
+    void queryClient.prefetchQuery(options).then(() => {
+      if (activeChapterRef.current !== currentChapterId) return;
+      const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
+      if (connection?.saveData || ['slow-2g', '2g'].includes(connection?.effectiveType || '')) return;
+      const data = queryClient.getQueryData<{ pages: string[] }>(options.queryKey);
+      const first = data?.pages[0];
+      if (!first) return;
+      const url = getPreferredMangaDexImageUrl(first);
+      // One image only, using the same private blob/browser cache as reading.
+      // Both image paths bypass Workers; metadata is never fetched again here.
+      if (canCacheReaderImage(url)) warmReaderImages([url]);
+      else if (isMangaDexImageUrl(url)) {
+        const image = new Image();
+        image.fetchPriority = 'low';image.referrerPolicy = 'no-referrer';image.src = url;
+      }
+    });
+  }, [visiblePage, totalPages, nextChapter, queryClient, imageLoadingMode, currentChapterId]);
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     const key = e.key.toLowerCase();
