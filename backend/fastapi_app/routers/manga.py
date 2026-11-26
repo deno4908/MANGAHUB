@@ -1692,6 +1692,15 @@ async def _warmup_mangadex_catalog() -> None:
     logger = logging.getLogger(__name__)
     try:
         await asyncio.sleep(2)  # Let server finish startup first
+        # The native lifecycle already runs this warmup once. Decode the
+        # indexed browser catalog here instead of on the first reader's visit.
+        from fastapi_app.services import mangadex_release_index
+        try:
+            started = time.monotonic()
+            prepared = await asyncio.to_thread(mangadex_release_index.warm_index)
+            logger.info('MangaDex index startup warmup prepared=%s seconds=%.3f', prepared, time.monotonic() - started)
+        except Exception:
+            logger.debug('MangaDex index warmup deferred; normal reads remain available')
         catalog = await mangadex_service.get_vi_catalog(max_chapters=120)
         mangas: list[dict] = catalog.get("mangas", []) if isinstance(catalog, dict) else []
         if not mangas:

@@ -81,6 +81,17 @@ def test_full_pages_are_unique_and_never_rescan_chapters_on_deep_links(store, mo
     source.assert_not_called()
 
 
+def test_native_startup_prepares_first_page_without_fetching_upstream_or_changing_filters(store, monkeypatch):
+    put(store, state([chapter(n) for n in range(1, 101)]))
+    source = AsyncMock(side_effect=AssertionError('Startup must not fetch chapter HTTP endpoints'))
+    monkeypatch.setattr(mdx, '_request_json', source)
+    assert index.warm_index()
+    monkeypatch.setattr(index, '_mature_marker', lambda *args: (_ for _ in ()).throw(AssertionError('First reader repeated normalization')))
+    result = asyncio.run(mdx.get_latest_vi_chapter_feed(limit=24, excluded_manga_ids=[mid(100)]))
+    assert ids(result) == [mid(n) for n in range(99,75,-1)]
+    source.assert_not_called()
+
+
 def test_hidden_mature_genre_and_status_filters_are_applied_before_slicing(store):
     rows = [chapter(n) for n in range(1, 101)]
     for row in rows[70:]:

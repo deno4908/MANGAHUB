@@ -241,6 +241,16 @@ async def page_rows(*, page, limit, ratings, excluded, tags, statuses, keyword, 
         statuses, keyword, sort, year, min_rating, statistics, original_languages)
 
 
+def warm_index():
+    """Prepare the public index once during native startup, without HTTP reads."""
+    state = _state()
+    if not state:
+        return False
+    with _selection_lock:
+        _prepared_rows(state)
+    return True
+
+
 def _prepared_rows(state):
     from fastapi_app.services import mangadex_service as mdx
     version = state.get("base_version") or state["version"]
