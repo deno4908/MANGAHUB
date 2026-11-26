@@ -2,6 +2,7 @@
 // shared CDN cache; SiteAccessGate and logout discard this cache on access loss.
 import { fetchImageResponse, isProtectedImage } from './imageTransport';
 import { clearQQRecovery } from './truyenqqRelay';
+import { normalizeMangaDexId } from './mangaLinks';
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const TTL = 2 * 60_000;
 const MAX_BYTES = 24 * 1024 * 1024;
@@ -17,11 +18,43 @@ type Entry = {
   objectUrl?: string; bytes: number; expires: number;
   priority: CoverPriority;
   timeout: number;
+  thumbnailId?: string;
 };
 const entries = new Map<string, Entry>();
 const waiting: Entry[] = [];
 let active = 0;
 let bytes = 0;
+
+function mangaDexThumbnail(value: string, byId: boolean): string | undefined {
+  try {
+    const url = new URL(value);
+    if (url.origin !== new URL(API_BASE).origin) return;
+    if (byId) {
+      const match = url.pathname.match(/^\/api\/manga\/mangadex-cover\/([^/]+)$/);
+      const id = match && normalizeMangaDexId(match[1]);
+      const size = url.searchParams.get('size') || '512';
+      return id && ['256', '512'].includes(size) ? `${id}:${size}` : undefined;
+    }
+    if (url.pathname !== '/api/images/img') return;
+    const source = new URL(url.searchParams.get('url') || '');
+    if (source.origin !== 'https://uploads.mangadex.org') return;
+    const match = source.pathname.match(/^\/covers\/([^/]+)\/[^/]+\.(256|512)\.jpg$/i);
+    const id = match && normalizeMangaDexId(match[1]);
+    return id && match ? `${id}:${match[2]}` : undefined;
+  } catch { return; }
+}
+
+function sharedEntry(key: string): Entry | undefined {
+  const exact = entries.get(key);
+  if (exact) return exact;
+  const identity = mangaDexThumbnail(key, true);
+  if (!identity) return;
+  // A saved record may have only the manga ID while Explore already loaded
+  // its filename. Reuse only a fresh completed thumbnail of the same size.
+  // Explicit changed filenames always retain their separate cache identity.
+  return [...entries.values()].reverse().find(entry => entry.objectUrl && entry.expires > Date.now()
+    && entry.thumbnailId === identity);
+}
 
 export function canCacheCover(value: string): boolean {
   if (typeof URL.createObjectURL !== 'function') return false;
@@ -88,13 +121,13 @@ function pump() {
 }
 
 export function cachedCover(value: string): string | undefined {
-  const entry = entries.get(value);
+  const entry = sharedEntry(value);
   return entry?.objectUrl && (entry.expires > Date.now() || entry.users > 0) ? entry.objectUrl : undefined;
 }
 
 /** Hold an already downloaded cover while reading; never start a new fetch. */
 export function retainCachedCover(key: string): () => void {
-  const entry = entries.get(key);
+  const entry = sharedEntry(key);
   if (!entry?.objectUrl) return () => {};
   entry.users++;
   let released = false;
@@ -108,17 +141,18 @@ export function retainCachedCover(key: string): () => void {
 }
 
 export function invalidateCover(value: string) {
-  const entry = entries.get(value);
+  const entry = sharedEntry(value);
   if (entry?.objectUrl) discard(entry);
 }
 
 export function acquireCover(key: string, priority: CoverPriority = 'normal', timeout = 15_000) {
-  let entry = entries.get(key);
-  if (entry?.objectUrl && entry.expires <= Date.now() && !entry.users) { discard(entry); entry = undefined; }
+  let entry = sharedEntry(key);
+  if (entry?.objectUrl && entry.expires <= Date.now() && !entry.users) { discard(entry); entry = sharedEntry(key); }
   if (!entry) {
     let resolve!: Entry['resolve'], reject!: Entry['reject'];
     const promise = new Promise<string>((yes, no) => { resolve = yes; reject = no; });
-    entry = { key, users: 0, controller: new AbortController(), started: false, promise, resolve, reject, bytes: 0, expires: 0, priority, timeout };
+    entry = { key, users: 0, controller: new AbortController(), started: false, promise, resolve, reject,
+      bytes: 0, expires: 0, priority, timeout, thumbnailId: mangaDexThumbnail(key, false) };
     entries.set(key, entry);
     waiting.push(entry);
   }
@@ -126,7 +160,7 @@ export function acquireCover(key: string, priority: CoverPriority = 'normal', ti
   if (priorityOrder[priority] < priorityOrder[current.priority]) current.priority = priority;
   current.users++;
   // Touch the entry so eviction favors images from older pages.
-  entries.delete(key); entries.set(key, current);
+  entries.delete(current.key); entries.set(current.key, current);
   pump();
   let released = false;
   return { promise: current.promise, promote: (priority: CoverPriority) => {
@@ -157,8 +191,8 @@ export function clearCoverCache() {
   waiting.length = 0;
 }
 
-export function warmCovers(urls: string[]): () => void {
-  const resources = [...new Set(urls)].filter(canCacheCover).slice(0, 6).map(url => acquireCover(url, 'prefetch'));
+export function warmCovers(urls: string[], priority: CoverPriority = 'prefetch'): () => void {
+  const resources = [...new Set(urls)].filter(canCacheCover).slice(0, 6).map(url => acquireCover(url, priority));
   resources.forEach(resource => { void resource.promise.then(resource.release, resource.release); });
   return () => resources.forEach(resource => resource.release());
 }

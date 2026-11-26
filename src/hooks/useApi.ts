@@ -67,7 +67,7 @@ function warmLibraryCovers(items: Array<Record<string, any>>, signal: AbortSigna
   const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
   if (signal.aborted || document.hidden || connection?.saveData || /(^|-)2g$/.test(connection?.effectiveType || '')) return;
   const release = warmCovers(items.filter(item => normalizeMangaDexId(item.manga_slug) || /^[a-z0-9]+(?:-+[a-z0-9]+)*-\d+$/.test(String(item.manga_slug || '')))
-    .slice(0, 4).map(item => item.manga_thumb));
+    .slice(0, 4).map(item => item.manga_thumb), 'visible');
   signal.addEventListener('abort', release, { once: true });
 }
 

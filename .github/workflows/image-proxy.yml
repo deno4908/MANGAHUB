@@ -6,6 +6,8 @@ on:
     paths:
       - backend/fastapi_app/routers/images.py
       - backend/fastapi_app/routers/manga.py
+      - backend/fastapi_app/services/mangadex_service.py
+      - backend/tests/test_cover_lookup_queue.py
       - backend/tests/test_saved_library_cover_delivery.py
       - backend/tests/test_access_tickets.py
       - backend/tests/test_image_validation_performance.py
@@ -15,6 +17,8 @@ on:
     paths:
       - backend/fastapi_app/routers/images.py
       - backend/fastapi_app/routers/manga.py
+      - backend/fastapi_app/services/mangadex_service.py
+      - backend/tests/test_cover_lookup_queue.py
       - backend/tests/test_saved_library_cover_delivery.py
       - backend/tests/test_access_tickets.py
       - backend/tests/test_image_validation_performance.py
@@ -43,4 +47,4 @@ jobs:
       - run: python -m pip install -r backend/requirements-test.txt
       - name: Test cached covers under load, cold DNS and image recovery
         working-directory: backend
-        run: python -m pytest tests/test_image_validation_performance.py tests/test_mangadex_image_client.py tests/test_image_catalog_performance.py tests/test_saved_library_cover_delivery.py tests/test_access_tickets.py -q
+        run: python -m pytest tests/test_image_validation_performance.py tests/test_mangadex_image_client.py tests/test_image_catalog_performance.py tests/test_saved_library_cover_delivery.py tests/test_cover_lookup_queue.py tests/test_access_tickets.py -q

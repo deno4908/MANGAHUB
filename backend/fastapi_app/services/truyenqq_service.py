@@ -508,16 +508,17 @@ async def resolve_slug_from_id(manga_id):
     return "-".join(identity(url)[:2])
 
 
-def _cached_detail_identifier(slug):
+def _cached_detail_identifier(slug, values=None):
     """Reuse a QQ reference learned by cards instead of crawling every sitemap."""
     if re.fullmatch(r"[a-zA-Z0-9]+(?:-+[a-zA-Z0-9]+)*-\d+", slug):
         return slug  # Native source IDs already identify the exact comic.
     from fastapi_app.services.card_metadata import cached_metadata
-    metadata = cached_metadata(slug) or {}
+    metadata = cached_metadata(slug, values) or {}
     canonical = str(metadata.get("slug") or "")
     if metadata.get("source") == "truyenqq" and re.fullmatch(r"[a-zA-Z0-9]+(?:-+[a-zA-Z0-9]+)*-\d+", canonical):
         return canonical
-    hint = _json_cached(f"truyenqq:cover-hint:{slug}")
+    hint_key = f"truyenqq:cover-hint:{slug}"
+    hint = _json_cached(hint_key) if values is None else _decode_cached(values.get(hint_key))
     if isinstance(hint, dict) and isinstance(hint.get("url"), str):
         try:
             stem, identifier, chapter = identity(hint["url"])
@@ -560,7 +561,11 @@ async def get_manga_detail(slug):
     fresh_key = f'truyenqq:detail:{slug}'
     stale_key = f'truyenqq:detail-last-good:{slug}'
     retry_key = f'truyenqq:detail-refresh:{slug}:{int(_source_read_scope())}'
-    values = await asyncio.to_thread(cache.get_many, [fresh_key, stale_key, retry_key])
+    legacy = not re.fullmatch(r"[a-zA-Z0-9]+(?:-+[a-zA-Z0-9]+)*-\d+", slug)
+    keys = [fresh_key, stale_key, retry_key]
+    if legacy:
+        keys += [f'truyenqq:cover-hint:{slug}', f'catalog:card-metadata:v1:{slug}']
+    values = await asyncio.to_thread(cache.get_many, keys)
     cached, stale = _decode_cached(values.get(fresh_key)), _decode_cached(values.get(stale_key))
     if _valid_detail(cached):
         payload = deepcopy(cached)
@@ -580,7 +585,11 @@ async def get_manga_detail(slug):
                     _catalog_jobs.pop(job_key, None)
             _catalog_jobs[job_key] = create_task(refresh())
     else:
-        payload = await _load_manga_detail(slug)
+        # An old OTruyen title and its verified QQ slug refer to one source
+        # detail. Share its existing cache/in-flight read instead of resolving
+        # and downloading the same comic separately for every saved alias.
+        identifier = _cached_detail_identifier(slug, values) if legacy else slug
+        payload = await get_manga_detail(identifier) if identifier != slug else await _load_manga_detail(slug)
     item = payload["data"]["item"]
     canonical = item["slug"]
     # Keep existing website IDs so ratings, views, comments and bookmarks keep

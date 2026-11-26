@@ -10,6 +10,7 @@ import time
 import threading
 import httpx
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
@@ -98,6 +99,7 @@ COOLDOWN_FAST_FAIL_SECONDS = _env_float(
 
 _http_client: httpx.AsyncClient | None = None
 _curl_executor = ThreadPoolExecutor(max_workers=CURL_WORKERS)
+_cover_lookup_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cover-lookup")
 _curl_session: Any = None
 _curl_session_lock = threading.Lock()
 _request_semaphore = asyncio.Semaphore(UPSTREAM_REQUEST_CONCURRENCY)
@@ -1097,7 +1099,8 @@ def _cached_cover_url(manga_id: str) -> str:
 @coalesce_reads
 async def get_cover_url(manga_id: str) -> str:
     # Redis/catalog reads must not block all the other images on the event loop.
-    cached = await asyncio.to_thread(_cached_cover_url, manga_id)
+    cached = await asyncio.get_running_loop().run_in_executor(
+        _cover_lookup_executor, copy_context().run, _cached_cover_url, manga_id)
     if cached:
         return cached
     cover_url = await _fetch_cover_url_by_manga_id(manga_id)

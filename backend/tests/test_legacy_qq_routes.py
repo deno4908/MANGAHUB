@@ -29,6 +29,40 @@ def native():
             "chapters": [{"number": "49", "url": URL + "-chap-49"}]}
 
 
+def test_legacy_detail_reuses_the_verified_native_detail_without_another_source_read(cached, monkeypatch):
+    cached['truyenqq:cover-hint:' + LEGACY] = json.dumps({'url': URL})
+    payload = {'status': 'success', 'data': {'item': {
+        'slug': CANONICAL, 'id': CANONICAL, 'name': 'Source title', 'source': 'truyenqq',
+        'chapters': [{'server_name': 'QQ', 'server_data': [{'chapter_name': '49',
+            'chapter_api_data': '/api/manga/chapter/qq--' + CANONICAL + '--49'}]}]}}}
+    cached['truyenqq:detail:' + CANONICAL] = json.dumps(payload)
+    fetch = AsyncMock(side_effect=AssertionError('A verified native detail is already cached'))
+    monkeypatch.setattr(qq, 'run_live', fetch)
+    result = asyncio.run(qq.get_manga_detail(LEGACY))
+    item = result['data']['item']
+    assert item['slug'] == item['id'] == LEGACY and item['source_slug'] == CANONICAL
+    assert item['chapters'][0]['server_data'][0]['chapter_api_data'].endswith(CANONICAL + '--49')
+    assert json.loads(cached['truyenqq:detail:' + CANONICAL]) == payload
+    fetch.assert_not_awaited()
+
+
+def test_different_legacy_titles_share_one_native_detail_source_request(cached, monkeypatch):
+    other = 'verified-alternative-title'
+    for alias in [LEGACY, other]:
+        cached['catalog:card-metadata:v1:' + alias] = json.dumps({
+            'slug': CANONICAL, 'source': 'truyenqq', 'title': 'Source title'})
+    async def source(*args):
+        await asyncio.sleep(.01)
+        return native()
+    fetch = AsyncMock(side_effect=source)
+    monkeypatch.setattr(qq, 'run_live', fetch)
+    async def run():
+        values = await asyncio.gather(qq.get_manga_detail(LEGACY), qq.get_manga_detail(other), qq.get_manga_detail(CANONICAL))
+        assert [result['data']['item']['slug'] for result in values] == [LEGACY, other, CANONICAL]
+    asyncio.run(run())
+    fetch.assert_awaited_once_with('comic', CANONICAL)
+
+
 def test_legacy_detail_uses_shared_qq_reference_and_keeps_local_identity(cached, monkeypatch):
     cached["truyenqq:cover-hint:" + LEGACY] = json.dumps({"url": URL})
 

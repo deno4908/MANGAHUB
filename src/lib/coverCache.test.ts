@@ -26,6 +26,61 @@ it('downloads duplicate hero/card covers once and reuses their bytes across navi
   back.release();
 });
 
+it('reuses a known MangaDex thumbnail for an older saved by-ID cover without another request', async () => {
+  const id = '5272da37-6c69-4ecc-a1e0-d25db7b3e80f';
+  const byFile = `${origin}/api/images/img?url=${encodeURIComponent(`https://uploads.mangadex.org/covers/${id}/current.jpg.256.jpg`)}`;
+  const byId = `${origin}/api/manga/mangadex-cover/${id}?size=256`;
+  const first = acquireCover(byFile);
+  const bytes = await first.promise; first.release();
+  expect(cachedCover(byId)).toBe(bytes);
+  const saved = acquireCover(byId);
+  expect(await saved.promise).toBe(bytes);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  saved.release();
+  clearCoverCache();
+  expect(cachedCover(byFile)).toBeUndefined();
+  expect(cachedCover(byId)).toBeUndefined();
+  expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
+});
+
+it('does not confuse different MangaDex thumbnails, sizes, changed filenames or other origins', async () => {
+  const id = '5272da37-6c69-4ecc-a1e0-d25db7b3e80f';
+  const byFile = (name: string) => `${origin}/api/images/img?url=${encodeURIComponent(`https://uploads.mangadex.org/covers/${id}/${name}`)}`;
+  const first = acquireCover(byFile('old.jpg.256.jpg')); await first.promise; first.release();
+  expect(cachedCover(`${origin}/api/manga/mangadex-cover/${id}?size=512`)).toBeUndefined();
+  expect(cachedCover(`https://untrusted.example/api/manga/mangadex-cover/${id}?size=256`)).toBeUndefined();
+  expect(cachedCover(byFile('changed.jpg.256.jpg'))).toBeUndefined();
+  const fresh = acquireCover(byFile('changed.jpg.256.jpg')); const bytes = await fresh.promise; fresh.release();
+  expect(cachedCover(`${origin}/api/manga/mangadex-cover/${id}?size=256`)).toBe(bytes);
+  const saved = acquireCover(`${origin}/api/manga/mangadex-cover/${id}?size=256`);
+  invalidateCover(`${origin}/api/manga/mangadex-cover/${id}?size=256`);
+  saved.release();
+  expect(URL.revokeObjectURL).toHaveBeenCalledWith(bytes);
+});
+
+it('never extends a borrowed MangaDex thumbnail lifetime for a saved ID', async () => {
+  vi.useFakeTimers();
+  const id = '5272da37-6c69-4ecc-a1e0-d25db7b3e80f';
+  const byFile = `${origin}/api/images/img?url=${encodeURIComponent(`https://uploads.mangadex.org/covers/${id}/cover.jpg.256.jpg`)}`;
+  const byId = `${origin}/api/manga/mangadex-cover/${id}?size=256`;
+  const original = acquireCover(byFile); await original.promise; original.release();
+  vi.advanceTimersByTime(100_000);
+  const borrowed = acquireCover(byId); await borrowed.promise; borrowed.release();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  vi.advanceTimersByTime(20_001);
+  expect(cachedCover(byId)).toBeUndefined();
+  const refreshed = acquireCover(byId); await refreshed.promise; refreshed.release();
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it('starts the same four foreground library covers with high browser priority', async () => {
+  const release = warmCovers([cover(1), cover(2), cover(3), cover(4)], 'visible');
+  await vi.waitFor(() => expect(cachedCover(cover(4))).toBeDefined());
+  expect(fetch).toHaveBeenCalledTimes(4);
+  for (const [, options] of vi.mocked(fetch).mock.calls) expect(options?.priority).toBe('high');
+  release();
+});
+
 it('uses the same protected cache for MangaDex and refuses arbitrary origins or reader pages', () => {
   expect(canCacheCover(cover(1))).toBe(true);
   expect(canCacheCover(`${origin}/api/images/img?url=https%3A%2F%2Fuploads.mangadex.org%2Fcover.jpg`)).toBe(true);
