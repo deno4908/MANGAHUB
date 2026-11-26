@@ -40,3 +40,22 @@ describe("MangaDex chapter loading", () => {
     expect(fetcher.mock.calls[0][1].headers.Authorization).toBe('Bearer allowed-reader-token');
   });
 });
+
+it('keeps healthy CDN images direct and only remembers the host that actually failed', async () => {
+  vi.useFakeTimers();
+  const { getPreferredMangaDexImageUrl, rememberMangaDexImageFailure } = await import('./mangaDexImages');
+  const first = 'https://failed-node.mangadex.network/data-saver/hash/1.jpg';
+  const next = 'https://failed-node.mangadex.network/data-saver/hash/2.jpg';
+  const healthy = 'https://healthy-node.mangadex.network/data-saver/hash/1.jpg';
+  expect(getPreferredMangaDexImageUrl(first)).toBe(first);
+  rememberMangaDexImageFailure(first);
+  expect(getPreferredMangaDexImageUrl(next)).toContain('/api/images/img?url=');
+  expect(new URL(getPreferredMangaDexImageUrl(next)).searchParams.get('url')).toBe(next);
+  expect(getPreferredMangaDexImageUrl(healthy)).toBe(healthy);
+  expect(getPreferredMangaDexImageUrl('https://cdn.example/1.jpg')).toBe('https://cdn.example/1.jpg');
+  rememberMangaDexImageFailure(getPreferredMangaDexImageUrl(next));
+  expect(getPreferredMangaDexImageUrl(next)).toBe(next);
+  rememberMangaDexImageFailure(first);
+  await vi.advanceTimersByTimeAsync(60_001);
+  expect(getPreferredMangaDexImageUrl(next)).toBe(next);
+});

@@ -707,7 +707,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
       emitMaintenance(maintenanceStateFromBody(body));
       throw new Error("MAINTENANCE_MODE");
     }
-    throw new Error(body.error || body.detail || "Dịch vụ đang tạm thời gián đoạn");
+    throw Object.assign(new Error(body.error || body.detail || "Dịch vụ đang tạm thời gián đoạn"), { status: res.status });
   }
 
   if (
@@ -730,7 +730,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
           emitMaintenance(maintenanceStateFromBody(body));
           throw new Error("MAINTENANCE_MODE");
         }
-        throw new Error(body.error || body.detail || "Dịch vụ đang tạm thời gián đoạn");
+        throw Object.assign(new Error(body.error || body.detail || "Dịch vụ đang tạm thời gián đoạn"), { status: retry.status });
       }
       if (retry.status === 403) {
         const body = await retry.json().catch(() => ({}));
@@ -1370,7 +1370,7 @@ export const mangaApi = {
     showMature: boolean; signal: AbortSignal;
   }) => publicApi<any>(`/api/manga/suggestions?${new URLSearchParams({ keyword, source,
     limit: '6', show_mature: String(options.showMature) })}`, { timeoutMs: 6_000, signal: options.signal }),
-  getChapter: (id: string) => publicApi<any>(`/api/manga/chapter/${id}`),
+  getChapter: (id: string, signal?: AbortSignal) => publicApi<any>(`/api/manga/chapter/${id}`, { signal, timeoutMs: 18_000 }),
   getRandom: () => publicApi<any>("/api/manga/random"),
   getTrending: (limit = 20, source: "all" | "truyenqq" | "mangadex" = "all", options: { signal?: AbortSignal } = {}) => {
     const query = new URLSearchParams({

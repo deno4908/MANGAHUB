@@ -9,6 +9,7 @@ const MANGADEX_EDGE_BASE = String(
 ).replace(/\/+$/, "");
 let edgeUnavailableUntil = 0;
 const pendingChapters = new Map<string, Promise<string[]>>();
+const failedImageHosts = new Map<string, number>();
 
 /** Give the nearby edge a short head start; a stalled edge must not delay reading. */
 export function loadMangaDexChapterPages(chapterId: string): Promise<string[]> {
@@ -83,6 +84,27 @@ export function getMangaDexImageFallback(value: string): string | null {
   if (target && isMangaDexImageUrl(target)) return target;
   if (!isMangaDexImageUrl(value)) return null;
   return `${API_BASE}/api/images/img?url=${encodeURIComponent(value)}`;
+}
+
+export function rememberMangaDexImageFailure(value: string) {
+  const target = getProxyTarget(value);
+  if (target && isMangaDexImageUrl(target)) {
+    failedImageHosts.delete(new URL(target).hostname);
+    return;
+  }
+  if (!isMangaDexImageUrl(value)) return;
+  const host = new URL(value, 'https://mangadex.org').hostname;
+  failedImageHosts.delete(host);
+  failedImageHosts.set(host, Date.now() + 60_000);
+  while (failedImageHosts.size > 16) failedImageHosts.delete(failedImageHosts.keys().next().value!);
+}
+
+/** Prefer the existing proxy briefly after a real CDN failure. */
+export function getPreferredMangaDexImageUrl(value: string): string {
+  if (!isMangaDexImageUrl(value)) return value;
+  const url = new URL(value, 'https://mangadex.org');
+  return (failedImageHosts.get(url.hostname) || 0) > Date.now()
+    ? getMangaDexImageFallback(url.href) || value : value;
 }
 
 export async function getLocalMangaDexChapterPages(

@@ -23,7 +23,7 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - name: Test images, saved libraries, reading progress and routing
         run: |
-          npx vitest run src/pages/BrowseManga.ranking.test.tsx src/pages/BrowseManga.genres.test.tsx
+          npx vitest run src/pages/BrowseManga.ranking.test.tsx src/pages/BrowseManga.genres.test.tsx src/lib/chapterQuery.test.ts src/lib/mangaDexImages.test.ts
           npx vitest run src/lib/http.test.ts src/lib/imageOrigin.test.ts src/lib/coverCache.test.ts src/lib/truyenqqRelay.test.ts src/lib/imageTransport.test.ts src/components/ui/OptimizedImage.test.tsx src/components/reader/ReaderImage.test.tsx src/components/ReadingHistorySync.test.tsx src/hooks/useReaderProgress.test.tsx src/hooks/useSavedLibrary.test.tsx src/pages/SavedLibraries.test.tsx src/lib/readingHistorySync.test.ts src/lib/readerMetadata.test.ts src/pages/ChapterReader.test.tsx
           node --test cloudflare/standby-worker.test.mjs cloudflare/truyenqq-edge.test.mjs
           python3 -m unittest discover -s cloudflare -p 'test_*.py'

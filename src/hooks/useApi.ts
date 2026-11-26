@@ -14,7 +14,6 @@ import {
   notificationApi,
   userApi,
   ratingApi,
-  uploadApi,
 } from "@/lib/api";
 import { useUserStore } from "@/store/userStore";
 import { useCanonicalMangaRecords } from "@/hooks/useCardMetadata";
@@ -24,11 +23,10 @@ import {
   adaptListData,
   adaptHomeData,
   adaptCategories,
-  adaptChapterPages,
   thumbUrl,
 } from "@/lib/adapters";
 import { MANGADEX_ID_RE, normalizeMangaDexId } from "@/lib/mangaLinks";
-import { loadMangaDexChapterPages } from "@/lib/mangaDexImages";
+import { chapterQueryOptions } from "@/lib/chapterQuery";
 import { invalidateMangaRealtimeQueries } from "@/lib/querySync";
 import { mangaDetailQueryKey } from "@/lib/mangaDetailQuery";
 import type { Manga } from "@/types/manga";
@@ -532,46 +530,7 @@ export function useMangaDetail(
 }
 
 export function useChapter(chapterId: string | undefined) {
-  const isUserUpload = chapterId?.startsWith("upload-") ?? false;
-  const uploadDbId = isUserUpload ? chapterId!.slice("upload-".length) : null;
-  const mangadexChapterId = !isUserUpload && chapterId ? normalizeMangaDexId(chapterId) : null;
-  const isMangaDexChapter = !!mangadexChapterId;
-  const resolvedChapterId = mangadexChapterId || chapterId;
-  return useQuery({
-    queryKey: ["manga", "chapter", resolvedChapterId],
-    queryFn: async () => {
-      if (!resolvedChapterId) throw new Error("No chapter id");
-
-      // User-uploaded chapters — pages are stored as URLs in the DB
-      if (isUserUpload && uploadDbId) {
-        const data = await uploadApi.getUpload(uploadDbId);
-        const upload = data?.upload || data;
-        const pages: string[] = Array.isArray(upload?.pages) ? upload.pages.filter(Boolean) : [];
-        return {
-          pages,
-          raw: { data: { item: {} } },
-        };
-      }
-
-      if (mangadexChapterId) {
-        return {
-          pages: await loadMangaDexChapterPages(mangadexChapterId),
-          raw: { data: { item: {} } },
-        };
-      }
-
-      const data = await mangaApi.getChapter(resolvedChapterId);
-      return {
-        pages: adaptChapterPages(data),
-        raw: data,
-      };
-    },
-    enabled: !!resolvedChapterId,
-    staleTime: isUserUpload ? 5 * 60 * 1000 : isMangaDexChapter ? 30 * 1000 : 60 * 60 * 1000,
-    gcTime: isUserUpload ? 10 * 60 * 1000 : isMangaDexChapter ? 5 * 60 * 1000 : 30 * 60 * 1000,
-    retry: isMangaDexChapter ? 0 : 2,
-    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
-  });
+  return useQuery(chapterQueryOptions(chapterId));
 }
 
 export function useSearch(keyword: string, page = 1, enabled = true, genres: string[] = []) {

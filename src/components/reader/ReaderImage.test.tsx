@@ -12,6 +12,26 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+it('uses the proxy for subsequent MangaDex pages after the same CDN host fails', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+  vi.stubGlobal('URL', class extends URL {
+    static createObjectURL = vi.fn(() => 'blob:recovered-mangadex-page');
+    static revokeObjectURL = vi.fn();
+  });
+  const request = vi.spyOn(transport, 'fetchImageResponse').mockImplementation(async () =>
+    new Response('image', { headers: { 'Content-Type': 'image/jpeg' } }));
+  const first = render(<ReaderImage src="https://offline-reader.mangadex.network/data/hash/1.jpg" alt="First CDN page" index={0} imageFit="width" pageGap={0} priority />);
+  expect(request).not.toHaveBeenCalled();
+  fireEvent.error(screen.getByRole('img', { name: 'First CDN page' }));
+  first.unmount();
+  render(<ReaderImage src="https://offline-reader.mangadex.network/data/hash/2.jpg" alt="Next CDN page" index={1} imageFit="width" pageGap={0} priority />);
+  await act(async () => {});
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(request.mock.calls[0][0]).toContain('/api/images/img?url=');
+  expect(screen.getByRole('img', { name: 'Next CDN page' })).toHaveAttribute('src', 'blob:recovered-mangadex-page');
+});
+
 it('retries a protected QQ download and clears its cached private blob on access loss', async () => {
   vi.useFakeTimers();
   vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });

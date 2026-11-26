@@ -6,7 +6,8 @@ import ChapterReader from './ChapterReader';
 import { mangaApi } from '@/lib/api';
 import { writeReaderMetaToStorage } from '@/lib/readerMetadata';
 
-vi.mock('@/hooks/useApi', () => ({ useChapter: () => ({ data: { pages: ['https://images.example/page.jpg'], raw: { data: { item: {} } } }, isLoading: false }) }));
+const chapter = vi.hoisted(() => ({ result: {} as any, retry: vi.fn() }));
+vi.mock('@/hooks/useApi', () => ({ useChapter: () => chapter.result }));
 vi.mock('@/hooks/useReaderProgress', () => ({ useReaderProgress: vi.fn() }));
 vi.mock('@/store/userStore', () => ({ useUserStore: () => ({ user: { role: 'admin' }, isLoggedIn: true }) }));
 vi.mock('@/store/settingsStore', () => ({ useSettingsStore: (select: any) => select({ settings: { reader: { imageLoading: 'lazy' }, privacy: { silentViewTracking: true } } }) }));
@@ -26,6 +27,9 @@ function open(number: number) {
   </MemoryRouter></QueryClientProvider>);
 }
 beforeEach(() => {
+  chapter.retry.mockReset();
+  chapter.result = { data: { pages: ['https://images.example/page.jpg'], raw: { data: { item: {} } } },
+    isLoading: false, isFetching: false, error: null, refetch: chapter.retry };
   localStorage.clear(); sessionStorage.clear();
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.stubGlobal('scrollTo', vi.fn());
@@ -34,6 +38,32 @@ beforeEach(() => {
   } } });
 });
 afterEach(() => { cleanup(); client.clear(); vi.unstubAllGlobals(); });
+
+it('offers recovery for a temporary source outage instead of claiming the next chapter is missing', async () => {
+  chapter.result.data = undefined;
+  chapter.result.error = Object.assign(new Error('temporary source outage'), { status: 503 });
+  open(2);
+  expect(screen.getByRole('alert')).toHaveTextContent('Chưa tải được chương');
+  expect(screen.queryByText('Không tìm thấy chương này.')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Thử tải lại chương' }));
+  expect(chapter.retry).toHaveBeenCalledTimes(1);
+});
+
+it('reserves the missing chapter message for an actual 404', () => {
+  chapter.result.data = undefined;
+  chapter.result.error = Object.assign(new Error('missing'), { status: 404 });
+  open(2);
+  expect(screen.getByRole('alert')).toHaveTextContent('Không tìm thấy chương này.');
+  expect(screen.queryByRole('button', { name: 'Thử tải lại chương' })).not.toBeInTheDocument();
+});
+
+it('keeps the loading state during recovery instead of flashing a missing chapter', () => {
+  chapter.result.data = undefined;
+  chapter.result.isFetching = true;
+  open(2);
+  expect(screen.getByText('Đang tải chương...')).toBeInTheDocument();
+  expect(screen.queryByText('Không tìm thấy chương này.')).not.toBeInTheDocument();
+});
 
 it('cold-mounts a QQ chapter without browser history state and restores next/previous from the verified list', async () => {
   open(1);

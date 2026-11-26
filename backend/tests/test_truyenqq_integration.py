@@ -1,7 +1,7 @@
 import asyncio
 import json
 import threading
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -269,6 +269,8 @@ def test_reader_keeps_last_manifest_while_refresh_is_blocked(live, monkeypatch):
         first = await qq.get_chapter_manifest(SLUG, '45-5')
         key = f'truyenqq:chapter-manifest:v1:{SLUG}:45-5'
         assert json.loads(store[key + ':last-good']) == first
+        qq.cache.set.assert_any_call(key, json.dumps(first), ttl=3600)
+        qq.cache.set.assert_any_call(key + ':last-good', json.dumps(first), ttl=7 * 86400)
         store.pop(key)
         started, release = asyncio.Event(), asyncio.Event()
         calls = []
@@ -288,6 +290,14 @@ def test_reader_keeps_last_manifest_while_refresh_is_blocked(live, monkeypatch):
         assert len(calls) == 1
         assert store[key + ':last-good']
     asyncio.run(scenario())
+
+
+def test_empty_manifest_never_overwrites_last_valid_reader_data(live, monkeypatch):
+    monkeypatch.setattr(qq, 'run_live', AsyncMock(return_value={'images': [], 'url': 'https://truyenqqko.com/truyen-tranh/book-123-chap-2', 'title': 'Book'}))
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(qq._load_chapter_manifest(SLUG, '2'))
+    assert caught.value.status_code == 502
+    qq.cache.set.assert_not_called()
 
 
 def test_successful_manifest_refresh_replaces_the_old_page_urls(live, monkeypatch):

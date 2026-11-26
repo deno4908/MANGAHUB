@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, memo } from 'react';
 import { RefreshCw } from 'lucide-react';
-import { getMangaDexImageFallback } from '@/lib/mangaDexImages';
+import { getMangaDexImageFallback, getPreferredMangaDexImageUrl, rememberMangaDexImageFailure } from '@/lib/mangaDexImages';
 import { acquireReaderImage, canCacheReaderImage, invalidateCover } from '@/lib/coverCache';
 
 interface ReaderImageProps {
@@ -54,12 +54,15 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
   }, [src, cycle]);
 
   const fallback = fallbackSrc || getMangaDexImageFallback(src);
-  const activeSrc = attempt % 2 === 1 && fallback && fallback !== src ? fallback : src;
+  const activeSrc = attempt % 2 === 1 && fallback && fallback !== src ? fallback : getPreferredMangaDexImageUrl(src);
   const retry = cycle * (RETRY_DELAYS.length + 1) + attempt;
   const url = retry ? `${activeSrc}${activeSrc.includes('?') ? '&' : '?'}retry=${retry}` : activeSrc;
-  const key = `${src}:${cycle}:${attempt}`;
+  const key = `${activeSrc}:${cycle}:${attempt}`;
   const managed = canCacheReaderImage(activeSrc);
-  const failed = useCallback(() => { invalidateCover(url);setLoaded(false);setWaiting(true); }, [url]);
+  const failed = useCallback(() => {
+    rememberMangaDexImageFailure(activeSrc);
+    invalidateCover(url);setLoaded(false);setWaiting(true);
+  }, [url, activeSrc]);
 
   // Own proxies need the verified website token and QQ relay recovery. Native
   // CDN URLs remain ordinary images, preserving their direct download speed.

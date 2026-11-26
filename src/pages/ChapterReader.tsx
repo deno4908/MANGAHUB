@@ -8,9 +8,10 @@ import { useUserStore } from '@/store/userStore';
 import { mangaApi } from '@/lib/api';
 import { useReaderProgress } from '@/hooks/useReaderProgress';
 import type { ReadingHistory } from '@/lib/readingHistory';
-import { adaptChapterPages, adaptMangaDetail, getChapterPageFallback } from '@/lib/adapters';
+import { adaptMangaDetail, getChapterPageFallback } from '@/lib/adapters';
 import { getMangaDetailPath, normalizeMangaDexId } from '@/lib/mangaLinks';
-import { loadMangaDexChapterPages } from '@/lib/mangaDexImages';
+import { chapterQueryOptions } from '@/lib/chapterQuery';
+import { getPreferredMangaDexImageUrl } from '@/lib/mangaDexImages';
 import { incrementMangaViewsInQueryCache, invalidateMangaRealtimeQueries } from '@/lib/querySync';
 import { retainCachedCover, canCacheReaderImage, warmReaderImages } from '@/lib/coverCache';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -203,7 +204,7 @@ const ChapterReader = () => {
   const currentChapterId = normalizeMangaDexId(normalizedChapterId) || normalizedChapterId || '';
   const qqChapter = parseQQChapter(currentChapterId);
   const chapterState = (location.state || {}) as ChapterState;
-  const { data: chapterData, isLoading } = useChapter(currentChapterId || undefined);
+  const { data: chapterData, isLoading, isFetching: isChapterFetching, error: chapterError, refetch: retryChapter } = useChapter(currentChapterId || undefined);
   const store = useReaderStore();
   const imageLoadingMode = useSettingsStore((s) => s.settings.reader.imageLoading || 'preload');
   const silentViewTracking = useSettingsStore((s) => Boolean(s.settings.privacy.silentViewTracking));
@@ -551,23 +552,6 @@ const ChapterReader = () => {
     shouldSuppressViewTracking,
   ]);
 
-  const prefetchChapterData = useCallback(async (chapterId: string) => {
-    const normalizedId = normalizeMangaDexId(chapterId) || chapterId;
-    const mangadexId = normalizeMangaDexId(normalizedId);
-    if (mangadexId) {
-      return {
-        pages: await loadMangaDexChapterPages(mangadexId),
-        raw: { data: { item: {} } },
-      };
-    }
-
-    const data = await mangaApi.getChapter(normalizedId);
-    return {
-      pages: adaptChapterPages(data),
-      raw: data,
-    };
-  }, []);
-
   useReaderProgress({
     chapter: currentChapterId, manga: safeMangaSlug, mangaId: mangaDetailId,
     title: mangaTitle, thumb: mangaThumb, chapterName: chapterHistoryName,
@@ -618,6 +602,7 @@ const ChapterReader = () => {
     const preloadImageUrl = (url: string, priority: 'high' | 'low') => {
       if (!url || preloadedRef.current.has(url)) return;
       preloadedRef.current.add(url);
+      url = getPreferredMangaDexImageUrl(url);
       if (canCacheReaderImage(url)) { privatePreloads.current.add(warmReaderImages([url]));return; }
       const img = new Image();
       img.fetchPriority = priority;
@@ -651,6 +636,7 @@ const ChapterReader = () => {
     const preloadImageUrl = (url: string, priority: 'high' | 'low') => {
       if (!url || preloadedRef.current.has(url)) return;
       preloadedRef.current.add(url);
+      url = getPreferredMangaDexImageUrl(url);
       if (canCacheReaderImage(url)) { privatePreloads.current.add(warmReaderImages([url]));return; }
       const img = new Image();
       img.fetchPriority = priority;
@@ -673,13 +659,8 @@ const ChapterReader = () => {
 
     prefetchTriggeredRef.current = true;
     const nextChapterId = normalizeMangaDexId(nextChapter.id) || nextChapter.id;
-    const isMangaDexNextChapter = !!normalizeMangaDexId(nextChapter.id);
-    queryClient.prefetchQuery({
-      queryKey: ['manga', 'chapter', nextChapterId],
-      queryFn: () => prefetchChapterData(nextChapterId),
-      staleTime: isMangaDexNextChapter ? 30 * 1000 : 60 * 60 * 1000,
-    });
-  }, [visiblePage, totalPages, nextChapter, queryClient, prefetchChapterData, imageLoadingMode]);
+    queryClient.prefetchQuery(chapterQueryOptions(nextChapterId));
+  }, [visiblePage, totalPages, nextChapter, queryClient, imageLoadingMode]);
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     const key = e.key.toLowerCase();
@@ -762,7 +743,7 @@ const ChapterReader = () => {
     });
   };
 
-  if (isLoading) {
+  if (isLoading || (!totalPages && isChapterFetching)) {
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-3 bg-background">
         <Loader2 className="w-8 h-8 animate-spin text-primary" />
@@ -772,10 +753,17 @@ const ChapterReader = () => {
   }
 
   if (!chapterData || totalPages === 0) {
+    const missing = (chapterError as Error & { status?: number } | null)?.status === 404;
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-3 bg-background">
         <p className="text-4xl">😕</p>
-        <p className="text-muted-foreground font-medium">Không tìm thấy chương này.</p>
+        <p role="alert" className="text-muted-foreground font-medium">
+          {missing ? 'Không tìm thấy chương này.' : 'Chưa tải được chương. Kết nối tới nguồn đang gián đoạn.'}
+        </p>
+        {!missing && <button onClick={() => void retryChapter()} disabled={isChapterFetching}
+          className="rounded-lg bg-primary px-4 py-2 text-sm font-bold text-primary-foreground">
+          Thử tải lại chương
+        </button>}
         <Link to="/" className="text-primary hover:underline text-sm font-bold">← Về trang chủ</Link>
       </div>
     );

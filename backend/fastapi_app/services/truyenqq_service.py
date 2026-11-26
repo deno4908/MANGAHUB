@@ -609,15 +609,18 @@ async def _load_chapter_manifest(slug, number):
     value = await run_live("chapter", slug, number)
     manifest = {field: value[field] for field in ("images", "url", "title")}
     if not manifest['images'] or not manifest['url']:
-        raise ValueError('Invalid QQ chapter manifest')
-    await asyncio.to_thread(cache.set, key, json.dumps(manifest), ttl=300)
-    await asyncio.to_thread(cache.set, key + ':last-good', json.dumps(manifest), ttl=86400)
+        raise HTTPException(502, 'Chưa tải được ảnh của chương. Vui lòng thử lại.',
+                            headers={'Cache-Control': 'no-store', 'X-TruyenQQ-Error': 'invalid-response'})
+    # Match the reader's one-hour chapter cache. New chapters have their own
+    # keys; re-reading this chapter must not fetch its HTML every five minutes.
+    await asyncio.to_thread(cache.set, key, json.dumps(manifest), ttl=3600)
+    await asyncio.to_thread(cache.set, key + ':last-good', json.dumps(manifest), ttl=7 * 86400)
     return manifest
 
 
 @coalesce_reads(scope=_source_read_scope)
 async def get_chapter_manifest(slug, number):
-    """Keep a reading session alive when the five-minute source cache expires.
+    """Keep a reading session alive when the fresh source cache expires.
 
     The API still authorizes each reader before these public source URLs are
     reused. Refresh the last valid manifest in the background, never per image.
@@ -633,7 +636,7 @@ async def get_chapter_manifest(slug, number):
     job_key = (asyncio.get_running_loop(), retry_key)
     if job_key not in _catalog_jobs and not await asyncio.to_thread(cache.get, retry_key):
         # Shared cooldown prevents every page/instance retrying a blocked source.
-        await asyncio.to_thread(cache.set, retry_key, '1', ttl=60)
+        await asyncio.to_thread(cache.set, retry_key, '1', ttl=300)
         async def refresh():
             try:
                 await _load_chapter_manifest(slug, number)
