@@ -1,6 +1,7 @@
 import { useCategories } from '@/hooks/useApi';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
+import { memo } from 'react';
 import { Loader2 } from 'lucide-react';
 
 const GenreCloud = () => {
@@ -15,7 +16,7 @@ const GenreCloud = () => {
   }
 
   return (
-    <div className="flex flex-wrap gap-1.5">
+    <div className="home-genre-cloud flex flex-wrap gap-1.5">
       {categories.map((cat, i) => (
         <motion.div
           key={cat.slug}
@@ -36,4 +37,4 @@ const GenreCloud = () => {
   );
 };
 
-export default GenreCloud;
+export default memo(GenreCloud);
