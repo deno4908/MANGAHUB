@@ -222,15 +222,20 @@ const OptimizedImage = memo(({
   }, [normalizedSrc, normalizedFallbackSrc, activeSrc, themedFallbackSrc, hasRemoteCandidate, reportUnavailable, cacheCover]);
 
   const useCoverCache = cacheCover && canCacheCover(activeSrc);
+  // Metadata can update recovery URLs while the primary is still loading.
+  // Keep its shared download attached and use the newest recovery handler
+  // only if it fails, rather than aborting and starting the same URL again.
+  const coverErrorRef = useRef(handleError);
+  coverErrorRef.current = handleError;
   useEffect(() => {
     if (!inView || error || !useCoverCache) return;
     let mounted = true;
     const resource = acquireCover(activeSrc, priority ? 'visible' : 'normal');
     void resource.promise.then(url => {
       if (mounted) setCoverResource({ source: activeSrc, attempt: retryCount, url });
-    }, () => { if (mounted) handleError(); });
+    }, () => { if (mounted) coverErrorRef.current(); });
     return () => { mounted = false; resource.release(); };
-  }, [activeSrc, retryCount, inView, error, useCoverCache, handleError, priority]);
+  }, [activeSrc, retryCount, inView, error, useCoverCache, priority]);
 
   const handleManualRetry = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();

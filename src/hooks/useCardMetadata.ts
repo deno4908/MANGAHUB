@@ -4,7 +4,7 @@ import type { Manga } from '@/types/manga';
 import { normalizeMangaDexId } from '@/lib/mangaLinks';
 import { applyCardMetadata, isLegacyQQIdentifier, needsCanonicalTitle, requestCardMetadata } from '@/lib/cardMetadata';
 import { thumbUrl } from '@/lib/adapters';
-import { isLegacySavedManga, needsSavedCover, resolveSavedMangaCover, savedMangaId, savedMangaLookupId, savedMangaTitleHint } from '@/lib/savedManga';
+import { isLegacySavedManga, needsSavedCover, refreshSavedMangaCover, savedMangaId, savedMangaLookupId, savedMangaTitleHint } from '@/lib/savedManga';
 
 const metadataOptions = (id: string, client: QueryClient, title?: string) => queryOptions({
   queryKey: ['manga', 'card-metadata', id],
@@ -103,7 +103,8 @@ export function useCanonicalMangaRecords<T extends MangaRecord>(records: T[] | u
         if (field in record && needsCanonicalTitle(savedMangaLookupId(record), record[field])) next[field] = item.title;
       }
       if (fillMissingCovers && 'manga_slug' in record) {
-        const covers = resolveSavedMangaCover(item.id, item.cover_url || record.manga_thumb, record.manga_thumb_fallback, coverSize);
+        const covers = refreshSavedMangaCover(item.id, item.cover_url || record.manga_thumb,
+          record.manga_thumb, record.manga_thumb_fallback, coverSize);
         next.manga_thumb = covers.primary;
         next.manga_thumb_fallback = covers.fallback;
       }

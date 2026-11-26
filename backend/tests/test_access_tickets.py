@@ -198,6 +198,30 @@ def test_revocation_blocks_existing_ticket_and_fresh_issuance(environment):
     assert attacker.get("/api/images/_ticket/image").status_code == 403
 
 
+def test_saved_cover_bytes_are_still_blocked_before_login_and_after_revocation(environment, monkeypatch):
+    from unittest.mock import AsyncMock
+    from fastapi_app.routers import images, manga
+    _, token = environment
+    manga_id = '5272da37-6c69-4ecc-a1e0-d25db7b3e80f'
+    cover = f'https://uploads.mangadex.org/covers/{manga_id}/cover.jpg.256.jpg'
+    lookup = AsyncMock(return_value=cover)
+    monkeypatch.setattr(manga.mangadex_service, 'get_cover_url', lookup)
+    monkeypatch.setattr(images, '_host_validation_cache', {'uploads.mangadex.org': (time.time() + 300, None)})
+    monkeypatch.setattr(images, '_cached_image_response', lambda *a, **kw: Response(b'private-cover', media_type='image/jpeg'))
+    url = f'/api/manga/mangadex-cover/{manga_id}?size=256'
+    c = client()
+    assert c.get(url).status_code == 403
+    lookup.assert_not_awaited()
+    assert c.get('/api/site-access', headers=bearer(token())).status_code == 200
+    response = c.get(url, follow_redirects=False)
+    assert response.status_code == 200 and response.content == b'private-cover'
+    assert response.headers['cache-control'] == 'private, no-store'
+    lookup.assert_awaited_once_with(manga_id)
+    policy.set_member(READER, False, ADMIN)
+    assert c.get(url).status_code == 403
+    lookup.assert_awaited_once()
+
+
 def test_permissions_changed_during_initial_check_cannot_publish_a_ticket(environment):
     _, token = environment
     claims = jwt.decode(token(), options={"verify_signature": False})

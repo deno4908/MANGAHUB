@@ -12,6 +12,38 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const mdx = '5272da37-6c69-4ecc-a1e0-d25db7b3e80f';
 const legacy = 'toi-tro-thanh-nguoi-duoc-nu-phan-dien-yeu-thich-nhat';
 
+it('does not restart a MangaDex cover by ID when background library metadata arrives', async () => {
+  const client = new QueryClient();
+  const rows = [{ manga_slug: mdx, manga_title: 'Saved title', manga_thumb: `/api/manga/mangadex-cover/${mdx}`,
+    chapter_id: 'saved-chapter', progress: 62 }];
+  vi.spyOn(bookmarkApi, 'getAll').mockResolvedValue({ bookmarks: rows });
+  vi.spyOn(followApi, 'getAll').mockResolvedValue({ follows: rows });
+  vi.spyOn(historyApi, 'getAll').mockResolvedValue({ history: rows });
+  let finish!: (value: Awaited<ReturnType<typeof mangaApi.getCardMetadata>>) => void;
+  vi.spyOn(mangaApi, 'getCardMetadata').mockReturnValue(new Promise(resolve => { finish = resolve; }));
+  const { result, unmount } = renderHook(() => [useBookmarks(), useFollows(), useHistory()], {
+    wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+  });
+  await waitFor(() => { for (const query of result.current) expect(query.data).toHaveLength(1); });
+  const initial = result.current.map(query => query.data![0].manga_thumb);
+  for (const url of initial) expect(new URL(url).searchParams.get('size')).toBe('256');
+  await waitFor(() => expect(finish).toBeTypeOf('function'));
+  await act(async () => finish({ items: { [mdx]: { id: mdx, slug: mdx, source: 'mangadex', title: 'Source title',
+    cover_url: `https://uploads.mangadex.org/covers/${mdx}/fresh.jpg.512.jpg` } } }));
+  await waitFor(() => {
+    for (const [index, query] of result.current.entries()) {
+      expect(query.data![0].manga_thumb).toBe(initial[index]);
+      expect(new URL(query.data![0].manga_thumb_fallback).searchParams.get('url')).toContain('fresh.jpg.256.jpg');
+      expect(query.data![0]).toMatchObject({ manga_slug: mdx, chapter_id: 'saved-chapter', progress: 62 });
+    }
+  });
+  // Neither the raw shared query cache nor the displayed rows change the active download URL.
+  for (const key of [['bookmarks'], ['follows'], ['history', 'enriched']]) {
+    expect(client.getQueryData<Array<{ manga_thumb: string }>>(key)?.[0].manga_thumb).toBe(initial[0]);
+  }
+  unmount(); client.clear();
+});
+
 it('refreshes stale covers with valid titles across bookmarks, follows and history in shared source batches', async () => {
   const client = new QueryClient();
   const rows = [

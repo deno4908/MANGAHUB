@@ -96,6 +96,20 @@ export function resolveSavedMangaCover(identifier: string, cover?: string, store
   return { primary, fallback: current !== primary ? current : (usable(previous) && !legacyCover(previous) && previous !== primary ? previous : PLACEHOLDER) };
 }
 
+/** Metadata must not replace a by-ID download already resolving the current cover. */
+export function refreshSavedMangaCover(identifier: string, cover: string | undefined,
+  previousCover: string | undefined, previousFallback?: string, coverSize?: 256 | 512): { primary: string; fallback: string } {
+  const next = resolveSavedMangaCover(identifier, cover, previousFallback, coverSize);
+  const mdx = normalizeMangaDexId(identifier);
+  if (mdx && previousCover) {
+    const previous = resolveSavedMangaCover(identifier, previousCover, previousFallback, coverSize);
+    if (new URL(previous.primary, API_BASE).pathname === `/api/manga/mangadex-cover/${mdx}`) {
+      return { primary: previous.primary, fallback: next.primary !== previous.primary ? next.primary : previous.fallback };
+    }
+  }
+  return next;
+}
+
 export function getSavedMangaDetailPath(record: SavedRecord): string {
   const original = savedMangaId(record);
   const matched = String(record.manga_source_slug || '').trim().toLowerCase();

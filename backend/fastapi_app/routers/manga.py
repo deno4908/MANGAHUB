@@ -7639,8 +7639,8 @@ async def _compute_trending_from_db(limit: int, db: Any, source: str = "all") ->
 
 
 @router.get("/mangadex-cover/{manga_id}")
-async def mangadex_cover(manga_id: str, size: int = 512):
-    """Resolve MangaDex cover image URL by manga ID and redirect through the local proxy."""
+async def mangadex_cover(manga_id: str, request: Request, size: int = 512):
+    """Resolve a saved cover and serve it through the existing image cache."""
     manga_id = manga_id.strip()
     if size not in {256, 512}:
         raise HTTPException(status_code=400, detail="Invalid cover size")
@@ -7664,7 +7664,11 @@ async def mangadex_cover(manga_id: str, size: int = 512):
             small = re.sub(r'\.(?:256|512)\.jpg$', '', source.path, flags=re.I) + '.256.jpg'
             cover_url = urlunsplit(source._replace(path=small))
 
-    return RedirectResponse(url=f"/api/images/img?url={quote(cover_url, safe='')}", status_code=302)
+    # A redirect made saved covers pay for a second network round trip and
+    # access check before showing any bytes. Reuse the same validated cache
+    # and ETag handling directly, after this request's normal access gate.
+    from fastapi_app.routers.images import proxy_image
+    return await proxy_image(cover_url, request)
 
 
 @router.get("/image-url")

@@ -103,6 +103,34 @@ describe('managed MangaDex cover recovery', () => {
     vi.useRealTimers();
   });
 
+  it('keeps a pending saved-cover download when metadata only updates its fallback', async () => {
+    let complete!: (value: Response) => void;
+    vi.mocked(fetch).mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    const { rerender } = render(<OptimizedImage src={source} fallbackSrc="/no-cover.svg" alt="Saved cover" priority />);
+    await act(async () => {});
+    const signal = vi.mocked(fetch).mock.calls[0][1]?.signal;
+    rerender(<OptimizedImage src={source} fallbackSrc={`${api}/api/images/img?url=fresh-cover`} alt="Saved cover" priority />);
+    await act(async () => {});
+    expect(signal?.aborted).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await act(async () => complete(response()));
+    expect(screen.getByRole('img')).toHaveAttribute('src', 'blob:cover-1');
+  });
+
+  it('uses the latest fallback if the existing download fails after metadata arrives', async () => {
+    let fail!: (error: Error) => void;
+    vi.mocked(fetch).mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }))
+      .mockResolvedValueOnce(response());
+    const { rerender } = render(<OptimizedImage src={source} fallbackSrc="/no-cover.svg" alt="Saved recovery" priority />);
+    await act(async () => {});
+    const fallback = `${api}/api/images/img?url=latest-cover`;
+    rerender(<OptimizedImage src={source} fallbackSrc={fallback} alt="Saved recovery" priority />);
+    await act(async () => fail(new Error('Old cover unavailable')));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(fetch).mock.calls[1][0]).toBe(fallback);
+    expect(screen.getByRole('img')).toHaveAttribute('src', 'blob:cover-1');
+  });
+
   it('lets a slow recovery download finish instead of rotating sources and aborting it', async () => {
     let complete!: (value: Response) => void;
     vi.mocked(fetch).mockRejectedValueOnce(new Error('Temporary CDN error'))

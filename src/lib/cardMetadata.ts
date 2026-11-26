@@ -4,7 +4,7 @@ import { mangaApi } from '@/lib/api';
 import { normalizeMangaDexId } from '@/lib/mangaLinks';
 import { repairMojibakeText, thumbUrl } from '@/lib/adapters';
 import { patchMangaInQueryCache } from '@/lib/querySync';
-import { resolveSavedMangaCover } from '@/lib/savedManga';
+import { refreshSavedMangaCover, resolveSavedMangaCover } from '@/lib/savedManga';
 
 export type CardMetadata = {
   id: string; slug: string; source: 'mangadex' | 'truyenqq' | 'uploaded'; title: string;
@@ -79,7 +79,8 @@ async function flush() {
               if ('manga_slug' in record) {
                 next.manga_source_slug = metadata.slug;
                 if (metadata.cover_url) {
-                  const cover = resolveSavedMangaCover(metadata.id, metadata.cover_url);
+                  const cover = refreshSavedMangaCover(metadata.id, metadata.cover_url,
+                    record.manga_thumb, record.manga_thumb_fallback, 256);
                   next.manga_thumb = cover.primary;
                   next.manga_thumb_fallback = cover.fallback;
                 }
