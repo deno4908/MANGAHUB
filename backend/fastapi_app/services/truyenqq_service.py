@@ -641,6 +641,9 @@ async def get_chapter_manifest(slug, number):
             try:
                 await _load_chapter_manifest(slug, number)
             except Exception:
+                # Older sessions may still have the previous one-day expiry.
+                # Preserve their verified pages while the source is unavailable.
+                await asyncio.to_thread(cache.set, key + ':last-good', json.dumps(stale), ttl=7 * 86400)
                 logger.debug('Retaining last valid QQ chapter manifest after refresh failure')
             finally:
                 _catalog_jobs.pop(job_key, None)

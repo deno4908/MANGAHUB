@@ -22,6 +22,7 @@ from threading import RLock
 from redis.exceptions import RedisError
 from redis_runtime import client_for, security_url
 from serverless_runtime import create_task
+from fastapi_app.services.mangadex_index_mirror import read_blob
 
 logger = logging.getLogger(__name__)
 PREFIX = "mh:mangadex-release-index:v1:vi:"
@@ -125,12 +126,12 @@ def _state(snapshot=""):
     client = _client()
     try:
         if key != "active":
-            old = _unpack(client.get(PREFIX + key))
+            old = _unpack(read_blob(client, PREFIX + key))
             if old and old.get("ready"):
                 if "rows" not in old:
                     base_key = "snapshot:" + old["base_version"]
                     base_entry = _local.get(base_key)
-                    base = base_entry[1] if base_entry and base_entry[0] > time.monotonic() else _unpack(client.get(PREFIX + base_key))
+                    base = base_entry[1] if base_entry and base_entry[0] > time.monotonic() else _unpack(read_blob(client, PREFIX + base_key))
                     if base and isinstance(base.get("rows"), dict):
                         _remember(base_key, base, SNAPSHOT_TTL)
                         old = {**base, **old, "rows": base["rows"]}
@@ -138,7 +139,7 @@ def _state(snapshot=""):
                         old = None
             if old and old.get("ready") and "rows" in old:
                 return _remember(key, old)
-        state = _unpack(client.get(PREFIX + "state"))
+        state = _unpack(read_blob(client, PREFIX + "state"))
     except (RedisError, ValueError, OSError):
         state = None
     if not state or not state.get("ready"):

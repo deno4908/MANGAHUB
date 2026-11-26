@@ -289,6 +289,8 @@ def test_reader_keeps_last_manifest_while_refresh_is_blocked(live, monkeypatch):
         assert await qq.get_chapter_manifest(SLUG, '45-5') == first
         assert len(calls) == 1
         assert store[key + ':last-good']
+        writes = [call for call in qq.cache.set.call_args_list if call.args[0] == key + ':last-good']
+        assert len(writes) == 2 and writes[-1].kwargs['ttl'] == 7 * 86400
     asyncio.run(scenario())
 
 
