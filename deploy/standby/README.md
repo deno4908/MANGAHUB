@@ -7,6 +7,13 @@ Direct standby navigation also returns to the primary when it is healthy and
 the standby offers no measured latency advantage. An outage takes precedence;
 proactive standby selection additionally requires available VPS capacity.
 
+HTML document POSTs reaching the standby during a browser handoff are served
+through an internal GET of the SPA entry point. This avoids Nginx's static-file
+405 without another browser redirect or Worker call. Only frontend documents
+qualify; API/auth writes, static files and origin-access gates keep their normal
+method handling. Run `python3 deploy/standby/test_nginx_navigation.py` on Linux
+with Nginx installed to verify the template against disposable loopback fixtures.
+
 The standby serves the same deployed frontend assets. Its frontend still calls
 the canonical `api` and `auth` hosts, retaining their secure cookies. OAuth
 returns to the frontend where login began; both callback URLs must be allowed

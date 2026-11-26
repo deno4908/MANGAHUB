@@ -44,6 +44,21 @@ map $http_user_agent $mh_preview {
     ~*(googlebot|bingbot|duckduckbot|yandexbot|baiduspider|slurp) seo;
     ~*(facebookexternalhit|facebot|messenger|zalo|twitterbot|telegrambot|discordbot|whatsapp|linkedinbot|pinterest|slackbot|redditbot) share;
 }
+# A browser document can arrive as POST after an edge challenge/host handoff.
+# Only SPA documents may discard that body; API/auth and static files must keep
+# their original method. The origin and ingress gates below still apply first.
+map $uri $mh_spa_document {
+    default 1;
+    ~^/(api|auth|internal|assets|\.well-known)(/|$) 0;
+    ~\.[^/]+$ 0;
+    /auth/callback 1;
+    /index.html 1;
+    /health 0;
+}
+map "$request_method:$mh_spa_document:$http_accept" $mh_frontend_document_post {
+    default 0;
+    ~*^POST:1:.*text/html 1;
+}
 server {
     listen 80;
     server_name standby.mangahub.art;
@@ -92,8 +107,19 @@ server {
         add_header Cache-Control "private, no-store" always;
         alias /var/lib/mangahub-router-health/daily.json;
     }
+    # URI error-page dispatch changes POST to GET inside Nginx. A named
+    # location would retain POST and reproduce the static-file 405. No browser
+    # redirect, Worker invocation or backend request is needed for this step.
+    location = /internal/frontend-document {
+        internal;
+        default_type text/html;
+        add_header Cache-Control "private, no-store" always;
+        try_files /index.html =404;
+    }
     location ~ ^/manga/([^/]+)$ {
         if ($mh_origin_allowed = 0) { return 307 https://mangahub.art$request_uri; }
+        error_page 418 = /internal/frontend-document;
+        if ($mh_frontend_document_post) { return 418; }
         if ($mh_preview = seo) { rewrite ^/manga/(.+)$ /api/manga/seo/$1 last; }
         if ($mh_preview = share) { rewrite ^/manga/(.+)$ /api/manga/share/$1 last; }
         add_header Cache-Control "private, no-store" always;
@@ -101,6 +127,8 @@ server {
     }
     location ~ ^/chapter/([^/]+)$ {
         if ($mh_origin_allowed = 0) { return 307 https://mangahub.art$request_uri; }
+        error_page 418 = /internal/frontend-document;
+        if ($mh_frontend_document_post) { return 418; }
         if ($mh_preview = seo) { rewrite ^/chapter/(.+)$ /api/manga/seo-chapter/$1 last; }
         if ($mh_preview = share) { rewrite ^/chapter/(.+)$ /api/manga/share-chapter/$1 last; }
         add_header Cache-Control "private, no-store" always;
@@ -108,6 +136,8 @@ server {
     }
     location = /auth/callback {
         if ($mh_origin_allowed = 0) { return 307 https://mangahub.art$request_uri; }
+        error_page 418 = /internal/frontend-document;
+        if ($mh_frontend_document_post) { return 418; }
         add_header Cache-Control "private, no-store" always;
         try_files /index.html =404;
     }
@@ -132,6 +162,8 @@ server {
     }
     location / {
         if ($mh_origin_allowed = 0) { return 307 https://mangahub.art$request_uri; }
+        error_page 418 = /internal/frontend-document;
+        if ($mh_frontend_document_post) { return 418; }
         add_header Cache-Control "private, no-store" always;
         try_files $uri /index.html;
     }
