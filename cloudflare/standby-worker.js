@@ -397,11 +397,20 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
         return navigation && response.ok && !lease ? rememberFrontend(result,target,env) : result;
       }
       const alternative = target === 'primary' ? 'backup' : 'primary';
-      // A previous negative health sample is advisory for a fresh read error:
-      // the other origin might have recovered since the last periodic probe.
-      if (response) await response.body?.cancel();
+      // A standby source failure/timeout cannot recover at a Vercel deployment
+      // already known to be disabled. Its next daily sample handles recovery;
+      // do not turn a VPS 503 into an unrelated provider 402 or spend that hop.
+      if (alternative === 'primary' && s.primary[primaryHost]?.ok === false) {
+        return response ? publicResponse(response, request, b) : unavailable(request);
+      }
       try {
         const retry = await proxy(request, env, alternative);
+        if (ORIGIN_FAILED(retry) && !retry.headers.has('X-TruyenQQ-Error')) {
+          failedOrigin(alternative);
+          await retry.body?.cancel();
+          return response ? publicResponse(response, request, b) : unavailable(request);
+        }
+        if (response) await response.body?.cancel();
         if (retry.ok) {
           failedOrigin(target);
           if (target === 'primary') s.backup.ok = true;
@@ -412,7 +421,7 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
           }
         }
         return publicResponse(retry, request, b);
-      } catch { return unavailable(request); }
+      } catch { return response ? publicResponse(response, request, b) : unavailable(request); }
     },
   };
 }

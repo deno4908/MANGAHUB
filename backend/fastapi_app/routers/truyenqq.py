@@ -2,15 +2,19 @@
 import asyncio
 import hashlib
 import time
+from collections import OrderedDict
 
 from fastapi import APIRouter, HTTPException, Path, Request, Response
 from fastapi.responses import FileResponse
 from fastapi_app.services import truyenqq_service as qq
 from fastapi_app.routers import images
+from serverless_runtime import create_task
 
 router = APIRouter()
 IMAGE_CACHE_DIR = images.CACHE_DIR
 IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
+_cover_refresh_jobs = {}
+_cover_refresh_after = OrderedDict()
 
 
 def image_response(result):
@@ -37,11 +41,43 @@ def _cached_image(key, request, ttl):
     return FileResponse(path, media_type=images.EXT_CONTENT_TYPE[path.suffix], headers=headers)
 
 
-async def _serve_image(identity, request, loader, ttl):
+async def _serve_image(identity, request, loader, ttl, *, stale_ttl=None):
     key = "qq-v1-" + hashlib.sha256(identity.encode()).hexdigest()
     cached = _cached_image(key, request, ttl)
     if cached is not None:
         return cached
+    if stale_ttl:
+        stale = _cached_image(key, request, stale_ttl)
+        if stale is not None:
+            # These are previously verified image bytes, still behind the
+            # normal reader/whitelist middleware. A source challenge must not
+            # blank every saved cover when its one-day freshness expires.
+            stale.headers["X-Cache"] = "STALE"
+            stale.headers["Cache-Control"] = "private, no-store"
+            if "Vercel-CDN-Cache-Control" in stale.headers:
+                del stale.headers["Vercel-CDN-Cache-Control"]
+            job_key = (asyncio.get_running_loop(), key)
+            if job_key not in _cover_refresh_jobs and _cover_refresh_after.get(key, 0) <= time.monotonic():
+                _cover_refresh_after[key] = time.monotonic() + 300
+                _cover_refresh_after.move_to_end(key)
+                while len(_cover_refresh_after) > 256:
+                    _cover_refresh_after.popitem(last=False)
+                async def refresh():
+                    try:
+                        await _load_image(key, request, loader, ttl)
+                    except Exception:
+                        # Preserve bytes and the source's actual failure; no
+                        # browser relay loop, cache timestamp extension or
+                        # application access override is needed for this read.
+                        pass
+                    finally:
+                        _cover_refresh_jobs.pop(job_key, None)
+                _cover_refresh_jobs[job_key] = create_task(refresh())
+            return stale
+    return await _load_image(key, request, loader, ttl)
+
+
+async def _load_image(key, request, loader, ttl):
     async with images._cache_lock_for_key(key):
         cached = _cached_image(key, request, ttl)
         if cached is not None:
@@ -72,7 +108,7 @@ async def cover(identifier: str, request: Request):
         if not value["cover_urls"]:
             raise HTTPException(404, "Truyện chưa có ảnh bìa")
         return await qq.run_live("image", value["cover_urls"], value["url"])
-    return await _serve_image("cover:" + identifier, request, load, ttl=86400)
+    return await _serve_image("cover:" + identifier, request, load, ttl=86400, stale_ttl=7 * 86400)
 
 
 @router.get("/truyenqq/image/{identifier}/{number}/{index}")

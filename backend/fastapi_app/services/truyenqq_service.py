@@ -16,6 +16,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timezone
+from functools import partial
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -46,9 +47,13 @@ _executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="qq-adapter")
 _image_executor = ThreadPoolExecutor(max_workers=12, thread_name_prefix="qq-images")
 _reader_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="qq-reader")
 _card_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="qq-card-chapter")
+_cover_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="qq-cover")
+_cover_source_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="qq-cover-source")
 _random_pool: list[dict] = []
 _catalog_jobs = {}
 CATALOG_LAST_GOOD_SECONDS = 7 * 86400
+COVER_SOURCE_SECONDS = 7 * 86400
+DETAIL_LAST_GOOD_SECONDS = 7 * 86400
 _COLLECTIONS = {
     "truyen-moi": "latest", "dang-phat-hanh": "ongoing",
     "hoan-thanh": "completed", "sap-ra-mat": "new",
@@ -64,13 +69,13 @@ def get_live() -> LiveService:
         return _live
 
 
-async def run_live(method: str, *args, **kwargs):
+async def run_live(method: str, *args, _pool=None, **kwargs):
     try:
         # Creating the HTTP client also performs blocking TLS setup. Keep the
         # first request out of the event loop, just like subsequent scraping.
         def call():
             return getattr(get_live(), method)(*args, **kwargs)
-        executor = (_image_executor if method in {"image", "chapter_image"} else
+        executor = _pool or (_image_executor if method in {"image", "chapter_image"} else
                     _reader_executor if method in {"comic", "chapter"} else
                     _card_executor if method == "basic_latest" else _executor)
         context = copy_context()
@@ -229,7 +234,7 @@ def _item(value: dict, observed=None, *, cover_hints=None) -> dict:
         hints = {f"truyenqq:cover-hint:{alias}": hint for alias in {slug, identity(value["url"])[0]}}
         hints.update({f"catalog:qq-sync:v1:{alias}": "available" for alias in {slug, identity(value["url"])[0]}})
         if cover_hints is None:
-            cache.set_many(hints, ttl=86400)
+            _store_cover_hints(hints)
         else:
             cover_hints.update(hints)
     return item
@@ -238,7 +243,7 @@ def _item(value: dict, observed=None, *, cover_hints=None) -> dict:
 def _page(value: dict) -> dict:
     cover_hints = {}
     items = [_item(item, value.get("fetched_at"), cover_hints=cover_hints) for item in value.get("items", [])]
-    cache.set_many(cover_hints, ttl=86400)
+    _store_cover_hints(cover_hints)
     page = int(value.get("page") or 1)
     pages = int(value.get("total_pages") or 1)
     size = max(len(items), 1)
@@ -469,17 +474,68 @@ async def get_categories():
     return deepcopy(stale)
 
 
+def _cover_source(value):
+    if not isinstance(value, dict) or not isinstance(value.get("url"), str):
+        return None
+    urls = value.get("cover_urls")
+    if not isinstance(urls, list) or not urls or not all(isinstance(url, str) and url.startswith(("https://", "http://")) for url in urls):
+        return None
+    return {"cover_urls": urls, "url": value["url"]}
+
+
+def _store_cover_hints(hints):
+    cache.set_many(hints, ttl=86400)
+    # Keep only the stable source image reference longer. Chapter/card labels
+    # retain their original expiry and normal update/invalidation behavior.
+    sources = {key.replace("truyenqq:cover-hint:", "truyenqq:cover-source:v1:", 1): json.dumps(source)
+               for key, raw in hints.items() if key.startswith("truyenqq:cover-hint:")
+               and (source := _cover_source(_decode_cached(raw)))}
+    if sources:
+        cache.set_many(sources, ttl=COVER_SOURCE_SECONDS)
+
+
+def _cached_cover_source(identifier):
+    keys = [f"truyenqq:cover-hint:{identifier}", f"truyenqq:cover-source:v1:{identifier}",
+            f"truyenqq:detail:{identifier}", f"truyenqq:detail-last-good:{identifier}",
+            f"catalog:card-metadata:v1:{identifier}"]
+    values = cache.get_many(keys)
+    canonical = _cached_detail_identifier(identifier, values)
+    if canonical != identifier:
+        values.update(cache.get_many([f"truyenqq:{kind}{canonical}" for kind in
+                                     ("cover-hint:", "cover-source:v1:", "detail:", "detail-last-good:")]))
+    for slug in dict.fromkeys([identifier, canonical]):
+        for kind in ("cover-hint:", "cover-source:v1:"):
+            hint = _decode_cached(values.get(f"truyenqq:{kind}{slug}"))
+            if _cover_source(hint):
+                return hint, canonical
+        for kind in ("detail:", "detail-last-good:"):
+            payload = _decode_cached(values.get(f"truyenqq:{kind}{slug}")) or {}
+            item = (payload.get("data") or {}).get("item") or {}
+            source_slug = item.get("source_slug") or item.get("slug")
+            if item.get("source") == "truyenqq" and item.get("cover_original") and source_slug == canonical:
+                hint = _cover_source({"url": Settings().base_url.rstrip("/") + "/truyen-tranh/" + canonical,
+                                      "cover_urls": [item["cover_original"]]})
+                if hint:
+                    return hint, canonical
+    return None, canonical
+
+
 @coalesce_reads(scope=_source_read_scope)
 async def get_cover_info(identifier):
-    hint = await asyncio.to_thread(_json_cached, f"truyenqq:cover-hint:{identifier}")
-    if isinstance(hint, dict) and hint.get("cover_urls") and hint.get("url"):
+    # Catalog work can occupy the default/thread adapter pool for seconds.
+    # A known image reference must not wait behind a new chapter/catalog crawl.
+    context = copy_context()
+    hint, canonical = await asyncio.get_running_loop().run_in_executor(
+        _cover_executor, context.run, _cached_cover_source, identifier)
+    if hint is not None:
         return hint
-    canonical = await asyncio.to_thread(_cached_detail_identifier, identifier)
-    if canonical != identifier:
-        hint = await asyncio.to_thread(_json_cached, f"truyenqq:cover-hint:{canonical}")
-        if isinstance(hint, dict) and hint.get("cover_urls") and hint.get("url"):
-            return hint
-    return await run_live("basic", canonical)
+    value = await run_live("basic", canonical, _pool=_cover_source_executor)
+    source = _cover_source(value)
+    if source:
+        await asyncio.get_running_loop().run_in_executor(_cover_executor, partial(cache.set_many, {
+            f"truyenqq:cover-source:v1:{slug}": json.dumps(source)
+            for slug in {identifier, canonical}}, ttl=COVER_SOURCE_SECONDS))
+    return value
 
 
 async def get_total_count():
@@ -547,7 +603,7 @@ async def _load_manga_detail(slug):
         item["chaptersLatest"] = chapters[:1]
         payload = {"status": "success", "data": {"item": item, "seoOnPage": {"titleHead": item["name"]}}}
         await asyncio.to_thread(_remember, f"truyenqq:detail:{slug}", payload)
-        await asyncio.to_thread(cache.set, f'truyenqq:detail-last-good:{slug}', json.dumps(payload, ensure_ascii=False), ttl=21600)
+        await asyncio.to_thread(cache.set, f'truyenqq:detail-last-good:{slug}', json.dumps(payload, ensure_ascii=False), ttl=DETAIL_LAST_GOOD_SECONDS)
         return payload
     except HTTPException as error:
         if error.status_code == 404:
@@ -570,7 +626,7 @@ async def get_manga_detail(slug):
     if _valid_detail(cached):
         payload = deepcopy(cached)
         if not _valid_detail(stale):
-            await asyncio.to_thread(cache.set, stale_key, json.dumps(cached, ensure_ascii=False), ttl=21600)
+            await asyncio.to_thread(cache.set, stale_key, json.dumps(cached, ensure_ascii=False), ttl=DETAIL_LAST_GOOD_SECONDS)
     elif _valid_detail(stale):
         payload = deepcopy(stale)
         job_key = (asyncio.get_running_loop(), retry_key)

@@ -532,6 +532,33 @@ test('an ordinary application 402 passes through without a standby retry',async(
   assert.equal(f.calls.length,1);
 });
 
+for(const method of ['GET','OPTIONS'])test('a standby '+method+' failure cannot fall back to a known disabled primary',async()=>{
+  const f=setup({primary:false,handle:r=>{
+    assert.equal(new URL(r.url).hostname,'standby.example');
+    return new Response('standby temporarily busy',{status:503,headers:{'Access-Control-Allow-Origin':'https://mangahub.art'}});
+  }});
+  await f.worker.fetch(request(undefined,undefined,{method:'OPTIONS',headers:{Origin:'https://standby.mangahub.art'}}),env,f.ctx);
+  await f.done();f.calls.length=0;
+  const r=await f.worker.fetch(request(undefined,'/api/manga/detail/fixture-123',{method,
+    headers:{Origin:'https://standby.mangahub.art'}}),env,f.ctx);
+  await f.done();
+  assert.equal(r.status,503);assert.equal(await r.text(),'standby temporarily busy');
+  assert.equal(r.headers.get('Access-Control-Allow-Origin'),'https://standby.mangahub.art');
+  assert.equal(f.calls.length,1);
+});
+
+test('a newly disabled fallback cannot replace the original standby error with provider 402',async()=>{
+  const f=setup({handle:r=>new URL(r.url).hostname==='standby.example'
+    ? new Response('original source unavailable',{status:503,headers:{'Access-Control-Allow-Origin':'https://mangahub.art'}})
+    : new Response('provider disabled',{status:402,headers:{'X-Vercel-Error':'DEPLOYMENT_DISABLED'}})});
+  const r=await f.worker.fetch(request(undefined,undefined,{method:'OPTIONS',headers:{Origin:'https://standby.mangahub.art'}}),env,f.ctx);
+  assert.equal(r.status,503);assert.equal(await r.text(),'original source unavailable');
+  assert.equal(f.calls.length,2);await f.done();
+  f.calls.length=0;
+  assert.equal((await f.worker.fetch(request(undefined,undefined,{method:'OPTIONS',headers:{Origin:'https://standby.mangahub.art'}}),env,f.ctx)).status,503);
+  assert.equal(f.calls.length,1);
+});
+
 test('a submitted write is not replayed after Vercel pauses, and the next write uses standby',async()=>{
   const f=setup({handle:r=>new URL(r.url).hostname==='standby.example' ? new Response('written once') :
     new Response('paused',{status:402,headers:{'X-Vercel-Error':'DEPLOYMENT_DISABLED'}})});
