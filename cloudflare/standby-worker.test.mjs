@@ -457,6 +457,75 @@ test('Vercel deployment-disabled 402 fails over a read and remembers the outage'
   assert.equal(new URL(f.calls[0].url).hostname,'standby.example');
 });
 
+for (const [host,path,method] of [
+  ['api.mangahub.art','/api/bookmarks/follows','GET'],
+  ['api.mangahub.art','/api/history/','GET'],
+  ['auth.mangahub.art','/auth/refresh','POST'],
+]) test('preflight survives a newly disabled Vercel deployment for '+path,async()=>{
+  const f=setup({handle:r=>{
+    if (new URL(r.url).hostname!=='standby.example')
+      return new Response('disabled',{status:402,headers:{'X-Vercel-Error':'DEPLOYMENT_DISABLED'}});
+    assert.equal(r.headers.get('Origin'),'https://mangahub.art');
+    assert.equal(r.headers.get('Access-Control-Request-Method'),method);
+    assert.equal(r.headers.get('Access-Control-Request-Headers'),'authorization,x-mangahub-csrf');
+    return new Response(null,{status:204,headers:{
+      'Access-Control-Allow-Origin':'https://mangahub.art',
+      'Access-Control-Allow-Credentials':'true',
+      'Access-Control-Allow-Methods':method+', OPTIONS',
+      'Access-Control-Allow-Headers':'authorization,x-mangahub-csrf',
+    }});
+  }});
+  // The daily result can still report healthy when the provider disables it.
+  const preflight=()=>request(host,path,{method:'OPTIONS',headers:{Origin:'https://mangahub.art',
+    'Access-Control-Request-Method':method,'Access-Control-Request-Headers':'authorization,x-mangahub-csrf'}});
+  const r=await f.worker.fetch(preflight(),env,f.ctx);
+  assert.equal(r.status,204);
+  assert.equal(r.headers.get('Access-Control-Allow-Origin'),'https://mangahub.art');
+  assert.equal(r.headers.get('Access-Control-Allow-Credentials'),'true');
+  assert.equal(r.headers.get('Access-Control-Allow-Headers'),'authorization,x-mangahub-csrf');
+  assert.equal(f.calls.length,2);
+  assert.equal(f.calls[0].method,'OPTIONS');assert.equal(f.calls[1].method,'OPTIONS');
+  f.calls.length=0;
+  assert.equal((await f.worker.fetch(preflight(),env,f.ctx)).status,204);
+  assert.equal(f.calls.length,1);
+  assert.equal(new URL(f.calls[0].url).hostname,'standby.example');
+  await f.done();
+});
+
+test('preflight retries one transport failure without submitting the requested write',async()=>{
+  const f=setup({handle:r=>{
+    assert.equal(r.method,'OPTIONS');
+    if(new URL(r.url).hostname!=='standby.example')throw new Error('primary unavailable');
+    return new Response(null,{status:204});
+  }});
+  assert.equal((await f.worker.fetch(request(undefined,'/api/bookmarks/',{method:'OPTIONS',headers:{
+    Origin:'https://mangahub.art','Access-Control-Request-Method':'POST',
+  }}),env,f.ctx)).status,204);
+  assert.equal(f.calls.length,2);await f.done();
+});
+
+for (const host of ['api.mangahub.art','auth.mangahub.art'])
+for (const method of ['GET','OPTIONS','POST'])
+test('an existing standby reader keeps '+method+' on the VPS despite its spare-capacity limit: '+host,async()=>{
+  const f=setup({capacity:false,handle:async r=>{
+    assert.equal(new URL(r.url).hostname,'standby.example');
+    assert.equal(r.headers.get('Origin'),'https://mangahub.art');
+    assert.equal(r.headers.get('Authorization'),'Bearer fixture');
+    assert.equal(r.headers.get('X-MangaHub-CSRF'),'1');
+    if(method==='POST')assert.equal(await r.text(),'one-write');
+    return new Response('reader',{headers:{'Access-Control-Allow-Origin':'https://mangahub.art',
+      'Access-Control-Allow-Credentials':'true'}});
+  }});
+  const r=await f.worker.fetch(request(host,host.startsWith('auth.')?'/auth/refresh':'/api/bookmarks/follows',{
+    method,...(method==='POST'?{body:'one-write'}:{}),headers:{Origin:'https://standby.mangahub.art',
+      Authorization:'Bearer fixture','X-MangaHub-CSRF':'1'},
+  }),env,f.ctx);
+  assert.equal(r.status,200);assert.equal(await r.text(),'reader');
+  assert.equal(r.headers.get('Access-Control-Allow-Origin'),'https://standby.mangahub.art');
+  assert.equal(r.headers.get('Access-Control-Allow-Credentials'),'true');
+  assert.equal(f.calls.length,1);await f.done();
+});
+
 test('an ordinary application 402 passes through without a standby retry',async()=>{
   const f=setup({handle:()=>new Response('payment required by app',{status:402})});
   assert.equal((await f.worker.fetch(request(),env,f.ctx)).status,402);await f.done();

@@ -4,6 +4,9 @@ const FRONT = 'mangahub.art', API = 'api.mangahub.art', AUTH = 'auth.mangahub.ar
 const STANDBY = 'standby.mangahub.art';
 const HOSTS = [FRONT, API, AUTH, STANDBY];
 const SAFE = method => ['GET', 'HEAD'].includes(method);
+// A CORS preflight checks permission only; retrying it never submits the
+// requested mutation. Keep document navigation and body handling GET/HEAD-only.
+const RETRYABLE = method => SAFE(method) || method === 'OPTIONS';
 const FAILED = status => [500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526].includes(status);
 const ORIGIN_FAILED = response => FAILED(response.status) || (response.status === 402 &&
   ['DEPLOYMENT_DISABLED', 'DEPLOYMENT_PAUSED'].includes(response.headers.get('X-Vercel-Error')));
@@ -349,8 +352,11 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       // A sticky navigation must never keep a user on an observed failed host.
       if (lease && !(lease === 'primary' && [FRONT, API, AUTH].some(host => s.primary[host]?.ok === false)) &&
           !(lease === 'backup' && s.backup.ok === false)) target = lease;
-      if ([API, AUTH].includes(host) && request.headers.get('Origin') === 'https://' + STANDBY &&
-          s.backup.ok && (s.backup.capacity || s.primary[host]?.ok === false)) target='backup';
+      // Spare capacity limits new spillover, not readers already using the
+      // standby UI. Its API/auth requests must not drift back to a disabled
+      // Vercel deployment while a daily health sample is still catching up.
+      // The same backend authentication, CSRF and whitelist checks still run.
+      if ([API, AUTH].includes(host) && request.headers.get('Origin') === 'https://' + STANDBY) target='backup';
       const image = incoming.pathname.startsWith('/api/images/') ||
         /^\/api\/manga\/(?:mangadex-cover|truyenqq\/(?:cover|image))\//.test(incoming.pathname);
       // Keep warm image bytes at one origin while it is healthy. Splitting
@@ -372,7 +378,7 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       const started = now();
       try { response = await proxy(request, env, target); }
       catch {
-        if (!SAFE(request.method)) { failedOrigin(target); return unavailable(request); }
+        if (!RETRYABLE(request.method)) { failedOrigin(target); return unavailable(request); }
       }
       // QQ failures are source failures with browser recovery hints, not an
       // outage of Vercel/VPS. Authorization and ordinary client errors pass on.
@@ -383,7 +389,7 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
         current.milliseconds = current.milliseconds === undefined ? measured : current.milliseconds * .6 + measured * .4;
         if (target === 'backup' && frontend) current.frontendMilliseconds = current.milliseconds;
       }
-      if (response && (!ORIGIN_FAILED(response) || sourceFailure || !SAFE(request.method))) {
+      if (response && (!ORIGIN_FAILED(response) || sourceFailure || !RETRYABLE(request.method))) {
         if (ORIGIN_FAILED(response) && !sourceFailure) failedOrigin(target);
         if (response.status === 429 && !sourceFailure) s.busyUntil = now() + BUSY_TTL;
         if (host === FRONT && target === 'primary' && response.ok) s.primary[FRONT] = { ...s.primary[FRONT], ok: true };
