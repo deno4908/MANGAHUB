@@ -2384,7 +2384,7 @@ const BrowseManga = () => {
       const data = queryClient.getQueryData<OTruyenListData>(options.queryKey);
       const coverLimit = useOTruyenFilteredServerMode || useQQListMode ? 6 : 4;
       prefetchedCovers.current = warmCovers((data?.items || []).slice(0, coverLimit)
-        .map(item => [getMangaSource(item.id, item.source) === 'mangadex'
+        .map(item => [getMangaSource(item.id, item.source) !== 'uploaded'
           ? resolveSavedMangaCover(item.id, item.cover, item.coverProxy, 256).primary : item.cover, item.coverProxy]
           .find(url => !!url && canCacheCover(url)) || '').filter(Boolean));
     }).finally(() => { pagePrefetchBusy.current = false; });

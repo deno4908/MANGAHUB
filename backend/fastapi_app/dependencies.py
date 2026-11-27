@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from time import time, sleep
 from types import SimpleNamespace
 from threading import Lock
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 
 from config import config
 from fastapi import Depends, Header, HTTPException
@@ -32,6 +34,14 @@ _AUTH_CACHE_TTL = 3.0
 _auth_cache: dict[str, tuple[float, dict]] = {}
 _profile_cache: dict[str, tuple[float, dict]] = {}
 _cleanup_counter = 0
+_auth_read_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="auth-read")
+
+
+async def _run_auth_read(load, *args):
+    # Every image still checks the shared revocation ledger. Keep that read
+    # out of the general catalog/metadata queue instead of caching its verdict.
+    return await asyncio.get_running_loop().run_in_executor(
+        _auth_read_executor, copy_context().run, load, *args)
 
 
 def _as_utc_datetime(value):
@@ -297,7 +307,7 @@ def _get_current_user_sync(authorization: str | None, force_live=False):
 async def _live_user_read(authorization, force_live):
     # Supabase auth/profile clients are synchronous. Share the verification for
     # concurrent reads and keep their network waits out of the ASGI event loop.
-    return await asyncio.to_thread(_get_current_user_sync, authorization, force_live)
+    return await _run_auth_read(_get_current_user_sync, authorization, force_live)
 
 
 def _ticket_read(authorization):
@@ -328,7 +338,7 @@ def _ticket_read(authorization):
 
 @coalesce_reads
 async def _shared_ticket_read(authorization):
-    return await asyncio.to_thread(_ticket_read, authorization)
+    return await _run_auth_read(_ticket_read, authorization)
 
 
 async def get_current_user(authorization: str = Header(None)):

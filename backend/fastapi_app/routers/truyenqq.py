@@ -3,6 +3,9 @@ import asyncio
 import hashlib
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
+from pathlib import Path as PathFile
 
 from fastapi import APIRouter, HTTPException, Path, Request, Response
 from fastapi.responses import FileResponse
@@ -15,6 +18,7 @@ IMAGE_CACHE_DIR = images.CACHE_DIR
 IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
 _cover_refresh_jobs = {}
 _cover_refresh_after = OrderedDict()
+_thumbnail_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="qq-cover-resize")
 
 
 def image_response(result):
@@ -101,14 +105,42 @@ async def _load_image(key, request, loader, ttl):
         return response
 
 
+def _cover_thumbnail(response, size):
+    content = PathFile(response.path).read_bytes() if isinstance(response, FileResponse) else response.body
+    mime = response.media_type or response.headers.get("content-type", "image/jpeg").split(";", 1)[0]
+    if images.Image is None or len(content) < 40 * 1024:
+        return content, mime
+    try:
+        with images.Image.open(BytesIO(content)) as image:
+            if getattr(image, "is_animated", False):
+                return content, mime
+            image.thumbnail((size, size * 4), images.Image.Resampling.LANCZOS)
+            output = BytesIO()
+            image.convert("RGBA" if "A" in image.getbands() else "RGB").save(output, format="WEBP", quality=88, method=3)
+        if output.tell() < len(content):
+            return output.getvalue(), "image/webp"
+    except (OSError, ValueError):
+        pass
+    return content, mime
+
+
 @router.get("/truyenqq/cover/{identifier}")
-async def cover(identifier: str, request: Request):
+async def cover(identifier: str, request: Request, size: int = 0):
+    if size not in {0, 256, 512}:
+        raise HTTPException(422, "Invalid cover size")
     async def load():
         value = await qq.get_cover_info(identifier)
         if not value["cover_urls"]:
             raise HTTPException(404, "Truyện chưa có ảnh bìa")
         return await qq.run_live("image", value["cover_urls"], value["url"])
-    return await _serve_image("cover:" + identifier, request, load, ttl=86400, stale_ttl=7 * 86400)
+    if not size:
+        return await _serve_image("cover:" + identifier, request, load, ttl=86400, stale_ttl=7 * 86400)
+    async def thumbnail():
+        original_request = Request({**request.scope, "headers": [header for header in request.scope["headers"]
+                                      if header[0].lower() != b"if-none-match"]})
+        original = await _serve_image("cover:" + identifier, original_request, load, ttl=86400, stale_ttl=7 * 86400)
+        return await asyncio.get_running_loop().run_in_executor(_thumbnail_executor, _cover_thumbnail, original, size)
+    return await _serve_image(f"cover:{identifier}:{size}", request, thumbnail, ttl=86400, stale_ttl=7 * 86400)
 
 
 @router.get("/truyenqq/image/{identifier}/{number}/{index}")

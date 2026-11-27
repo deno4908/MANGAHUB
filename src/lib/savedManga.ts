@@ -61,11 +61,12 @@ export function isLegacySavedManga(record: SavedRecord): boolean {
     || legacyCover(String(record.manga_thumb || record.cover || record.cover_url || record.thumb || '').trim());
 }
 
-/** Load MangaDex covers through our image client; recover stale filenames by ID. */
+/** Use sized card covers; recover stale MangaDex filenames by ID. */
 export function resolveSavedMangaCover(identifier: string, cover?: string, storedFallback?: string, coverSize?: 256 | 512): { primary: string; fallback: string } {
   const mangaDexId = normalizeMangaDexId(identifier);
   const id = mangaDexId || String(identifier || '').trim();
-  const current = id ? thumbUrl('', id) + (mangaDexId && coverSize === 256 ? '?size=256' : '') : PLACEHOLDER;
+  const sized = coverSize === 256 || !mangaDexId && coverSize === 512;
+  const current = id ? thumbUrl('', id) + (sized ? `?size=${coverSize}` : '') : PLACEHOLDER;
   const raw = String(cover || '').trim();
   let primary = usable(raw) && !legacyCover(raw) ? raw : current;
   if (!usable(primary)) return { primary: PLACEHOLDER, fallback: PLACEHOLDER };

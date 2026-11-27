@@ -146,3 +146,35 @@ def test_old_or_empty_cover_bytes_cannot_mask_a_real_failure(tmp_path, monkeypat
             with pytest.raises(HTTPException, match='no verified cover'):
                 await routes._serve_image('cover:' + SLUG, request(), unavailable, 86400, stale_ttl=7 * 86400)
     asyncio.run(run())
+
+
+def test_card_thumbnail_reuses_original_bytes_and_keeps_full_cover_unchanged(tmp_path, monkeypatch):
+    from io import BytesIO
+    from PIL import Image
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    original = BytesIO()
+    Image.effect_noise((726, 1024), 64).convert('RGB').save(original, format='JPEG', quality=95)
+    data = original.getvalue()
+    key = 'qq-v1-' + hashlib.sha256(('cover:' + SLUG).encode()).hexdigest()
+    path = tmp_path / (key + '.jpg')
+    path.write_bytes(data)
+    monkeypatch.setattr(routes, 'IMAGE_CACHE_DIR', tmp_path)
+    monkeypatch.setattr(qq, 'run_live', AsyncMock(side_effect=AssertionError('Cached original must avoid source/Worker requests')))
+    app = FastAPI()
+    app.include_router(routes.router, prefix='/api/manga')
+    with TestClient(app) as client:
+        small = client.get('/api/manga/truyenqq/cover/' + SLUG + '?size=256')
+        assert small.status_code == 200
+        assert len(small.content) < len(data) / 2
+        with Image.open(BytesIO(small.content)) as image:
+            assert image.width == 256
+            assert abs(image.height / image.width - 1024 / 726) < .01
+        again = client.get('/api/manga/truyenqq/cover/' + SLUG + '?size=256')
+        assert again.content == small.content and again.headers['X-Cache'] == 'HIT'
+        assert client.get('/api/manga/truyenqq/cover/' + SLUG + '?size=256',
+                          headers={'If-None-Match': again.headers['ETag']}).status_code == 304
+        assert client.get('/api/manga/truyenqq/cover/' + SLUG).content == data
+        assert client.get('/api/manga/truyenqq/cover/' + SLUG + '?size=100000').status_code == 422
+    assert path.read_bytes() == data
+    qq.run_live.assert_not_awaited()

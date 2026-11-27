@@ -180,8 +180,8 @@ const MangaCard = ({ manga: originalManga, index = 0, variant = 'default', anima
   const chapterMetaLabel = chapterTime ? `${chapterLabel} - ${chapterTime}` : chapterLabel;
   const safeCoverFallback = String(manga.coverProxy || '').trim() || DEFAULT_CARD_COVER_FALLBACK;
   const mangaDexCover = resolveSavedMangaCover(manga.id, manga.cover, manga.coverProxy, 256);
-  const coverSrc = isMangaDexItem ? mangaDexCover.primary : manga.cover;
-  const coverFallbackSrc = isMangaDexItem ? mangaDexCover.fallback : safeCoverFallback;
+  const coverSrc = isMangaDexItem || isOTruyenItem ? mangaDexCover.primary : manga.cover;
+  const coverFallbackSrc = isMangaDexItem || isOTruyenItem ? mangaDexCover.fallback : safeCoverFallback;
   const coverFallbackDelayMs = isMangaDexItem ? 8000 : isOTruyenItem ? 10_000 : undefined;
   const coverPriority = variant === 'horizontal' ? index < 3 : index < 4;
   const coverMaxRetries = isMangaDexItem || isOTruyenItem ? 2 : 1;

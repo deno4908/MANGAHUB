@@ -210,9 +210,9 @@ function warmHomepageCovers(items: Manga[], signal: AbortSignal, showMature: boo
   const visible = items.filter(item => showMature || !isMatureManga(item));
   // Warm the same bounded hero/card URLs that will render, including the
   // 512px banner. Source requests still publish only a complete latest feed.
-  const urls = hero ? visible.slice(0, 2).map(item => resolveSavedMangaCover(item.id, item.cover, item.coverProxy, 512).primary)
-    : [...visible.slice(0, 1).map(item => resolveSavedMangaCover(item.id, item.cover, item.coverProxy, 512).primary),
-       ...visible.slice(0, 3).map(item => item.source === 'mangadex' ? resolveSavedMangaCover(item.id, item.cover, item.coverProxy, 256).primary : item.cover)];
+  const urls = hero ? visible.slice(0, 2).map(item => item.source === 'mangadex' ? resolveSavedMangaCover(item.id, item.cover, item.coverProxy, 512).primary : item.cover)
+    : [...visible.slice(0, 1).map(item => item.source === 'mangadex' ? resolveSavedMangaCover(item.id, item.cover, item.coverProxy, 512).primary : item.cover),
+       ...visible.slice(0, 3).map(item => item.source !== 'uploaded' ? resolveSavedMangaCover(item.id, item.cover, item.coverProxy, 256).primary : item.cover)];
   const release = warmCovers([...new Set(urls)]);
   signal.addEventListener('abort', release, { once: true });
 }
