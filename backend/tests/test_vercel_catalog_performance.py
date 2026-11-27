@@ -229,14 +229,19 @@ def test_redis_page_write_is_one_pipeline_with_expiry_on_every_key():
     client.mget.assert_called_once_with(["one", "two"])
 
 
-def test_qq_page_publishes_all_cover_aliases_in_one_nonblocking_batch(monkeypatch):
+def test_qq_page_publishes_cover_aliases_in_two_nonblocking_expiry_batches(monkeypatch):
     owner = threading.get_ident()
     cache = Mock(get=Mock(return_value=None))
     def batch(values, ttl):
         assert threading.get_ident() != owner
-        assert len([key for key in values if key.startswith("truyenqq:cover-hint:")]) == 96
-        assert len([key for key in values if key.startswith("catalog:qq-sync:v1:")]) == 96
-        assert ttl == 86400
+        if ttl == 86400:
+            assert len([key for key in values if key.startswith("truyenqq:cover-hint:")]) == 96
+            assert len([key for key in values if key.startswith("catalog:qq-sync:v1:")]) == 96
+        else:
+            assert ttl == qq.COVER_SOURCE_SECONDS
+            assert len(values) == 96
+            assert all(key.startswith("truyenqq:cover-source:v1:") for key in values)
+            assert all(set(json.loads(raw)) == {"url", "cover_urls"} for raw in values.values())
     cache.set_many.side_effect = batch
     monkeypatch.setattr(qq, "cache", cache)
     items = [{"id": str(i + 1000), "url": f"https://truyenqqko.com/truyen-tranh/book-{i}-{i + 1000}",
@@ -247,7 +252,7 @@ def test_qq_page_publishes_all_cover_aliases_in_one_nonblocking_batch(monkeypatc
     monkeypatch.setattr(qq, "run_live", source)
     result = asyncio.run(qq._catalog_page("collection", "latest", 9876))
     assert len(result["data"]["items"]) == 48
-    cache.set_many.assert_called_once()
+    assert cache.set_many.call_count == 2  # Two expiry groups, never one round trip per card.
 
 
 def test_48_ready_chapter_cards_need_three_batch_reads_and_no_single_reads(monkeypatch):
