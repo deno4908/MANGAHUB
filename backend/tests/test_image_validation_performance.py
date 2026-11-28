@@ -43,6 +43,40 @@ def test_cached_cover_does_not_wait_behind_blocking_catalog_work(monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('preload', [False, True])
+def test_downloaded_image_is_not_held_by_the_catalog_executor(monkeypatch, tmp_path, preload):
+    """Ready CDN bytes must reach the reader even while catalog jobs are busy."""
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(images, 'CACHE_DIR', tmp_path)
+    monkeypatch.setattr(images, '_validate_image_url', AsyncMock(return_value=None))
+    monkeypatch.setattr(images, '_fetch_image', AsyncMock(return_value=(b'jpeg-bytes', '', 'image/jpeg', 'fixture')))
+    monkeypatch.setattr(images, 'schedule_image_cache_prune', lambda: None)
+    monkeypatch.setattr(images, '_cache_fetch_locks', {})
+    entered, release = threading.Event(), threading.Event()
+    def catalog():
+        entered.set()
+        release.wait(3)
+    async def run():
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        busy = loop.run_in_executor(None, catalog)
+        while not entered.is_set():
+            await asyncio.sleep(0)
+        try:
+            if preload:
+                result = await asyncio.wait_for(images.preload_images(COVER), .5)
+                assert result['cached'] == 1
+            else:
+                result = await asyncio.wait_for(images.proxy_image(COVER, Request({'type':'http','method':'GET','headers':[]})), .5)
+                assert result.status_code == 200 and result.body == b'jpeg-bytes'
+            assert not busy.done()
+            assert (tmp_path / images._cache_key(COVER)).read_bytes() == b'jpeg-bytes'
+        finally:
+            release.set()
+            await busy
+    asyncio.run(run())
+
+
 def test_cold_image_dns_uses_a_bounded_pool_independent_of_catalog_work(monkeypatch):
     monkeypatch.setattr(images, '_host_validation_cache', {})
     resolver_threads = []

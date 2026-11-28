@@ -118,6 +118,7 @@ MANGADEX_IMAGE_CACHE_VERSION = (
 _mangadex_image_semaphore = asyncio.Semaphore(MANGADEX_IMAGE_UPSTREAM_CONCURRENCY)
 _curl_executor = ThreadPoolExecutor(max_workers=IMAGE_PROXY_CURL_WORKERS)
 _image_dns_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="image-dns")
+_image_cache_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="image-cache")
 
 
 async def _get_client() -> httpx.AsyncClient:
@@ -980,7 +981,11 @@ async def proxy_image(url: str, request: Request, retry: int = 0):
         data, fetch_info, content_type, transport = await _fetch_image(url, retry_hint=retry)
         if data is not None:
             try:
-                await asyncio.to_thread(_write_cache_atomic, cached_path, data)
+                # CDN bytes are ready. Catalog work in the default executor
+                # must not hold the reader's response behind unrelated jobs.
+                await asyncio.get_running_loop().run_in_executor(
+                    _image_cache_executor, _write_cache_atomic, cached_path, data
+                )
                 schedule_image_cache_prune()
             except OSError as error:
                 logger.debug("Image cache write unavailable: %s", type(error).__name__)
@@ -1041,7 +1046,9 @@ async def preload_images(urls: str):
             if data is None:
                 return
             try:
-                await asyncio.to_thread(_write_cache_atomic, path, data)
+                await asyncio.get_running_loop().run_in_executor(
+                    _image_cache_executor, _write_cache_atomic, path, data
+                )
                 cached += 1
             except OSError:
                 pass
