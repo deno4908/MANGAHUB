@@ -31,6 +31,7 @@ class StandbyNavigationTests(unittest.TestCase):
         (dist / 'index.html').write_text('<html>MangaHub navigation fixture</html>')
         (dist / 'assets' / 'app.js').write_text('/* fixture */')
         (dist / 'favicon.svg').write_text('<svg/>')
+        (dist / 'favicon.ico').write_bytes(b'fixture-icon')
         cls.backend_calls = []
 
         class Backend(BaseHTTPRequestHandler):
@@ -141,8 +142,18 @@ class StandbyNavigationTests(unittest.TestCase):
             self.assertEqual(self.request(path, 'PUT')[0], 405)
 
     def test_static_file_posts_are_not_converted_to_documents(self):
-        for path in ['/assets/app.js', '/favicon.svg']:
+        for path in ['/assets/app.js', '/favicon.svg', '/favicon.ico']:
             self.assertEqual(self.request(path, 'POST')[0], 405)
+
+    def test_unsigned_favicon_is_local_without_worker_or_backend(self):
+        before = len(self.backend_calls)
+        for method in ['GET', 'HEAD']:
+            status, headers, body = self.request('/favicon.ico?v=fixture', method, trusted=False)
+            self.assertEqual(status, 200)
+            self.assertNotIn('Location', headers)
+            self.assertEqual(headers.get('Cache-Control'), 'public, max-age=86400')
+            self.assertEqual(body, b'fixture-icon' if method == 'GET' else b'')
+        self.assertEqual(len(self.backend_calls), before)
 
     def test_unsigned_document_cannot_use_internal_recovery(self):
         status, headers, _ = self.request('/chapter/fixture?resume=3', 'POST', trusted=False)
