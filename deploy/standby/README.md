@@ -103,11 +103,12 @@ keeps their high-volume downloads out of the Workers invocation quota. JSON
 API, auth, navigation and the more-specific source Worker remain unchanged.
 The router still handles their existing host selection and mutations.
 
-The browser downloads healthy images from the original primary host with no
-additional health request. A fixed owned image GET/HEAD may retry once at the
-standby after a network/host error; a successful fallback selects that image
-origin for 60 seconds. Permission errors, missing images, rate limits and QQ
-source errors retain the existing recovery behavior. No writes are replayed.
+The standby frontend downloads images from its local image proxy with no
+additional health request. Other frontend sessions start at the public API
+host. A fixed owned image GET/HEAD may retry once at the other owned hostname
+after a network/host error; a successful fallback selects that image origin
+for 60 seconds. Permission errors, missing images, rate limits and QQ source
+errors retain the existing recovery behavior. No writes are replayed.
 
 Nginx accepts only image/static public paths without the private Worker header,
 from the existing Cloudflare IP allowlist. It derives their client IP from
@@ -116,7 +117,7 @@ Internal, JSON and auth endpoints still require the private hop. No shared
 image caches or Redis/public origins are introduced.
 
 API/auth routes use request-limit fail-open: when Workers quota is exhausted,
-their primary origin still validates authentication, site policy, rate limits
+their DNS origin still validates authentication, site policy, rate limits
 and CSRF. Frontend fail-open is enabled only after an independent Cloudflare
 WAF country rule is installed; if the token lacks Rulesets permissions, the
 operation reports the exact rule and retains frontend fail-closed. The rule
@@ -125,4 +126,41 @@ preserves the Vietnam frontend policy independently of the Worker budget.
 Quota relief reduces invocations; it does not make the free plan unlimited.
 Source relay calls still consume the same account-wide free budget. While
 quota is exhausted, no new Worker-based routing decision or source relay can
-run; origin image fallback and primary API/auth bypass do not require it.
+run; origin image fallback and API/auth bypass do not require it.
+
+### Independent API DNS during a Vercel pause
+
+An image route bypassing Workers uses the DNS origin directly. If `api` still
+points at a paused Vercel deployment, the image and its CORS preflight can
+return provider 402 even while JSON requests recover through the router.
+Use `nginx-api-auth.conf.template` on the ready VPS before changing DNS:
+
+1. Keep `api`, `auth` and `standby` proxied. Prepare a certificate covering
+   exactly `api.mangahub.art` and `auth.mangahub.art`; generate and retain its
+   private key on the VPS. Install the matching certificate/key at the paths
+   in the template and verify both names before exposing the new vhost.
+2. Install the template alongside the existing standby vhost. Keep the
+   Cloudflare ingress allowlist, validate with `nginx -t`, reload Nginx and
+   check API/auth preflights, CSRF and the standby OAuth callback. No backend
+   restart is needed. This vhost exposes only API/auth/health paths and strips
+   untrusted private routing hints; the backend still checks every reader.
+3. Create `primary-origin.mangahub.art` as a DNS-only alias/address for the
+   existing Vercel ingress, never for the VPS. Deploy and verify
+   `PRIMARY_RESOLVE_OVERRIDE=primary-origin.mangahub.art` **before** repointing
+   public API/auth DNS. The Worker keeps the public request host and TLS name
+   while resolving primary requests through this fixed same-zone alias.
+4. Point the proxied `api` and `auth` records at `standby.mangahub.art`.
+   Image bypasses and quota fail-open requests now reach the ready VPS.
+   Preserve the old DNS values for rollback; keep all existing source/image
+   Worker route exclusions and cookie configuration unchanged.
+5. Verify `/health`, `/auth/health`, image preflights and authenticated reads.
+   Anonymous denied reads should remain denied. Check that responses expose
+   neither private routing headers nor the origin address. The daily primary
+   health check must still target Vercel independently of these DNS records.
+
+Saved health metadata is shared and coalesced. Requests from the exact standby
+frontend origin already select the VPS, so their metadata refresh runs in the
+background, including for preflights and writes. Backend authentication and
+CSRF still run, and a write is never replayed. This adds no health probes or
+image Worker invocations. It cannot repair a QQ source challenge or provide
+source data that has never been cached successfully.
