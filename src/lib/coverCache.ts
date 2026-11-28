@@ -7,9 +7,9 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const TTL = 2 * 60_000;
 const MAX_BYTES = 24 * 1024 * 1024;
 const MAX_ENTRIES = 80;
-const MAX_ACTIVE = 10;
+const MAX_ACTIVE = 30;
 // Give visible grids more capacity without starting more speculative work.
-const MAX_PREFETCH_ACTIVE = 4;
+const MAX_PREFETCH_ACTIVE = 10;
 
 type CoverPriority = 'visible' | 'normal' | 'prefetch';
 const priorityOrder: Record<CoverPriority, number> = { visible: 0, normal: 1, prefetch: 2 };

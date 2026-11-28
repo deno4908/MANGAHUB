@@ -85,6 +85,68 @@ def qq(slug, **extra):
             "cover_url": f"/api/manga/truyenqq/cover/{slug}", "genres": ["Action"], **extra}
 
 
+@pytest.mark.parametrize("sort", ["popular", "rating"])
+def test_warm_page_switch_reuses_ranking_without_waiting_for_another_database_read(monkeypatch, sort):
+    snapshots = {}
+    def frozen(key, value=None):
+        if value is not None:
+            snapshots.setdefault(key, deepcopy(value))
+        return deepcopy(snapshots.get(key))
+    monkeypatch.setattr(local_popular, "_frozen", frozen)
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: {"book-290": 25})
+    monkeypatch.setattr(ratings, "get_top_rated_manga", AsyncMock(return_value={"items": [
+        {"manga_slug": "book-290", "average": 4.8, "count": 5, "weighted_score": 4.6}]}))
+    monkeypatch.setattr(local_popular, "_cached_labels", lambda ids: {key: qq(key) for key in ids})
+    monkeypatch.setattr(local_popular, "remember_matches", lambda values: None)
+    calls = []
+    async def listing(**kwargs):
+        calls.append(kwargs["page"])
+        start = (kwargs["page"] - 1) * 42
+        return {"data": {"items": [{"slug": f"book-{index}"} for index in range(start, min(start + 42, 400))],
+            "params": {"pagination": {"totalItemsPerPage": 42, "totalPages": 10, "totalItems": 400}}}}
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", listing)
+    async def run():
+        args = dict(limit=24, genres=[], status="", show_mature=True, hidden={}, db=EmptyDB(), sort=sort)
+        first = (await local_popular.qq_popular(page=5, **args))["data"]["items"]
+        monkeypatch.setattr(manga, "_fetch_local_views_lookup", lambda db: pytest.fail("A warm page must not wait for the ranking database"))
+        monkeypatch.setattr(ratings, "get_top_rated_manga", AsyncMock(side_effect=AssertionError("A warm page must not reload ratings")))
+        second = (await local_popular.qq_popular(page=6, **args))["data"]["items"]
+        assert len(first) == len(second) == 24
+        start = 96 - int(sort == "rating")
+        assert [row["slug"] for row in first + second] == [f"book-{index}" for index in range(start, start + 48)]
+    asyncio.run(run())
+    assert calls == ([1, 3, 4] if sort == "popular" else [1, 2, 3, 4])
+
+
+def test_warm_page_ranking_still_rechecks_a_changed_hidden_selection(monkeypatch):
+    snapshots = {}
+    def frozen(key, value=None):
+        if value is not None:
+            snapshots.setdefault(key, deepcopy(value))
+        return deepcopy(snapshots.get(key))
+    monkeypatch.setattr(local_popular, "_frozen", frozen)
+    reads = []
+    def lookup(db):
+        reads.append(True)
+        return {"book-99": 25}
+    monkeypatch.setattr(manga, "_fetch_local_views_lookup", lookup)
+    monkeypatch.setattr(local_popular, "_cached_labels", lambda ids: {key: qq(key) for key in ids})
+    monkeypatch.setattr(local_popular, "remember_matches", lambda values: None)
+    source = AsyncMock(return_value={"data": {"items": [{"slug": f"book-{index}"} for index in range(42)],
+        "params": {"pagination": {"totalItemsPerPage": 42, "totalPages": 10, "totalItems": 400}}}})
+    monkeypatch.setattr(local_popular.truyenqq_service, "get_filtered", source)
+    async def run():
+        args = dict(page=1, limit=24, genres=[], status="", show_mature=True, db=EmptyDB())
+        before = (await local_popular.qq_popular(hidden={}, **args))["data"]["items"]
+        after = (await local_popular.qq_popular(hidden={"book-99": "hidden"}, **args))["data"]["items"]
+        assert before[0]["slug"] == "book-99"
+        assert "book-99" not in {row["slug"] for row in after}
+        assert len(after) == 24
+    asyncio.run(run())
+    assert len(reads) == 2
+    source.assert_awaited_once()
+
+
 @pytest.mark.parametrize("sort", ["latest", "popular", "rating"])
 def test_24_title_pages_share_native_pages_without_losing_or_repeating_books(monkeypatch, sort):
     snapshots = {}

@@ -105,22 +105,27 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
     if inspect.isawaitable(hidden):
         hidden = await hidden
 
-    rating_rows = {}
-    if sort == "rating":
-        from fastapi_app.routers import ratings
-        rated = await asyncio.to_thread(_frozen, "qq:browse:ratings:v1")
-        if rated is None:
-            rated = await ratings.get_top_rated_manga(limit=120, db=db)
-            rated = await asyncio.to_thread(_frozen, "qq:browse:ratings:v1", rated)
-        rating_rows = {item["manga_slug"]: item for item in rated.get("items", [])}
-        lookup = {slug: len(rating_rows) - index for index, slug in enumerate(rating_rows)}
-    else:
-        lookup = await asyncio.to_thread(manga._fetch_local_views_lookup, db) if sort == "popular" else {}
     # Reading another chapter must not invalidate every source-page read while
     # a client is waiting for this ranking snapshot to finish.
     snapshot_key = "qq:browse:v6:" + hashlib.sha256(json.dumps(
         [sort, sorted(genres), status, show_mature, hidden], sort_keys=True).encode()).hexdigest()
     snapshot = await asyncio.to_thread(_frozen, snapshot_key + ":ranking")
+    rating_rows, lookup = {}, {}
+    # A frozen ranking already contains the verified rows and their order.
+    # Later pages must not wait for a database lookup whose result cannot
+    # change that snapshot. A changed filter/moderation key or expired snapshot
+    # still takes the normal ranking read below.
+    if snapshot is None:
+        if sort == "rating":
+            from fastapi_app.routers import ratings
+            rated = await asyncio.to_thread(_frozen, "qq:browse:ratings:v1")
+            if rated is None:
+                rated = await ratings.get_top_rated_manga(limit=120, db=db)
+                rated = await asyncio.to_thread(_frozen, "qq:browse:ratings:v1", rated)
+            rating_rows = {item["manga_slug"]: item for item in rated.get("items", [])}
+            lookup = {slug: len(rating_rows) - index for index, slug in enumerate(rating_rows)}
+        elif sort == "popular":
+            lookup = await asyncio.to_thread(manga._fetch_local_views_lookup, db)
     aliases = [slug for slug, views in lookup.items() if views > 0
                and not manga._extract_mangadex_id(slug) and not manga._is_invalid_manga_slug(slug)
                and not manga._hidden_reason_for_slug(hidden, slug)]
