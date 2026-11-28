@@ -9,7 +9,7 @@ import { resolveSavedMangaCover } from '@/lib/savedManga';
 import { mangaDetailQueryKey } from '@/lib/mangaDetailQuery';
 import { getMangaDetailPath, getMangaSource } from '@/lib/mangaLinks';
 import OptimizedImage from '@/components/ui/OptimizedImage';
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef, type TouchEvent } from 'react';
 import { useCardMetadata } from '@/hooks/useCardMetadata';
 import { useCardChapter } from '@/hooks/useCardChapter';
 
@@ -243,6 +243,42 @@ const MangaCard = ({ manga: originalManga, index = 0, variant = 'default', anima
     });
   }, [isMangaDexItem, manga.externalUrl, manga.id, manga.slug, queryClient]);
 
+  const prefetchTimer = useRef<ReturnType<typeof setTimeout>>();
+  const touchIntent = useRef<{ x: number; y: number; moved: boolean }>();
+  const cancelScheduledPrefetch = useCallback(() => {
+    clearTimeout(prefetchTimer.current);
+    prefetchTimer.current = undefined;
+  }, []);
+  const schedulePrefetch = () => {
+    cancelScheduledPrefetch();
+    prefetchTimer.current = setTimeout(prefetchDetail, 120);
+  };
+  useEffect(() => cancelScheduledPrefetch, [prefetchDetail, cancelScheduledPrefetch]);
+  const detailIntent = {
+    onMouseEnter: schedulePrefetch,
+    onMouseLeave: cancelScheduledPrefetch,
+    onFocus: prefetchDetail,
+    onMouseDown: (event: { button: number }) => { if (event.button === 0) prefetchDetail(); },
+    onTouchStart: (event: TouchEvent<HTMLAnchorElement>) => {
+      const point = event.touches[0];
+      touchIntent.current = { x: point?.clientX || 0, y: point?.clientY || 0, moved: false };
+      schedulePrefetch();
+    },
+    onTouchMove: (event: TouchEvent<HTMLAnchorElement>) => {
+      const point = event.touches[0], start = touchIntent.current;
+      if (start && point && Math.hypot(point.clientX - start.x, point.clientY - start.y) > 8) {
+        start.moved = true;
+        cancelScheduledPrefetch();
+      }
+    },
+    onTouchEnd: () => {
+      cancelScheduledPrefetch();
+      if (touchIntent.current && !touchIntent.current.moved) prefetchDetail();
+      touchIntent.current = undefined;
+    },
+    onTouchCancel: () => { cancelScheduledPrefetch(); touchIntent.current = undefined; },
+  };
+
   if (isOTruyenItem && manga.chapterAvailability === 'unavailable') return null;
 
   if (variant === 'horizontal') {
@@ -272,7 +308,7 @@ const MangaCard = ({ manga: originalManga, index = 0, variant = 'default', anima
     }
     return (
       <motion.div initial={animateEntrance ? { opacity: 0, x: -8 } : false} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.3, delay: animateEntrance ? index * 0.04 : 0 }}>
-        <Link to={detailPath} state={detailLinkState} className="group flex gap-3.5 p-3 rounded-lg hover:bg-muted/60 transition-all border border-transparent hover:border-border" onMouseEnter={prefetchDetail} onFocus={prefetchDetail} onTouchStart={prefetchDetail}>
+        <Link to={detailPath} state={detailLinkState} className="group flex gap-3.5 p-3 rounded-lg hover:bg-muted/60 transition-all border border-transparent hover:border-border" {...detailIntent}>
           <OptimizedImage src={coverSrc} fallbackSrc={coverFallbackSrc} fallbackDelayMs={coverFallbackDelayMs} maxRetries={coverMaxRetries} alt={manga.title} className="w-14 h-[78px] object-cover rounded shrink-0 border border-border" priority={coverPriority} rootMargin="320px" />
           <div className="flex-1 min-w-0 py-0.5">
             <h3 className="text-sm font-semibold line-clamp-2 group-hover:text-primary transition-colors">{manga.title}</h3>
@@ -322,7 +358,7 @@ const MangaCard = ({ manga: originalManga, index = 0, variant = 'default', anima
     }
     return (
       <motion.div initial={animateEntrance ? { opacity: 0, y: 8 } : false} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, delay: animateEntrance ? index * 0.03 : 0 }}>
-        <Link to={detailPath} state={detailLinkState} className="group flex items-center gap-3 py-2 px-2 rounded-lg hover:bg-muted/60 transition-all" onMouseEnter={prefetchDetail} onFocus={prefetchDetail} onTouchStart={prefetchDetail}>
+        <Link to={detailPath} state={detailLinkState} className="group flex items-center gap-3 py-2 px-2 rounded-lg hover:bg-muted/60 transition-all" {...detailIntent}>
           <OptimizedImage src={coverSrc} fallbackSrc={coverFallbackSrc} fallbackDelayMs={coverFallbackDelayMs} maxRetries={coverMaxRetries} alt={manga.title} className="w-10 h-14 object-cover rounded shrink-0 border border-border" priority={coverPriority} rootMargin="320px" />
           <div className="flex-1 min-w-0">
             <h3 className="text-xs font-semibold line-clamp-1 group-hover:text-primary transition-colors">{manga.title}</h3>
@@ -385,7 +421,7 @@ const MangaCard = ({ manga: originalManga, index = 0, variant = 'default', anima
           </div>
         </a>
       ) : (
-      <Link to={detailPath} state={detailLinkState} className="group block h-full" onMouseEnter={prefetchDetail} onFocus={prefetchDetail} onTouchStart={prefetchDetail}>
+      <Link to={detailPath} state={detailLinkState} className="group block h-full" {...detailIntent}>
         <div className="ed-card h-full flex flex-col">
           <div className="relative aspect-[2/3] overflow-hidden">
             <OptimizedImage src={coverSrc} fallbackSrc={coverFallbackSrc} fallbackDelayMs={coverFallbackDelayMs} maxRetries={coverMaxRetries} alt={manga.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" priority={coverPriority} rootMargin="320px" />
