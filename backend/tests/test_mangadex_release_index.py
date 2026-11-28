@@ -57,6 +57,36 @@ def put(client, value):
     client.set(index.PREFIX + "state", index._pack(value))
 
 
+@pytest.mark.parametrize("stage", ["_pack", "_unpack", "_seed"])
+def test_refresh_index_codec_cannot_hold_a_ready_reader_image(store, monkeypatch, stage):
+    from test_reader_background_io import image_while_waiting
+    value = state([chapter(1)])
+    value["last_checked"] = time.time() - 120
+    if stage == "_seed":
+        monkeypatch.setattr(index, "_seed", lambda: copy.deepcopy(value))
+    else:
+        put(store, value)
+    original = getattr(index, stage)
+    unpack = index._unpack
+    source = AsyncMock(return_value={"data": []})
+    monkeypatch.setattr(mdx, "_request_json", source)
+
+    def make(blocked):
+        def codec(*args):
+            blocked()
+            return original(*args)
+        monkeypatch.setattr(index, stage, codec)
+        return index.refresh_step()
+
+    asyncio.run(image_while_waiting(monkeypatch, make))
+    # Offloading changes scheduling, not the scan or published snapshot.
+    source.assert_awaited_once()
+    updated = unpack(store.get(index.PREFIX + 'state'))
+    assert updated['rows'] == value['rows'] and updated['version'] == value['version']
+    assert updated['last_checked'] > value['last_checked']
+    assert store.get(index.PREFIX + 'lease') is None
+
+
 def ids(result):
     return [item["slug"] for item in result["data"]["items"]]
 

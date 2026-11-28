@@ -49,6 +49,7 @@ async def image_while_waiting(monkeypatch, make_operation):
     monkeypatch.setattr(images, "_validate_image_url", AsyncMock(return_value=None))
     monkeypatch.setattr(images, "_cached_image_response",
                         lambda *args: Response(b"cached-image", media_type="image/jpeg"))
+    scheduled_at = asyncio.get_running_loop().time()
     task = asyncio.create_task(make_operation(blocked))
     try:
         for _ in range(100):
@@ -56,6 +57,7 @@ async def image_while_waiting(monkeypatch, make_operation):
                 break
             await asyncio.sleep(.005)
         assert entered.is_set()
+        assert asyncio.get_running_loop().time() - scheduled_at < .5, "Reader request was stalled before it could start"
         assert not task.done(), "Synchronous side effect blocked the API event loop"
         response = await asyncio.wait_for(images.proxy_image(
             "https://uploads.mangadex.org/covers/test.jpg", request()), .25)

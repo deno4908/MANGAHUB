@@ -361,10 +361,13 @@ async def refresh_step(budget=20):
         return
     work = None
     try:
-        active = _unpack(await asyncio.to_thread(client.get, PREFIX + "state")) or _seed()
+        # The index can contain thousands of titles. Reading Redis off-thread
+        # is insufficient when decompressing/encoding its result still runs on
+        # the reader's event loop. Keep each complete blocking operation there.
+        active = await asyncio.to_thread(lambda: _unpack(client.get(PREFIX + "state")) or _seed())
         if active and active.get("ready") and time.time() - active.get("last_checked", 0) < 60:
             return
-        work = _unpack(await asyncio.to_thread(client.get, PREFIX + "working"))
+        work = await asyncio.to_thread(lambda: _unpack(client.get(PREFIX + "working")))
         if not work:
             full_due = not active or time.time() - active.get("last_full_sync", 0) >= 86400
             if active and active.get("ready") and not full_due:
@@ -404,7 +407,8 @@ async def refresh_step(budget=20):
                         "watermark": work["started"], "last_checked": time.time(),
                         "last_full_sync": time.time() if field == "createdAt" else work.get("last_full_sync", 0),
                         "version": uuid.uuid4().hex if work["changed"] else work["version"]}
-                saved = await asyncio.to_thread(client.eval, _DONE, 3, lock, PREFIX + "state", PREFIX + "working", token, _pack(done), TTL)
+                saved = await asyncio.to_thread(lambda: client.eval(
+                    _DONE, 3, lock, PREFIX + "state", PREFIX + "working", token, _pack(done), TTL))
                 if saved:
                     _remember("active", done)
                 work = None
@@ -417,13 +421,15 @@ async def refresh_step(budget=20):
             else:
                 work["cursor"], work["skip"] = stamp, sum(str((row.get("attributes") or {}).get(field, ""))[:19] == stamp for row in rows)
             if pages % 10 == 0:
-                saved = await asyncio.to_thread(client.eval, _SAVE, 2, lock, PREFIX + "working", token, _pack(work), TTL)
+                saved = await asyncio.to_thread(lambda: client.eval(
+                    _SAVE, 2, lock, PREFIX + "working", token, _pack(work), TTL))
                 if not saved:
                     return
             await asyncio.sleep(REFRESH_PAUSE_SECONDS)
     finally:
         if work:
-            await asyncio.to_thread(client.eval, _SAVE, 2, lock, PREFIX + "working", token, _pack(work), TTL)
+            await asyncio.to_thread(lambda: client.eval(
+                _SAVE, 2, lock, PREFIX + "working", token, _pack(work), TTL))
         await asyncio.to_thread(client.eval, _UNLOCK, 1, lock, token)
 
 
