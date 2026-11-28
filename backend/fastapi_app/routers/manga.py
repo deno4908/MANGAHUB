@@ -5677,7 +5677,7 @@ async def start_view_session(
         (f"view-session-ip:min:{client_ip_key}", VIEW_IP_BURST_LIMIT_PER_MINUTE, 60),
         (f"view-session-ip:10m:{client_ip_key}", VIEW_IP_BURST_LIMIT_PER_10_MINUTES, 10 * 60),
     ):
-        allowed, _, reset_after = check_fixed_window(key, limit, window_seconds)
+        allowed, _, reset_after = await asyncio.to_thread(check_fixed_window, key, limit, window_seconds)
         if not allowed:
             raise HTTPException(
                 status_code=429,
@@ -5693,7 +5693,7 @@ async def start_view_session(
         )
         return {"ok": False, "session_started": False, "reason": reason}
 
-    result = _start_manga_read_session_rpc(
+    result = await asyncio.to_thread(_start_manga_read_session_rpc,
         db,
         manga_slug=view_slug,
         chapter_id=chapter_id,
@@ -5742,7 +5742,7 @@ async def add_view(
         (f"view-ip:min:{client_ip_key}", VIEW_IP_BURST_LIMIT_PER_MINUTE, 60),
         (f"view-ip:10m:{client_ip_key}", VIEW_IP_BURST_LIMIT_PER_10_MINUTES, 10 * 60),
     ):
-        allowed, _, reset_after = check_fixed_window(key, limit, window_seconds)
+        allowed, _, reset_after = await asyncio.to_thread(check_fixed_window, key, limit, window_seconds)
         if not allowed:
             raise HTTPException(
                 status_code=429,
@@ -5770,10 +5770,10 @@ async def add_view(
         return {"ok": True, "counted": False, "reason": "duplicate", "retry_after": wait_seconds}
 
     user_id = user.get("id") if user else None
-    if user_id and _recent_user_view_exists(db, user_id, view_slug):
+    if user_id and await asyncio.to_thread(_recent_user_view_exists, db, user_id, view_slug):
         return {"ok": True, "counted": False, "reason": "recent-user-view"}
 
-    checked_rpc_result = _track_manga_view_checked_rpc(
+    checked_rpc_result = await asyncio.to_thread(_track_manga_view_checked_rpc,
         db,
         manga_slug=view_slug,
         chapter_id=chapter_id,

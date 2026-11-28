@@ -596,6 +596,10 @@ async def get_comments(
     db=Depends(get_supabase_public),
 ):
     """Lấy bình luận cho truyện/chapter — optimized batch queries."""
+    return await asyncio.to_thread(_get_comments_sync, manga_slug, chapter_id, page, limit, user, db)
+
+
+def _get_comments_sync(manga_slug, chapter_id, page, limit, user, db):
     query = (
         db.table("comments")
         .select(

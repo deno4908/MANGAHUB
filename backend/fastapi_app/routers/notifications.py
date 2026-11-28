@@ -2,6 +2,7 @@
 Notifications router.
 """
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -29,7 +30,7 @@ async def get_notifications(
 ):
     """Lấy danh sách thông báo (có phân trang)."""
     offset = (page - 1) * limit
-    result = _execute_safe(
+    result = await asyncio.to_thread(_execute_safe,
         "get_list",
         lambda: (
             db.table("notifications")
@@ -41,7 +42,7 @@ async def get_notifications(
         ),
     )
 
-    unread = _execute_safe(
+    unread = await asyncio.to_thread(_execute_safe,
         "get_unread_count",
         lambda: (
             db.table("notifications")
@@ -71,7 +72,7 @@ async def mark_read(
     db=Depends(get_supabase),
 ):
     """Đánh dấu đã đọc."""
-    updated = _execute_safe(
+    updated = await asyncio.to_thread(_execute_safe,
         "mark_read",
         lambda: db.table("notifications")
         .update({"is_read": True})
@@ -87,7 +88,7 @@ async def mark_read(
 @router.put("/read-all")
 async def mark_all_read(user=Depends(get_current_user), db=Depends(get_supabase)):
     """Đánh dấu tất cả đã đọc."""
-    updated = _execute_safe(
+    updated = await asyncio.to_thread(_execute_safe,
         "mark_all_read",
         lambda: db.table("notifications")
         .update({"is_read": True})
@@ -107,7 +108,7 @@ async def delete_notification(
     db=Depends(get_supabase),
 ):
     """Xóa thông báo."""
-    deleted = _execute_safe(
+    deleted = await asyncio.to_thread(_execute_safe,
         "delete_one",
         lambda: db.table("notifications")
         .delete()
@@ -123,7 +124,7 @@ async def delete_notification(
 @router.delete("/")
 async def clear_notifications(user=Depends(get_current_user), db=Depends(get_supabase)):
     """Xóa toàn bộ thông báo."""
-    deleted = _execute_safe(
+    deleted = await asyncio.to_thread(_execute_safe,
         "delete_all",
         lambda: db.table("notifications").delete().eq("user_id", user["id"]).execute(),
     )

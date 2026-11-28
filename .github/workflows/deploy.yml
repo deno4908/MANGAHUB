@@ -48,9 +48,9 @@ jobs:
       - name: Test QQ source recovery and reading history
         working-directory: backend
         run: python -m pytest tests/test_truyenqq_transport.py tests/test_qq_source_recovery.py tests/test_qq_background_scope.py tests/test_truyenqq_integration.py tests/test_truyenqq_cache_performance.py tests/test_catalog_updates.py tests/test_qq_cover_resilience.py tests/test_auth_read_queue.py tests/test_access_tickets.py tests/test_local_popular.py tests/test_card_metadata.py tests/test_qq_gateway_recovery.py tests/test_library_reads.py tests/test_reading_history_lookup.py tests/test_saved_library_covers.py -q
-      - name: Test stable QQ rating pagination and cached legacy reads
+      - name: Test stable QQ pagination, cached legacy reads and reader responsiveness
         working-directory: backend
-        run: python -m pytest tests/test_qq_rating.py tests/test_vercel_catalog_performance.py tests/test_legacy_qq_routes.py tests/test_mangadex_release_index.py tests/test_mangadex_index_mirror.py -q
+        run: python -m pytest tests/test_reader_background_io.py tests/test_view_tracking_security.py tests/test_qq_rating.py tests/test_vercel_catalog_performance.py tests/test_legacy_qq_routes.py tests/test_mangadex_release_index.py tests/test_mangadex_index_mirror.py -q
       - name: Test source cache and exact legacy title matching
         working-directory: backend/truyenapi
         run: python -m pytest tests/test_live_api.py -q

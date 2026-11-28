@@ -116,14 +116,14 @@ async def add_or_update_history(
 ):
     """Add/update reading history, keeping one row per manga."""
     _ = request
-    enforce_user_action_limit(
+    await asyncio.to_thread(enforce_user_action_limit,
         "history:min",
         user["id"],
         limit=HISTORY_UPDATE_LIMIT_PER_MINUTE,
         window_seconds=60,
         detail="Cập nhật lịch sử đọc quá nhanh",
     )
-    enforce_user_action_limit(
+    await asyncio.to_thread(enforce_user_action_limit,
         "history:10m",
         user["id"],
         limit=HISTORY_UPDATE_LIMIT_PER_10_MINUTES,
