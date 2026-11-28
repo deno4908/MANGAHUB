@@ -4,6 +4,7 @@ FastAPI application — main REST API service.
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exception_handlers import http_exception_handler
@@ -415,7 +416,9 @@ async def enforce_maintenance_mode(request: Request, call_next):
     if path in {"/health", "/api/maintenance", "/api/site-access/logout", "/docs", "/redoc", "/openapi.json"}:
         return await call_next(request)
 
+    maintenance_started = time.perf_counter()
     state = await get_maintenance_state_async()
+    request.state.api_maintenance_ms = (time.perf_counter() - maintenance_started) * 1000
     if not state.get("enabled"):
         return await call_next(request)
 
@@ -450,6 +453,7 @@ async def enforce_api_access_policy(request: Request, call_next):
     if request.method == "OPTIONS" or not request.url.path.startswith("/api/"):
         return await call_next(request)
 
+    access_started = time.perf_counter()
     try:
         path = request.url.path
         if path == "/api/site-access/logout" and request.method == "POST":
@@ -515,6 +519,7 @@ async def enforce_api_access_policy(request: Request, call_next):
             headers={**_api_auth_error_headers(request), **(exc.headers or {})},
         )
 
+    request.state.api_access_ms = (time.perf_counter() - access_started) * 1000
     context = access_policy.source_authorization.set(authorization if user else None)
     from fastapi_app.services.truyenqq_recovery import accept as accept_source_snapshot, response_hints, recovered_source
     hints = {}

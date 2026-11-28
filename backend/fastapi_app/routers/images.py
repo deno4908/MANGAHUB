@@ -958,9 +958,24 @@ async def _fetch_image(url: str, retry_hint: int = 0) -> tuple[bytes | None, str
     return None, last_error, None, None
 
 
+def _log_slow_image(request, key, cache, started, *, lock_ms=0, fetch_ms=0, write_ms=0):
+    access_ms = getattr(request.state, "api_access_ms", 0)
+    maintenance_ms = getattr(request.state, "api_maintenance_ms", 0)
+    endpoint_ms = (time.perf_counter() - started) * 1000
+    if endpoint_ms + access_ms + maintenance_ms < 750:
+        return
+    # Private server log only: no reader identity, source URL, credentials or
+    # origin routing markers. Passive measurements make no upstream requests.
+    logger.warning("Image stage timing key=%s cache=%s access_ms=%.1f maintenance_ms=%.1f "
+                   "endpoint_ms=%.1f lock_ms=%.1f fetch_ms=%.1f write_ms=%.1f",
+                   key[:32], cache, access_ms, maintenance_ms, endpoint_ms, lock_ms, fetch_ms, write_ms)
+
+
 @router.get("/img")
 async def proxy_image(url: str, request: Request, retry: int = 0):
     """Proxy + cache an image from OTruyen CDN with ETag support."""
+    started = time.perf_counter()
+    lock_ms = fetch_ms = write_ms = 0
     validation_error = await _validate_image_url(url)
     if validation_error:
         return Response(status_code=400, content=validation_error)
@@ -973,15 +988,22 @@ async def proxy_image(url: str, request: Request, retry: int = 0):
     # forcing another slow upstream download merely because `retry` is set.
     cached = _cached_image_response(cached_path, request)
     if cached is not None:
+        _log_slow_image(request, key, "HIT", started)
         return cached
 
     lock = _cache_lock_for_key(key)
+    stage_started = time.perf_counter()
     async with lock:
+        lock_ms = (time.perf_counter() - stage_started) * 1000
         cached = _cached_image_response(cached_path, request)
         if cached is not None:
+            _log_slow_image(request, key, "HIT", started, lock_ms=lock_ms)
             return cached
+        stage_started = time.perf_counter()
         data, fetch_info, content_type, transport = await _fetch_image(url, retry_hint=retry)
+        fetch_ms = (time.perf_counter() - stage_started) * 1000
         if data is not None:
+            stage_started = time.perf_counter()
             try:
                 # CDN bytes are ready. Catalog work in the default executor
                 # must not hold the reader's response behind unrelated jobs.
@@ -991,6 +1013,9 @@ async def proxy_image(url: str, request: Request, retry: int = 0):
                 schedule_image_cache_prune()
             except OSError as error:
                 logger.debug("Image cache write unavailable: %s", type(error).__name__)
+            write_ms = (time.perf_counter() - stage_started) * 1000
+    _log_slow_image(request, key, "MISS" if data is not None else "FAIL", started,
+                    lock_ms=lock_ms, fetch_ms=fetch_ms, write_ms=write_ms)
     if data is None:
         stale = _cached_image_response(cached_path, request, cache_status="STALE")
         if stale is not None:
