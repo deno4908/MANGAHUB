@@ -12,6 +12,8 @@ import logging
 import os
 import re
 import time
+from contextvars import ContextVar
+from functools import wraps
 from urllib.parse import parse_qs
 
 from starlette.responses import JSONResponse
@@ -21,6 +23,45 @@ logger = logging.getLogger(__name__)
 MAX_BYTES = 2 * 1024 * 1024
 SOURCE_PAGES = re.compile(r'^/(?:doc-truyen|tim-kiem-nang-cao|truyen-moi-cap-nhat|truyen-tranh-moi|truyen-hoan-thanh|truyen-yeu-thich|truyen-dich-qq|top-ngay|top-tuan|top-thang|the-loai|tac-gia|truyen-tranh)(?:/[a-zA-Z0-9._-]+)*$')
 API_READS = re.compile(r'^/api/manga/(?:homepage|categories|truyenqq-filtered|otruyen-filtered|search|trending|detail/[a-zA-Z0-9-]+|chapter/[a-zA-Z0-9._-]+|(?:list|category)/[a-zA-Z0-9-]+(?:/batch)?|truyenqq/(?:cover/[a-zA-Z0-9-]+|image/[a-zA-Z0-9-]+/[a-zA-Z0-9._-]+/[0-9]+))$')
+response_hints = ContextVar('qq_response_hints', default=None)
+recovered_source = ContextVar('qq_recovered_source', default=None)
+
+
+def failure_hints(error):
+    """Keep only public source-denial hints, never auth denials or error bodies."""
+    headers = (error.headers or {}) if hasattr(error, 'headers') else error if isinstance(error, dict) else {}
+    path = headers.get('X-TruyenQQ-Source-Path', '')
+    if (headers.get('X-TruyenQQ-Error') != 'http-403' or not isinstance(path, str)
+            or len(path) > 2048 or not SOURCE_PAGES.fullmatch(path.split('?', 1)[0])):
+        return {}
+    names = {'X-TruyenQQ-Error', 'X-TruyenQQ-Source-Path', 'X-TruyenQQ-Recovery',
+             'X-TruyenQQ-Transport', 'X-TruyenQQ-Block', 'X-TruyenQQ-Colo'}
+    return {key: value for key, value in headers.items()
+            if key in names and isinstance(value, str) and len(value) <= 2048
+            and '\r' not in value and '\n' not in value}
+
+
+def source_matches(url):
+    value = recovered_source.get()
+    if not value or not isinstance(url, str):
+        return False
+    return url in {value['path'], 'https://truyenqqko.com' + value['path']}
+
+
+def surface_stale_hints(function):
+    @wraps(function)
+    async def wrapped(*args, **kwargs):
+        payload = await function(*args, **kwargs)
+        # This wrapper must sit OUTSIDE a shared-read wrapper: every waiter
+        # has a separate HTTP request context, including cache-only waiters.
+        hints = response_hints.get()
+        data = payload.get('data') if isinstance(payload, dict) else None
+        if hints is not None and isinstance(data, dict):
+            failure = failure_hints(data.get('source_stale'))
+            if failure:
+                hints.update(failure)
+        return payload
+    return wrapped
 
 
 def enabled():
@@ -96,6 +137,10 @@ def accept(snapshot):
         url = live.source_url(data['path'])
         live.html_cache.invalidate(url)
         live.cache.invalidate_matching(lambda key: isinstance(key, tuple) and len(key) > 1 and key[1] == url)
+        if data['path'] == '/doc-truyen':
+            live.cache.invalidate('home')
+            live.cache.invalidate('genres')
+    return data
 
 
 def lookup(request):

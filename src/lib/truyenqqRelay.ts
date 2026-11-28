@@ -7,8 +7,12 @@ type Recovery = { ok: boolean; snapshot?: { html: string; proof: string } };
 type Pending = { promise: Promise<Recovery>; controller: AbortController; readers: number; done: boolean };
 const pending = new Map<string, Pending>();
 const recent = new Map<string, Recovery & { until: number }>();
+const repairs = new Map<string, Promise<void>>();
+let generation = 0;
 
 export function clearQQRecovery() {
+  generation++;
+  repairs.clear();
   recent.clear();
   for (const running of pending.values()) running.controller.abort();
   pending.clear();
@@ -104,7 +108,9 @@ export async function fetchWithTruyenQQRelay(url: string, options: RequestInit, 
   }
   const deadline = Date.now() + timeout;
   const authorization = isSiteAccessRestricted() ? new Headers(options.headers).get('Authorization') : null;
-  let response = await fetchWithTimeout(url, options, timeout);
+  const initial = await fetchWithTimeout(url, options, timeout);
+  const recover = async () => {
+  let response = initial;
   const recovered = new Set<string>();
   for (let attempt = 0; attempt < 2 && response.headers.get('X-TruyenQQ-Error') === 'http-403'; attempt++) {
     const hint = source(response.headers.get('X-TruyenQQ-Source-Path'), response.headers.get('X-TruyenQQ-Search'));
@@ -135,4 +141,25 @@ export async function fetchWithTruyenQQRelay(url: string, options: RequestInit, 
   // source denial needs the browser's relay; speculative warming spends quota
   // and competes with chapter images without improving this response.
   return response;
+  };
+  if (initial.ok && initial.headers.get('X-TruyenQQ-Stale') === '1') {
+    // Valid last-good pages render immediately. Repair only a proven source
+    // failure, in the same bounded recovery budget; never poll or speculate.
+    const key = JSON.stringify([url, authorization, initial.headers.get('X-TruyenQQ-Source-Path')]);
+    if (!repairs.has(key)) {
+      const started = generation;
+      const job = recover().then(async response => {
+        if (response === initial) return;
+        if (started === generation && response.ok && !response.headers.has('X-TruyenQQ-Error')) {
+          window.dispatchEvent(new Event('mangahub:qq-source-recovered'));
+        }
+        await response.body?.cancel();
+      }).catch(() => { /* Keep the already-rendered last-good page. */ }).finally(() => {
+        if (repairs.get(key) === job) repairs.delete(key);
+      });
+      repairs.set(key, job);
+    }
+    return initial;
+  }
+  return recover();
 }

@@ -24,6 +24,57 @@ def test_gateway_diagnostic_contains_only_a_bounded_category(body, kind):
     assert transport._relay_failure_kind(value) is None
 
 
+def test_proven_source_challenge_cools_down_native_relay_without_spending_more_worker_requests(browser, monkeypatch):
+    monkeypatch.setenv('QQ_RECOVERY_SECRET', 'fixture-enabled-source-signing-key')
+    monkeypatch.setenv('TRUYENQQ_PREFER_EDGE', '1')
+    clock = [100.0]
+    monkeypatch.setattr(transport.time, 'monotonic', lambda: clock[0])
+    blocked = SimpleNamespace(status_code=403, content=b'Just a moment challenge-platform',
+        headers=httpx.Headers({'X-TruyenQQ-Relay': '1', 'X-TruyenQQ-Block': 'challenge'}))
+    browser.request.return_value = blocked
+    marker = transport.source_authorization.set('Bearer approved-fixture')
+    client = httpx.Client(transport=transport.TruyenQQTransport(edge_url='https://owned.example/api/truyenqq-edge'))
+    try:
+        assert client.get('https://truyenqqko.com/truyen-tranh/one-123').status_code == 403
+        count = browser.request.call_count
+        assert count == 2  # Initial owned relay plus the existing bounded direct fallback.
+        for slug in ['two-456', 'three-789']:
+            result = client.get('https://truyenqqko.com/truyen-tranh/' + slug)
+            assert result.status_code == 403
+            assert _source_error_headers(httpx.HTTPStatusError('Blocked', request=result.request, response=result))[
+                'X-TruyenQQ-Source-Path'] == '/truyen-tranh/' + slug
+        assert browser.request.call_count == count
+        clock[0] += 301
+        browser.request.return_value = SimpleNamespace(status_code=200, content=b'book_info', headers=httpx.Headers())
+        assert client.get('https://truyenqqko.com/truyen-tranh/two-456').status_code == 200
+        assert browser.request.call_count == count + 1
+    finally:
+        client.close()
+        transport.source_authorization.reset(marker)
+
+
+@pytest.mark.parametrize('enabled,headers', [
+    (True, {'X-Site-Access-Error': 'edge-challenge'}),
+    (True, {'X-Site-Access-Denial': 'whitelist'}),
+    (False, {'X-TruyenQQ-Relay': '1', 'X-TruyenQQ-Block': 'challenge'}),
+])
+def test_gateway_denials_and_unsigned_backends_never_open_source_circuit(browser, monkeypatch, enabled, headers):
+    monkeypatch.setenv('QQ_RECOVERY_SECRET', 'fixture-enabled-source-signing-key' if enabled else '')
+    monkeypatch.setenv('TRUYENQQ_PREFER_EDGE', '1')
+    browser.request.return_value = SimpleNamespace(status_code=403, content=b'Just a moment challenge-platform',
+                                                  headers=httpx.Headers(headers))
+    marker = transport.source_authorization.set('Bearer approved-fixture')
+    client = httpx.Client(transport=transport.TruyenQQTransport(edge_url='https://owned.example/api/truyenqq-edge'))
+    try:
+        client.get('https://truyenqqko.com/truyen-tranh/one-123')
+        count = browser.request.call_count
+        client.get('https://truyenqqko.com/truyen-tranh/two-456')
+        assert browser.request.call_count > count
+    finally:
+        client.close()
+        transport.source_authorization.reset(marker)
+
+
 def test_policy_edge_challenge_is_classified_without_the_challenge_html():
     value = SimpleNamespace(status_code=503, content=b'{"error":"Access check unavailable"}',
                             headers=httpx.Headers({'X-Site-Access-Error': 'edge-challenge'}))

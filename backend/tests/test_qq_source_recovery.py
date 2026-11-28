@@ -71,6 +71,57 @@ def test_signed_handoff_replaces_one_read_retry_and_reuses_source_without_networ
     session.assert_not_called()
 
 
+def test_stale_http_success_exposes_recovery_but_never_turns_into_an_access_grant(monkeypatch, store):
+    monkeypatch.setattr(qq, 'cache', store)
+    monkeypatch.setattr(qq, 'run_live', AsyncMock(side_effect=AssertionError('No source call during cooldown')))
+    hints = {'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/truyen-tranh/stale-123',
+             'X-TruyenQQ-Recovery': '1'}
+    store.values['truyenqq:detail-last-good:stale-123'] = json.dumps({'data': {'item': {
+        'source': 'truyenqq', 'slug': 'stale-123', 'chapters': []}}})
+    store.values['truyenqq:detail-refresh:stale-123:1'] = json.dumps(hints)
+    client = application(monkeypatch)
+    @client.app.get('/api/manga/detail/stale-123')
+    async def read_stale():
+        return await qq.get_manga_detail('stale-123')
+    with client:
+        response = client.get('/api/manga/detail/stale-123', headers={'Authorization': 'Bearer fixture'})
+        assert response.status_code == 200
+        assert response.json()['data']['item']['slug'] == 'stale-123'
+        assert response.headers['X-TruyenQQ-Stale'] == '1'
+        assert response.headers['X-TruyenQQ-Source-Path'] == '/truyen-tranh/stale-123'
+        monkeypatch.setattr(main.access_policy, 'is_allowed', lambda *args, **kwargs: False)
+        assert client.get('/api/manga/detail/stale-123', headers={'Authorization': 'Bearer fixture'}).status_code == 403
+    qq.run_live.assert_not_awaited()
+
+
+def test_each_coalesced_waiter_receives_stale_hints_in_its_own_request_context():
+    import asyncio
+    from fastapi_app.services.request_coalescing import coalesce_reads
+    async def run():
+        called = 0
+        @recovery.surface_stale_hints
+        @coalesce_reads
+        async def shared():
+            nonlocal called
+            called += 1
+            await asyncio.sleep(.01)
+            return {'data': {'items': [], 'source_stale': {
+                'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/doc-truyen'}}}
+        async def reader():
+            hints = {}
+            marker = recovery.response_hints.set(hints)
+            try:
+                await shared()
+                return hints
+            finally:
+                recovery.response_hints.reset(marker)
+        results = await asyncio.gather(*(reader() for _ in range(4)))
+        assert called == 1
+        assert all(value['X-TruyenQQ-Source-Path'] == '/doc-truyen' for value in results)
+        assert recovery.response_hints.get() is None
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('kind', ['changed-body', 'changed-proof', 'expired', 'challenge', 'external-url'])
 def test_untrusted_or_expired_snapshots_cannot_populate_shared_cache(monkeypatch, store, kind):
     value = snapshot()

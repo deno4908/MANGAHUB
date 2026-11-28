@@ -189,3 +189,115 @@ def test_verified_catalog_survives_a_temporary_source_denial_without_another_for
         failure.assert_awaited_once()
         assert qq.CATALOG_LAST_GOOD_SECONDS == 7 * 86400
     asyncio.run(run())
+
+
+def test_stale_success_keeps_source_recovery_hints_for_each_reader(stored, monkeypatch):
+    from fastapi import HTTPException
+    from fastapi_app.services import truyenqq_recovery as recovery
+    hints = {'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/tim-kiem-nang-cao/trang-3?sort=2',
+             'X-TruyenQQ-Recovery': '1', 'Authorization': 'must-not-be-retained'}
+    async def run():
+        first = await qq.get_filtered(page=3, overlay_latest=False)
+        key = next(key for key in stored.values if key.startswith('truyenqq:page-snapshot:'))
+        snapshot = json.loads(stored.values[key])
+        snapshot['fresh_until'] = 0
+        stored.values[key] = json.dumps(snapshot)
+        failed = AsyncMock(side_effect=HTTPException(503, 'Source blocked', headers=hints))
+        monkeypatch.setattr(qq, 'run_live', failed)
+        assert await qq.get_filtered(page=3, overlay_latest=False) == first
+        await asyncio.gather(*list(qq._catalog_jobs.values()), return_exceptions=True)
+        async def read():
+            collected = {}
+            token = recovery.response_hints.set(collected)
+            try:
+                value = await qq.get_filtered(page=3, overlay_latest=False)
+                assert value['data']['items'] == first['data']['items']
+                assert collected['X-TruyenQQ-Source-Path'] == hints['X-TruyenQQ-Source-Path']
+                assert 'Authorization' not in collected
+                return collected
+            finally:
+                recovery.response_hints.reset(token)
+        results = await asyncio.gather(*(read() for _ in range(4)))
+        assert all(value == results[0] and value is not results[0] for value in results[1:])
+        failed.assert_awaited_once()  # Cache-only readers do not call the Worker again.
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('old_failed', [True, False])
+def test_signed_retry_refreshes_stale_catalog_without_joining_old_job_or_rolling_back(stored, monkeypatch, old_failed):
+    from fastapi_app.services import truyenqq_recovery as recovery
+    async def run():
+        raw = source_page()
+        raw['source_url'] = 'https://truyenqqko.com/tim-kiem-nang-cao/trang-3?sort=2'
+        qq.run_live.return_value = raw
+        await qq.get_filtered(page=3, overlay_latest=False)
+        key = next(key for key in stored.values if key.startswith('truyenqq:page-snapshot:'))
+        original = json.loads(stored.values[key])
+        stored.values[key] = json.dumps({**original, 'fresh_until': 0})
+        started, release = asyncio.Event(), asyncio.Event()
+        async def source(*args, **kwargs):
+            if recovery.recovered_source.get():
+                new = json.loads(json.dumps(raw))
+                new['items'][0]['latest_chapter']['number'] = '5'
+                return new
+            started.set()
+            await release.wait()
+            if old_failed:
+                raise RuntimeError('Old refresh finished later')
+            return raw
+        monkeypatch.setattr(qq, 'run_live', AsyncMock(side_effect=source))
+        await qq.get_filtered(page=3, overlay_latest=False)
+        await asyncio.wait_for(started.wait(), .5)
+        old_jobs = list(qq._catalog_jobs.values())
+        token = recovery.recovered_source.set({'path': '/tim-kiem-nang-cao/trang-3?sort=2', 'sha256': 'fixture'})
+        try:
+            current = await asyncio.wait_for(qq.get_filtered(page=3, overlay_latest=False), .5)
+            assert current['data']['items'][0]['chaptersLatest'][0]['chapter_name'] == '5'
+        finally:
+            recovery.recovered_source.reset(token)
+            release.set()
+            await asyncio.gather(*old_jobs, return_exceptions=True)
+        assert (await qq.get_filtered(page=3, overlay_latest=False)) == current
+        assert not json.loads(stored.values[key]).get('source_failure')
+    asyncio.run(run())
+
+
+def test_recovered_detail_bypasses_retry_cooldown_and_preserves_legacy_identity(stored, monkeypatch):
+    from fastapi_app.services import truyenqq_recovery as recovery
+    stale = {'status': 'success', 'data': {'item': {'source': 'truyenqq', 'slug': 'canonical-123',
+             'id': 'canonical-123', 'name': 'Canonical', 'chapters': [], 'chaptersLatest': []}}}
+    hints = {'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/truyen-tranh/canonical-123'}
+    stored.values['truyenqq:detail-last-good:canonical-123'] = json.dumps(stale)
+    stored.values['truyenqq:detail-refresh:canonical-123:0'] = json.dumps(hints)
+    stored.values['catalog:card-metadata:v1:canonical'] = json.dumps({'source': 'truyenqq', 'slug': 'canonical-123'})
+    async def run():
+        collected = {}
+        ctx = recovery.response_hints.set(collected)
+        try:
+            assert (await qq.get_manga_detail('canonical-123'))['data']['item']['chapters'] == []
+            assert collected == hints
+        finally:
+            recovery.response_hints.reset(ctx)
+        comic = {**source_page()['items'][0], 'chapters': [{'number': '5', 'title': 'Chapter 5'}]}
+        monkeypatch.setattr(qq, 'run_live', AsyncMock(return_value=comic))
+        token = recovery.recovered_source.set({'path': '/truyen-tranh/canonical-123', 'sha256': 'fixture'})
+        try:
+            current = await qq.get_manga_detail('canonical')
+            assert current['data']['item']['slug'] == 'canonical'
+            assert current['data']['item']['source_slug'] == 'canonical-123'
+            assert current['data']['item']['chaptersLatest'][0]['chapter_name'] == '5'
+            assert 'source_stale' not in current['data']
+            qq.run_live.assert_awaited_once_with('comic', 'canonical-123')
+        finally:
+            recovery.recovered_source.reset(token)
+    asyncio.run(run())
+
+
+def test_latest_overlay_never_reverts_a_newly_recovered_chapter(stored):
+    async def run():
+        newer = source_page()
+        newer['items'][0]['latest_chapter']['number'] = '5'
+        payload = await asyncio.to_thread(qq._page, newer)
+        latest = await asyncio.to_thread(qq._page, source_page())
+        assert qq._overlay_latest(payload, latest_payload=latest)['data']['items'][0]['chaptersLatest'][0]['chapter_name'] == '5'
+    asyncio.run(run())

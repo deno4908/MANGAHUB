@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from fastapi_app.services import card_metadata, truyenqq_service
 from fastapi_app.services.catalog_visibility import legacy_qq_identifier, published_uploads, remember_matches
 from fastapi_app.services.request_coalescing import coalesce_reads
+from fastapi_app.services.truyenqq_recovery import source_matches, surface_stale_hints
 
 logger = logging.getLogger(__name__)
 SOURCE_WAIT_SECONDS = 30.0
@@ -49,11 +50,15 @@ def _frozen(key, value=None):
     return card_metadata._read(key) or value
 
 
-@coalesce_reads(scope=truyenqq_service._source_read_scope)
+@surface_stale_hints
+@coalesce_reads(scope=truyenqq_service._source_job_scope)
 async def _source_page(genres, status, number, snapshot_key, source_sort="views_desc"):
     key = f"{snapshot_key}:source:{number}"
     previous = await asyncio.to_thread(_frozen, key)
-    if previous is not None:
+    data = previous.get('data') or {} if previous else {}
+    recovered = source_matches(data.get('source_url')) or source_matches(
+        (data.get('source_stale') or {}).get('X-TruyenQQ-Source-Path'))
+    if previous is not None and not recovered:
         await asyncio.to_thread(_remember_source_size, previous, number)
         return previous
     value = await truyenqq_service.get_filtered(genres=list(genres), page=number,
@@ -61,6 +66,11 @@ async def _source_page(genres, status, number, snapshot_key, source_sort="views_
                                                 overlay_latest=False, background_refresh=source_sort != "views_desc",
                                                 refresh_timeout=SOURCE_REFRESH_SECONDS)
     await asyncio.to_thread(_remember_source_size, value, number)
+    if recovered:
+        # Replace only this public source page after a verified handoff; keep
+        # ranking slots and pagination stable for the other pages.
+        await asyncio.to_thread(card_metadata.cache.set, key, json.dumps(value, ensure_ascii=False), ttl=SNAPSHOT_TTL)
+        return value
     return await asyncio.to_thread(_frozen, key, value)
 
 

@@ -214,3 +214,39 @@ it('changing one page cannot cancel a shared source recovery needed by another p
   expect(fetcher.mock.calls.filter(([url]) => url.includes('workers.dev'))).toHaveLength(1);
   expect(fetcher.mock.calls.filter(([, options]) => options.method === 'POST')).toHaveLength(1);
 });
+
+it('renders valid stale pages immediately and shares their bounded background repair', async () => {
+  let finish!: (response: Response) => void;
+  const notify = vi.fn();
+  window.addEventListener('mangahub:qq-source-recovered', notify);
+  const fetcher = vi.fn().mockImplementation(async (url, options) => {
+    if (url.includes('workers.dev')) return new Promise<Response>(resolve => { finish = resolve; });
+    return options.method === 'POST' ? json({ data: { items: [{ slug: 'new-chapter' }] } }) :
+      json({ data: { items: [{ slug: 'last-good' }] } }, 200, {
+        'X-TruyenQQ-Stale': '1', 'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Recovery': '1',
+        'X-TruyenQQ-Source-Path': '/tim-kiem-nang-cao/trang-1?sort=2',
+      });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  try {
+    const responses = await Promise.all([fetchWithTruyenQQRelay(api, {}, 10_000), fetchWithTruyenQQRelay(api, {}, 10_000)]);
+    for (const response of responses) expect((await response.json()).data.items[0].slug).toBe('last-good');
+    expect(notify).not.toHaveBeenCalled();
+    expect(fetcher.mock.calls.filter(([url]) => url.includes('workers.dev'))).toHaveLength(1);
+    finish(new Response('list_grid', { headers: { 'X-TruyenQQ-Proof': 'proof' } }));
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledTimes(1));
+    expect(fetcher.mock.calls.filter(([, options]) => options.method === 'POST')).toHaveLength(1);
+  } finally { window.removeEventListener('mangahub:qq-source-recovered', notify); }
+});
+
+it('keeps the rendered last-good body readable when background source recovery fails', async () => {
+  const fetcher = vi.fn().mockResolvedValueOnce(json({ data: { items: [{ slug: 'last-good' }] } }, 200, {
+    'X-TruyenQQ-Stale': '1', 'X-TruyenQQ-Error': 'http-403',
+    'X-TruyenQQ-Source-Path': '/truyen-moi-cap-nhat/trang-1',
+  })).mockResolvedValueOnce(new Response('blocked', { status: 403 }));
+  vi.stubGlobal('fetch', fetcher);
+  const response = await fetchWithTruyenQQRelay(api, {}, 10_000);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect((await response.json()).data.items[0].slug).toBe('last-good');
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});

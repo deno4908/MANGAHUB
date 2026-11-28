@@ -40,6 +40,7 @@ class TruyenQQTransport(httpx.BaseTransport):
         )).rstrip("/")
         self._edge_until = 0.0
         self._direct_denied_until = {}
+        self._source_denied = {}
         # Cold Vercel instances otherwise repeat a slow direct request before
         # discovering that their datacenter must use the existing owned relay.
         self._prefer_edge = os.getenv("TRUYENQQ_PREFER_EDGE", os.getenv("VERCEL", "0")).lower() in {"1", "true", "yes"}
@@ -103,6 +104,18 @@ class TruyenQQTransport(httpx.BaseTransport):
 
         try:
             relay = relay_allowed and (self._prefer_edge or time.monotonic() < self._edge_until)
+            from fastapi_app.services.truyenqq_recovery import enabled as recovery_enabled
+            kind = (request.method, request.url.path.split('/')[1])
+            previous = self._source_denied.get(kind)
+            if (relay and source_authorization.get() and recovery_enabled() and previous
+                    and previous[0] > time.monotonic()):
+                # Only a proven QQ-origin challenge opens this short circuit.
+                # Signed local HTML was checked first. Keep the public path
+                # hint for the browser instead of spending another failed
+                # Worker request from the same blocked datacenter.
+                return httpx.Response(403, content=b'', request=request,
+                    headers={'X-TruyenQQ-Relay': '1', 'X-TruyenQQ-Block': previous[1]},
+                    extensions={'truyenqq_transport': 'edge-source', 'truyenqq_gateway': None})
             result = fetch(relay=relay)
             if result.status_code == 403 and relay_allowed and not relay:
                 self._edge_until = time.monotonic() + 300
@@ -129,6 +142,11 @@ class TruyenQQTransport(httpx.BaseTransport):
                     relay = False
                 # Keep the original source error if both routes fail, including
                 # the hints a browser can use to warm the shared source cache.
+            if (relay and source_authorization.get() and recovery_enabled() and result.status_code == 403
+                    and result.headers.get('x-truyenqq-relay') == '1'
+                    and result.headers.get('x-truyenqq-block') in {'challenge', 'cloudflare-block'}):
+                self._source_denied[(request.method, request.url.path.split('/')[1])] = (
+                    time.monotonic() + 300, result.headers['x-truyenqq-block'])
         except Timeout as error:
             raise httpx.ReadTimeout("TruyenQQ browser request timed out", request=request) from error
         except RequestException as error:

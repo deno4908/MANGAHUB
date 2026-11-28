@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from functools import partial
 from urllib.parse import quote, urlsplit
+from uuid import uuid4
 
 import httpx
 from fastapi import HTTPException
@@ -31,6 +32,7 @@ from truyenapi.truyenapi.updates import update_interval
 from fastapi_app.services.cache_service import cache
 from fastapi_app.services.request_coalescing import coalesce_reads
 from fastapi_app.services.truyenqq_transport import TruyenQQTransport
+from fastapi_app.services.truyenqq_recovery import failure_hints, recovered_source, source_matches, surface_stale_hints
 from site_access import source_authorization
 
 
@@ -39,6 +41,13 @@ def _source_read_scope():
     # call must never become the in-flight result for an approved reader.
     # Approved readers can still share public QQ data without retaining tokens.
     return bool(source_authorization.get())
+
+
+def _source_job_scope():
+    value = recovered_source.get()
+    # A signed retry must not join the ordinary read whose source just failed.
+    # Public successful cache entries remain shared across all readers.
+    return _source_read_scope(), (value['path'], value['sha256']) if value else None
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +75,7 @@ def get_live() -> LiveService:
     with _lock:
         if _live is None:
             settings = Settings()
-            _live = LiveService(settings, SourceClient(settings, transport=TruyenQQTransport()), read_scope=_source_read_scope)
+            _live = LiveService(settings, SourceClient(settings, transport=TruyenQQTransport()), read_scope=_source_job_scope)
         return _live
 
 
@@ -266,7 +275,8 @@ def _remember(key: str, payload: dict, ttl=60) -> dict:
     return payload
 
 
-@coalesce_reads(scope=_source_read_scope)
+@surface_stale_hints
+@coalesce_reads(scope=_source_job_scope)
 async def get_home():
     payload = await _catalog_page("home")
     return await asyncio.to_thread(_remember, "truyenqq:home", payload)
@@ -330,6 +340,14 @@ def _overlay_latest(payload, *, page=1, genres=(), status=None, latest_order=Fal
         chapter_ids = lambda row: [(chapter.get("chapter_api_data"), chapter.get("chapter_name"))
                                    for chapter in row.get("chaptersLatest", [])]
         if updated and chapter_ids(updated) != chapter_ids(item):
+            try:
+                old = [Decimal(str(ch.get('chapter_name', '')).replace(',', '.')) for ch in item.get('chaptersLatest', [])]
+                new = [Decimal(str(ch.get('chapter_name', '')).replace(',', '.')) for ch in updated.get('chaptersLatest', [])]
+                if old and (not new or not all(n.is_finite() for n in old + new) or max(new) < max(old)):
+                    continue  # An older latest cache cannot undo a freshly recovered chapter.
+            except InvalidOperation:
+                if item.get('chaptersLatest'):
+                    continue
             for field in ("chaptersLatest", "updatedAt", "source_updated_at"):
                 if field in updated:
                     item[field] = updated[field]
@@ -358,6 +376,11 @@ async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=
         values = cache.get_many([key, 'truyenqq:list:truyen-moi:1'])
         return _decode_cached(values.get(key)), _decode_cached(values.get('truyenqq:list:truyen-moi:1'))
     snapshot, latest = await asyncio.to_thread(read)
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get('payload'), dict):
+        snapshot = None
+    recovered = (isinstance(snapshot, dict) and
+        (source_matches((snapshot.get('payload', {}).get('data') or {}).get('source_url')) or
+         source_matches((snapshot.get('source_failure') or {}).get('X-TruyenQQ-Source-Path'))))
     async def finish(payload, *, cold=False):
         if latest_overlay is None:
             return payload
@@ -365,14 +388,12 @@ async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=
         # in flight; the batched pre-read is sufficient only on cached pages.
         current = await asyncio.to_thread(_json_cached, 'truyenqq:list:truyen-moi:1') if cold else latest
         return await asyncio.to_thread(_overlay_latest, payload, latest_payload=current or {}, **latest_overlay)
-    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("payload"), dict):
-        snapshot = None
-    if snapshot is not None and not background_refresh:
+    if snapshot is not None and not background_refresh and not recovered:
         # Interactive ranking reads can reuse this 30-minute source snapshot.
         # Do not attach an unrelated stale-page refresh to their Vercel invocation.
-        return await finish(snapshot["payload"])
-    if snapshot is None or snapshot.get("fresh_until", 0) < time.time():
-        task_key = (asyncio.get_running_loop(), key, _source_read_scope())
+        return await finish(_stale_catalog_payload(snapshot))
+    if recovered or snapshot is None or snapshot.get("fresh_until", 0) < time.time():
+        task_key = (asyncio.get_running_loop(), key, _source_job_scope())
         task = _catalog_jobs.get(task_key)
         if task is None:
             async def refresh():
@@ -387,7 +408,16 @@ async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=
                         raw = {"items": list(seen.values()), "fetched_at": raw.get("fetched_at"),
                                "source_url": raw.get("source_url")}
                     value = await asyncio.to_thread(_page, raw)
-                    await asyncio.to_thread(cache.set, key, json.dumps({"payload": value, "fresh_until": time.time() + 45}), ttl=CATALOG_LAST_GOOD_SECONDS)
+                    def save():
+                        current = _json_cached(key)
+                        generation = snapshot.get('generation') if snapshot else None
+                        if (not recovered and isinstance(current, dict) and
+                                current.get('generation') != generation):
+                            return current['payload']
+                        cache.set(key, json.dumps({'payload': value, 'fresh_until': time.time() + 45,
+                            'generation': uuid4().hex}), ttl=CATALOG_LAST_GOOD_SECONDS)
+                        return value
+                    value = await asyncio.to_thread(save)
                     latest_root = (method == 'collection' and args == ('latest', 1) or
                         method == 'discover' and kwargs.get('page', 1) == 1 and
                         kwargs.get('sort', 'updated_desc') == 'updated_desc' and
@@ -402,9 +432,15 @@ async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=
                         except Exception:
                             logger.warning('QQ revision publication unavailable after a successful source read')
                     return value
-                except Exception:
+                except Exception as error:
                     if snapshot:
-                        await asyncio.to_thread(cache.set, key, json.dumps({**snapshot, "fresh_until": time.time() + 30}), ttl=CATALOG_LAST_GOOD_SECONDS)
+                        def retain():
+                            # An older failed refresh cannot roll back a
+                            # verified handoff that finished in the meantime.
+                            if _json_cached(key) == snapshot:
+                                cache.set(key, json.dumps({**snapshot, 'fresh_until': time.time() + 30,
+                                    'source_failure': failure_hints(error)}), ttl=CATALOG_LAST_GOOD_SECONDS)
+                        await asyncio.to_thread(retain)
                     raise
             task = create_task(refresh())
             _catalog_jobs[task_key] = task
@@ -413,25 +449,34 @@ async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=
                 if not done.cancelled():
                     done.exception()
             task.add_done_callback(finished)
-        if snapshot is None:
+        if recovered or snapshot is None:
             read = asyncio.shield(task)
             # An existing refresh may belong to an unrelated, unbounded latest
             # request. Bound this reader without cancelling that shared work.
             payload = deepcopy(await asyncio.wait_for(read, refresh_timeout) if refresh_timeout else await read)
             return await finish(payload, cold=True)
-    return await finish(snapshot["payload"])
+    return await finish(_stale_catalog_payload(snapshot))
 
 
+def _stale_catalog_payload(snapshot):
+    payload = snapshot['payload']
+    hints = failure_hints(snapshot.get('source_failure'))
+    if hints:
+        return {**payload, 'data': {**payload['data'], 'source_stale': hints}}
+    return payload
+
+
+@surface_stale_hints
 async def get_list(list_type="truyen-moi", page=1):
     if list_type == "sap-ra-mat":
         return _page({"items": [], "page": page})
     revision, shared = await asyncio.to_thread(_read_list_cache, list_type, page)
-    if shared is not None:
+    if shared is not None and not recovered_source.get():
         return shared
     return await _load_list_page(list_type, page, revision)
 
 
-@coalesce_reads(scope=_source_read_scope)
+@coalesce_reads(scope=_source_job_scope)
 async def _load_list_page(list_type, page, revision):
     # Revision is part of the shared-read identity, so a new chapter event
     # cannot join an older in-flight request for the same page.
@@ -449,7 +494,7 @@ def invalidate_live_catalog(slugs, preserve_latest=False):
     _live.html_cache.invalidate_matching(lambda url: url in urls)
 
 
-@coalesce_reads(scope=_source_read_scope)
+@coalesce_reads(scope=_source_job_scope)
 async def _load_categories():
     payload = {"status": "success", "data": {"items": [_genre(g) for g in await run_live("genres")]}}
     if not _valid_categories(payload):
@@ -468,8 +513,10 @@ def _valid_categories(value):
         isinstance(item, dict) and item.get('slug') and item.get('name') for item in items)
 
 
-@coalesce_reads(scope=_source_read_scope)
+@coalesce_reads(scope=_source_job_scope)
 async def get_categories():
+    if source_matches('/doc-truyen'):
+        return await _load_categories()
     fresh = await asyncio.to_thread(_json_cached, 'truyenqq:genres:v1')
     if _valid_categories(fresh):
         return fresh
@@ -537,7 +584,7 @@ def _cached_cover_source(identifier):
     return None, canonical
 
 
-@coalesce_reads(scope=_source_read_scope)
+@coalesce_reads(scope=_source_job_scope)
 async def get_cover_info(identifier):
     # Catalog work can occupy the default/thread adapter pool for seconds.
     # A known image reference must not wait behind a new chapter/catalog crawl.
@@ -559,12 +606,14 @@ async def get_total_count():
     return (await run_live("catalog"))["total"]
 
 
+@surface_stale_hints
 async def get_category_manga(slug, page=1):
     value = await _catalog_page("genre_comics", slug, page,
         latest_overlay={'page': page, 'genres': [slug], 'latest_order': True})
     return await asyncio.to_thread(_remember, f"truyenqq:category:{slug}:{page}", value)
 
 
+@surface_stale_hints
 async def get_filtered(*, genres=(), page=1, sort="updated_desc", status=None, overlay_latest=True,
                        background_refresh=True, refresh_timeout=None):
     value = await _catalog_page("discover", page=page, genres=genres, sort=sort, status=status,
@@ -642,7 +691,7 @@ def _overlay_detail_latest(payload, latest):
     return payload
 
 
-@coalesce_reads(scope=_source_read_scope)
+@coalesce_reads(scope=_source_job_scope)
 async def _load_manga_detail(slug):
     try:
         identifier = await asyncio.to_thread(_cached_detail_identifier, slug)
@@ -662,7 +711,8 @@ async def _load_manga_detail(slug):
         raise
 
 
-@coalesce_reads(scope=_source_read_scope)
+@surface_stale_hints
+@coalesce_reads(scope=_source_job_scope)
 async def get_manga_detail(slug):
     fresh_key = f'truyenqq:detail:{slug}'
     stale_key = f'truyenqq:detail-last-good:{slug}'
@@ -673,7 +723,11 @@ async def get_manga_detail(slug):
         keys += [f'truyenqq:cover-hint:{slug}', f'catalog:card-metadata:v1:{slug}']
     values = await asyncio.to_thread(cache.get_many, keys)
     cached, stale = _decode_cached(values.get(fresh_key)), _decode_cached(values.get(stale_key))
-    if _valid_detail(cached):
+    identifier = _cached_detail_identifier(slug, values) if legacy else slug
+    if source_matches('/truyen-tranh/' + identifier):
+        payload = await _load_manga_detail(identifier)
+        await asyncio.to_thread(cache.delete, retry_key)
+    elif _valid_detail(cached):
         payload = deepcopy(cached)
         if not _valid_detail(stale):
             await asyncio.to_thread(cache.set, stale_key, json.dumps(cached, ensure_ascii=False), ttl=DETAIL_LAST_GOOD_SECONDS)
@@ -685,16 +739,21 @@ async def get_manga_detail(slug):
             async def refresh():
                 try:
                     await _load_manga_detail(slug)
-                except Exception:
+                except Exception as error:
+                    hints = failure_hints(error)
+                    if hints:
+                        await asyncio.to_thread(cache.set, retry_key, json.dumps(hints), ttl=30)
                     logger.debug('Retaining last valid QQ detail during source outage')
                 finally:
                     _catalog_jobs.pop(job_key, None)
             _catalog_jobs[job_key] = create_task(refresh())
+        hints = failure_hints(_decode_cached(values.get(retry_key)))
+        if hints:
+            payload['data']['source_stale'] = hints
     else:
         # An old OTruyen title and its verified QQ slug refer to one source
         # detail. Share its existing cache/in-flight read instead of resolving
         # and downloading the same comic separately for every saved alias.
-        identifier = _cached_detail_identifier(slug, values) if legacy else slug
         payload = await get_manga_detail(identifier) if identifier != slug else await _load_manga_detail(slug)
     payload = _overlay_detail_latest(payload, _decode_cached(values.get('truyenqq:list:truyen-moi:1')))
     item = payload["data"]["item"]
@@ -707,7 +766,7 @@ async def get_manga_detail(slug):
     return payload
 
 
-@coalesce_reads(scope=_source_read_scope)
+@coalesce_reads(scope=_source_job_scope)
 async def search_manga(keyword, page=1):
     # The source AJAX search is a single limited result set, without fake pages.
     if page > 1:
@@ -734,7 +793,7 @@ async def _load_chapter_manifest(slug, number):
     return manifest
 
 
-@coalesce_reads(scope=_source_read_scope)
+@coalesce_reads(scope=_source_job_scope)
 async def get_chapter_manifest(slug, number):
     """Keep a reading session alive when the fresh source cache expires.
 

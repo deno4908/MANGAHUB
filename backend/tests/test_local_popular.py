@@ -31,6 +31,32 @@ class EmptyDB:
         return lambda *args, **kwargs: self
 
 
+def test_signed_source_retry_replaces_only_its_matching_frozen_page(monkeypatch):
+    from fastapi_app.services import truyenqq_recovery as recovery
+    from test_catalog_updates import Cache
+    import json
+    store = Cache()
+    monkeypatch.setattr(card_metadata, 'cache', store)
+    path = '/tim-kiem-nang-cao/trang-1?sort=2'
+    old = {'data': {'source_url': 'https://truyenqqko.com' + path, 'items': [{'slug': 'old-1'}]}}
+    new = {'data': {'source_url': 'https://truyenqqko.com' + path, 'items': [{'slug': 'new-2'}]}}
+    values = {'fixture:source:1': old, 'fixture:source:2': {'data': {
+        'source_url': 'https://truyenqqko.com/tim-kiem-nang-cao/trang-2?sort=2', 'items': [{'slug': 'unrelated-3'}]}}}
+    monkeypatch.setattr(local_popular, '_frozen', lambda key, value=None: values.get(key, value))
+    source = AsyncMock(return_value=new)
+    monkeypatch.setattr(local_popular.truyenqq_service, 'get_filtered', source)
+    async def run():
+        ctx = recovery.recovered_source.set({'path': path, 'sha256': 'fixture'})
+        try:
+            assert await local_popular._source_page((), '', 1, 'fixture', 'updated_desc') == new
+            assert json.loads(store.values['fixture:source:1']) == new
+            assert await local_popular._source_page((), '', 2, 'fixture', 'updated_desc') == values['fixture:source:2']
+            source.assert_awaited_once()
+        finally:
+            recovery.recovered_source.reset(ctx)
+    asyncio.run(run())
+
+
 def test_qq_source_page_starts_while_uncached_cards_are_still_being_resolved(monkeypatch):
     monkeypatch.setattr(manga, '_fetch_local_views_lookup', lambda db: {'rated-1': 10})
     monkeypatch.setattr(local_popular, '_cached_labels', lambda ids: {})

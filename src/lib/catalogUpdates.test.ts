@@ -9,6 +9,25 @@ const event: CatalogUpdate = { source: 'truyenqq', revision: 'new', changes: [
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('live catalog updates', () => {
+  it('refreshes QQ after a completed source repair without adding another version probe', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', class { addEventListener() {} close() {} });
+    const fetcher = vi.fn(async () => ({ ok: true, json: async () => ({ sources: {} }) }));
+    vi.stubGlobal('fetch', fetcher);
+    const client = new QueryClient();
+    const qq = ['manga', 'otruyen-filtered', 'latest'];
+    const mdx = ['manga', 'mangadex', 'latest'];
+    const account = ['history'];
+    for (const key of [qq, mdx, account]) client.setQueryData(key, 'old');
+    const stop = watchCatalogUpdates(client);
+    window.dispatchEvent(new Event('mangahub:qq-source-recovered'));
+    await vi.advanceTimersByTimeAsync(250);
+    expect(client.getQueryState(qq)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(mdx)?.isInvalidated).toBe(false);
+    expect(client.getQueryState(account)?.isInvalidated).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(1); // Only the existing startup check.
+    stop(); client.clear();
+  });
   it('refreshes the synchronized homepage for MangaDex changes without invalidating QQ-only lists', async () => {
     const client = new QueryClient();
     const home = ['manga', 'homepage', 'synchronized-v1', 120, false];

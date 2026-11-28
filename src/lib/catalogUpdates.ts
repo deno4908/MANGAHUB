@@ -114,13 +114,21 @@ export function watchCatalogUpdates(client: QueryClient) {
     } else poll = setInterval(() => void checkVersions(), 8000);
   };
   const visibility = () => document.hidden ? close() : open();
+  const recovered = () => {
+    // Reuse the existing debounced refresh, with no new interval or probe.
+    // The source HTML is already verified/stored before this browser event.
+    revisions.set('truyenqq', revisions.get('truyenqq') || 'before-recovery');
+    receive({ source: 'truyenqq', revision: `recovered-${Date.now()}`, snapshot: true, changes: [] });
+  };
   document.addEventListener('visibilitychange', visibility);
   window.addEventListener('online', open);
+  window.addEventListener('mangahub:qq-source-recovered', recovered);
   open();
   return () => {
     stopped = true; close();
     if (debounce) clearTimeout(debounce);
     document.removeEventListener('visibilitychange', visibility);
     window.removeEventListener('online', open);
+    window.removeEventListener('mangahub:qq-source-recovered', recovered);
   };
 }

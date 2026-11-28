@@ -401,7 +401,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-TruyenQQ-Error", "X-TruyenQQ-Source-Path", "X-TruyenQQ-Search", "X-TruyenQQ-Recovery"],
+    expose_headers=["X-TruyenQQ-Error", "X-TruyenQQ-Source-Path", "X-TruyenQQ-Search", "X-TruyenQQ-Recovery", "X-TruyenQQ-Stale"],
 )
 
 
@@ -515,17 +515,26 @@ async def enforce_api_access_policy(request: Request, call_next):
         )
 
     context = access_policy.source_authorization.set(authorization if user else None)
+    from fastapi_app.services.truyenqq_recovery import accept as accept_source_snapshot, response_hints, recovered_source
+    hints = {}
+    hints_context = response_hints.set(hints)
+    source_context = recovered_source.set(None)
     try:
         snapshot = getattr(request.state, 'qq_source_snapshot', None)
         if snapshot is not None:
-            from fastapi_app.services.truyenqq_recovery import accept as accept_source_snapshot
             try:
-                await asyncio.to_thread(accept_source_snapshot, snapshot)
+                recovered_source.set(await asyncio.to_thread(accept_source_snapshot, snapshot))
             except ValueError:
                 return JSONResponse(status_code=400, content={'detail': 'Source recovery expired'},
                                     headers=_api_auth_error_headers(request))
         response = await call_next(request)
+        if 'X-TruyenQQ-Error' not in response.headers:
+            response.headers.update(hints)
+            if hints and response.status_code == 200:
+                response.headers['X-TruyenQQ-Stale'] = '1'
     finally:
+        recovered_source.reset(source_context)
+        response_hints.reset(hints_context)
         access_policy.source_authorization.reset(context)
     # A shared CDN cache must never bypass a later whitelist decision.
     response.headers["Vercel-CDN-Cache-Control"] = "no-store"
