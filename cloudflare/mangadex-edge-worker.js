@@ -3,40 +3,10 @@ const QQ_PREFIX = "/api/truyenqq-edge";
 const QQ_SOURCE = "https://truyenqqko.com";
 const SITE_ACCESS_URL = "https://api.mangahub.art/api/site-access";
 
-const directAccessChecks = new Map();
-const boundAccessChecks = new WeakMap();
-const sourceReads = new Map();
-
-// Share only work still running in this isolate, never completed policy
-// decisions. Resolve to plain data: Workers cannot share response streams
-// between request contexts. Keep the owner's work alive if it disconnects.
-function pendingRead(reads, key, limit, load, ctx) {
-  if (reads.has(key)) return reads.get(key);
-  if (reads.size >= limit) return load();
-  const job = Promise.resolve().then(load).finally(() => reads.delete(key));
-  reads.set(key, job);
-  ctx?.waitUntil(job.then(() => undefined, () => undefined));
-  return job;
-}
-
-async function checkSiteAccess(request, env, ctx) {
-  let checks = directAccessChecks;
-  if (env?.ACCESS_ROUTER) {
-    checks = boundAccessChecks.get(env.ACCESS_ROUTER);
-    if (!checks) boundAccessChecks.set(env.ACCESS_ROUTER, checks = new Map());
-  }
-  const authorization = request.headers.get('Authorization');
-  const key = JSON.stringify([new URL(request.url).origin, authorization,
-    request.headers.get('CF-Connecting-IP'), request.cf?.country, request.cf?.colo]);
-  const decision = await pendingRead(checks, key, 64,
-    () => readSiteAccess(authorization, env), ctx);
-  return decision ? json(decision.payload, decision.status, decision.headers) : null;
-}
-
-async function readSiteAccess(authorization, env) {
-  const deny = (payload, status, headers) => ({ payload, status, headers });
+async function checkSiteAccess(request, env) {
   let failure = 'network';
   try {
+    const authorization = request.headers.get('Authorization');
     const accessOptions = {
       headers: { Accept: 'application/json', 'User-Agent': 'MangaHub-Access-Relay/1.0', ...(authorization ? { Authorization: authorization } : {}) },
       redirect: 'manual', signal: AbortSignal.timeout(6000),
@@ -54,7 +24,7 @@ async function readSiteAccess(authorization, env) {
       const denied = await response.json().catch(() => null);
       const reason = ({ COUNTRY_NOT_SUPPORTED: 'country', ACCESS_TICKET_REVOKED: 'ticket',
         WHITELIST_REQUIRED: 'whitelist' })[denied?.code] || 'authentication';
-      return deny({ code: 'WHITELIST_REQUIRED', detail: 'Bạn không nằm trong whitelist của website.' }, 403, {
+      return json({ code: 'WHITELIST_REQUIRED', detail: 'Bạn không nằm trong whitelist của website.' }, 403, {
         'Cache-Control': 'no-store', 'X-Site-Access-Error': 'http-' + response.status,
         'X-Site-Access-Denial': reason,
       });
@@ -65,10 +35,10 @@ async function readSiteAccess(authorization, env) {
     const policy = await response.json();
     failure = 'invalid-policy';
     if (typeof policy.enabled !== 'boolean' || typeof policy.allowed !== 'boolean') throw new Error('Invalid access policy');
-    if (!policy.allowed) return deny({ code: 'WHITELIST_REQUIRED', detail: policy.message }, 403, { 'Cache-Control': 'no-store', 'X-Site-Access-Error': policy.authenticated ? 'policy-authenticated' : 'policy-anonymous' });
+    if (!policy.allowed) return json({ code: 'WHITELIST_REQUIRED', detail: policy.message }, 403, { 'Cache-Control': 'no-store', 'X-Site-Access-Error': policy.authenticated ? 'policy-authenticated' : 'policy-anonymous' });
     return null;
   } catch {
-    return deny({ error: 'Không thể kiểm tra quyền truy cập.' }, 503, { 'Cache-Control': 'no-store', 'X-Site-Access-Error': failure });
+    return json({ error: 'Không thể kiểm tra quyền truy cập.' }, 503, { 'Cache-Control': 'no-store', 'X-Site-Access-Error': failure });
   }
 }
 const QQ_PAGES = /^\/(?:doc-truyen|tim-kiem-nang-cao|truyen-moi-cap-nhat|truyen-tranh-moi|truyen-hoan-thanh|truyen-yeu-thich|truyen-dich-qq|top-ngay|top-tuan|top-thang|the-loai|tac-gia|truyen-tranh)(?:\/[a-zA-Z0-9._-]+)*$/;
@@ -119,7 +89,7 @@ export async function qqSourceProof(path, keyword, observed, html, secret, now =
   return encode(raw) + '.' + encode(signature);
 }
 
-async function qqSource(request, url, env, ctx) {
+async function qqSource(request, url, env) {
   const path = url.pathname.slice(QQ_PREFIX.length);
   const search = path === "/frontend/search/search";
   const listing = QQ_PAGES.test(path) || /^\/sitemap(?:-[a-zA-Z0-9-]+)?\.xml$/.test(path);
@@ -187,29 +157,26 @@ async function qqSource(request, url, env, ctx) {
   if (cached && !nearExpiry) return serve(cached, true);
 
   try {
-    // Each caller has passed its own access check before joining a public
-    // source read. Keep different query strings and search bodies separate.
-    const key = JSON.stringify([cacheKey.url, url.search, body]);
-    const result = await pendingRead(sourceReads, key, 16, async () => {
-      const upstream = await fetchQQOrigin(path, url.search, body);
-      const headers = new Headers(upstream.headers);
-      headers.set("Cache-Control", `public, max-age=${qqFreshSeconds(path)}`);
-      headers.set("X-TruyenQQ-Relay", "1");
-      headers.set("X-TruyenQQ-Colo", request.cf?.colo || "-");
-      headers.set('X-TruyenQQ-Observed', String(Math.floor(Date.now() / 1000)));
-      for (const name of ['Set-Cookie', 'Expires', 'Pragma', 'Content-Encoding', 'Content-Length']) headers.delete(name);
-      const valid = search ? /search_info|no_result/.test(upstream.body)
-        : /list_grid|book_info|chapter_content|<sitemapindex|<urlset/.test(upstream.body);
-      // Never preserve challenges, errors or source cookies. One cache write
-      // per fill; wait for it before releasing the in-flight entry.
-      if (cache && upstream.status === 200 && valid) {
-        await cache.put(cacheKey, new Response(upstream.body, { status: upstream.status, headers }));
-      }
-      return { status: upstream.status, headers: [...headers], body: upstream.body };
-    }, ctx);
-    const headers = new Headers(result.headers);
-    headers.set('X-TruyenQQ-Colo', request.cf?.colo || '-');
-    return serve(new Response(result.body, { status: result.status, headers }), false);
+    const result = await fetchQQOrigin(path, url.search, body);
+    const upstream = new Response(result.body, { status: result.status, headers: result.headers });
+    const headers = new Headers(upstream.headers);
+    headers.set("Cache-Control", `public, max-age=${qqFreshSeconds(path)}`);
+    headers.set("X-TruyenQQ-Relay", "1");
+    headers.set("X-TruyenQQ-Colo", request.cf?.colo || "-");
+    headers.set('X-TruyenQQ-Observed', String(Math.floor(Date.now() / 1000)));
+    headers.delete("Set-Cookie");
+    headers.delete("Expires");
+    headers.delete("Pragma");
+    headers.delete("Content-Encoding");
+    headers.delete("Content-Length");
+    const html = await upstream.text();
+    const value = new Response(html, { status: upstream.status, headers });
+    const valid = search ? /search_info|no_result/.test(html)
+      : /list_grid|book_info|chapter_content|<sitemapindex|<urlset/.test(html);
+    // A browser and the backend can share valid public source pages. Never
+    // preserve a challenge/error page, an authenticated response, or cookies.
+    if (cache && upstream.status === 200 && valid) await cache.put(cacheKey, value.clone());
+    return serve(value, false);
   } catch {
     return json({ error: "Source unavailable" }, 502, { "Cache-Control": "no-store" });
   }
@@ -229,13 +196,13 @@ function json(payload, status = 200, extraHeaders = {}) {
 }
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method !== 'OPTIONS' && (url.pathname.startsWith(QQ_PREFIX + '/') || url.pathname.startsWith('/api/mangadex-edge/chapter/'))) {
-      const denied = await checkSiteAccess(request, env, ctx);
+      const denied = await checkSiteAccess(request, env);
       if (denied) return denied;
     }
-    if (url.pathname.startsWith(QQ_PREFIX + "/")) return qqSource(request, url, env, ctx);
+    if (url.pathname.startsWith(QQ_PREFIX + "/")) return qqSource(request, url, env);
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
