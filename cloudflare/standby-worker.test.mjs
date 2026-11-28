@@ -575,6 +575,68 @@ test('an ordinary application 402 passes through without a standby retry',async(
   assert.equal(f.calls.length,1);
 });
 
+test('cold standby reads, preflights and writes do not wait for the shared health file',async()=>{
+  const calls=[],jobs=[];
+  let release,healthReads=0;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const worker=createStandbyWorker(async(input,options={})=>{
+    const r=typeof input==='string'?new Request(input,options):input,u=new URL(r.url);
+    if(u.pathname==='/internal/router-health'){
+      healthReads++;await gate;
+      return Response.json({checkedAt:900,primary:Object.fromEntries(
+        ['mangahub.art','api.mangahub.art','auth.mangahub.art'].map(h=>[h,{ok:false}])),backup:{ok:true,capacity:true}});
+    }
+    calls.push(r);
+    assert.equal(u.hostname,'standby.example');
+    assert.equal(r.headers.get('Origin'),'https://mangahub.art');
+    assert.equal(r.headers.get('Authorization'),'Bearer fixture');
+    assert.equal(r.headers.get('X-MangaHub-CSRF'),'1');
+    if(r.method==='POST')assert.equal(await r.text(),'one-write');
+    return new Response(r.method,{headers:{'Access-Control-Allow-Origin':'https://mangahub.art',
+      'Access-Control-Allow-Credentials':'true'}});
+  },()=>1000);
+  const shared={...env,DAILY_HEALTH_SHARED:'true'},ctx={waitUntil:p=>jobs.push(p)};
+  let timer;
+  try{
+    const responses=await Promise.race([
+      Promise.all(['GET','OPTIONS','POST'].map(method=>worker.fetch(request(
+        method==='GET'?'api.mangahub.art':'auth.mangahub.art',
+        method==='GET'?'/api/manga/detail/fixture-123':'/auth/refresh',{
+          method,...(method==='POST'?{body:'one-write'}:{}),headers:{
+            Origin:'https://standby.mangahub.art',Authorization:'Bearer fixture','X-MangaHub-CSRF':'1',
+          }}),shared,ctx))),
+      new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Reader waited for saved health')),250);}),
+    ]);
+    assert.equal(healthReads,1,'concurrent requests share the existing background metadata read');
+    assert.equal(calls.length,3);
+    assert.deepEqual(await Promise.all(responses.map(r=>r.text())),['GET','OPTIONS','POST']);
+    assert.ok(responses.every(r=>r.headers.get('Access-Control-Allow-Origin')==='https://standby.mangahub.art'));
+  }finally{clearTimeout(timer);release();await Promise.all(jobs);}
+});
+
+test('a cold standby QQ source error preserves recovery hints without trying Vercel',async()=>{
+  const calls=[],jobs=[];let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const worker=createStandbyWorker(async(input,options={})=>{
+    const r=typeof input==='string'?new Request(input,options):input,u=new URL(r.url);
+    if(u.pathname==='/internal/router-health'){await gate;throw new Error('metadata unavailable');}
+    calls.push(r);assert.equal(u.hostname,'standby.example');
+    return new Response('source blocked',{status:503,headers:{'X-TruyenQQ-Error':'http-403',
+      'X-TruyenQQ-Recovery':'1','X-TruyenQQ-Source-Path':'/truyen-tranh/fixture-123'}});
+  },()=>1000);
+  let timer;
+  try{
+    const r=await Promise.race([
+      worker.fetch(request(undefined,'/api/manga/detail/fixture-123',{headers:{Origin:'https://standby.mangahub.art'}}),
+        {...env,DAILY_HEALTH_SHARED:'true'},{waitUntil:p=>jobs.push(p)}),
+      new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Recovery waited for metadata')),250);}),
+    ]);
+    assert.equal(r.status,503);assert.equal(r.headers.get('X-TruyenQQ-Recovery'),'1');
+    assert.equal(r.headers.get('X-TruyenQQ-Source-Path'),'/truyen-tranh/fixture-123');
+    assert.equal(await r.text(),'source blocked');assert.equal(calls.length,1);
+  }finally{clearTimeout(timer);release();await Promise.all(jobs);}
+});
+
 for(const method of ['GET','OPTIONS'])test('a standby '+method+' failure cannot fall back to a known disabled primary',async()=>{
   const f=setup({primary:false,handle:r=>{
     assert.equal(new URL(r.url).hostname,'standby.example');

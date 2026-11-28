@@ -332,6 +332,7 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       if (env.FAILOVER_ENABLED !== 'true') return publicResponse(await send(request), request);
       if (!env.STANDBY_ORIGIN_SECRET || !env.BACKUP_ORIGIN) return publicResponse(await send(request), request);
       const s = state(request), b = bucket(request);
+      const standbyReader = [API, AUTH].includes(host) && request.headers.get('Origin') === 'https://' + STANDBY;
       const until = Number(env.STANDBY_TEST_UNTIL);
       b.test = !!env.STANDBY_TEST_IP && request.headers.get('CF-Connecting-IP') === env.STANDBY_TEST_IP &&
         until > now() && until <= now() + 15 * 60_000;
@@ -342,7 +343,10 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
         // A source service binding starts without a routing lease. Select its
         // access-policy origin from the saved decision before the first read;
         // a primary edge challenge must not become a false whitelist denial.
-        if (!SAFE(request.method) || b.test || host===STANDBY || incoming.pathname==='/api/site-access') await job;
+        // This owned frontend always uses backup below, including preflights
+        // and writes. Reading the saved health file cannot change that choice;
+        // keep it in the background instead of adding a cold Sydney round trip.
+        if (!standbyReader && (!SAFE(request.method) || b.test || host===STANDBY || incoming.pathname==='/api/site-access')) await job;
         else ctx.waitUntil(job);
       }
       const frontend = [FRONT, STANDBY].includes(host);
@@ -372,7 +376,7 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       // standby UI. Its API/auth requests must not drift back to a disabled
       // Vercel deployment while a daily health sample is still catching up.
       // The same backend authentication, CSRF and whitelist checks still run.
-      if ([API, AUTH].includes(host) && request.headers.get('Origin') === 'https://' + STANDBY) target='backup';
+      if (standbyReader) target='backup';
       const image = incoming.pathname.startsWith('/api/images/') ||
         /^\/api\/manga\/(?:mangadex-cover|truyenqq\/(?:cover|image))\//.test(incoming.pathname);
       // Keep warm image bytes at one origin while it is healthy. Splitting
