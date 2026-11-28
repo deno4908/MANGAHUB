@@ -32,8 +32,14 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
   const imgRef = useRef<HTMLDivElement>(null);
   const resourceRef = useRef<ReturnType<typeof acquireReaderImage>>();
   const began = useRef(0);
+  const failedAt = useRef(0);
+  const wasVisible = useRef(priority);
   const onVisibleRef = useRef(onVisible);
   onVisibleRef.current = onVisible;
+  const nearViewport = useCallback(() => {
+    const rect = imgRef.current?.getBoundingClientRect();
+    return !!rect && rect.bottom >= -1000 && rect.top <= window.innerHeight + 1000;
+  }, []);
 
   useEffect(() => {
     const el = imgRef.current;
@@ -59,6 +65,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
   const key = `${activeSrc}:${cycle}:${attempt}`;
   const managed = canCacheReaderImage(activeSrc);
   const failed = useCallback(() => {
+    failedAt.current = Date.now();
     rememberMangaDexImageFailure(activeSrc);
     invalidateCover(url);setLoaded(false);setWaiting(true);
   }, [url, activeSrc]);
@@ -97,24 +104,29 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
 
   useEffect(() => {
     if (!waiting || error || !inView) return;
-    const delay = attempt < RETRY_DELAYS.length ? RETRY_DELAYS[attempt]
+    const delay = attempt < RETRY_DELAYS.length ? Math.max(0, RETRY_DELAYS[attempt] - (Date.now() - failedAt.current))
       : Math.max(0, MIN_RECOVERY_MS - (Date.now() - began.current));
     const timer = window.setTimeout(() => {
-      if (navigator.onLine === false || document.visibilityState === 'hidden') return;
+      if (navigator.onLine === false || document.visibilityState === 'hidden' || !nearViewport()) return;
       if (attempt >= RETRY_DELAYS.length || Date.now() - began.current >= RECOVERY_DEADLINE_MS) setError(true);
       else { setAttempt(value => value + 1);setWaiting(false); }
     }, delay);
     return () => window.clearTimeout(timer);
-  }, [waiting, error, inView, attempt, cycle]);
+  }, [waiting, error, inView, attempt, cycle, visible, nearViewport]);
 
   useEffect(() => {
     const recover = () => {
-      if (!loaded && (waiting || error) && inView && navigator.onLine !== false && document.visibilityState !== 'hidden') setCycle(value => value + 1);
+      if (!loaded && (waiting || error) && inView && nearViewport() && navigator.onLine !== false && document.visibilityState !== 'hidden') setCycle(value => value + 1);
     };
+    // A long-hidden, distant page can exhaust its recovery window. Resume it
+    // when the reader returns to that page, not all past failures at tab focus.
+    // The transition check keeps a visible outage's retry budget bounded.
+    if (visible && !wasVisible.current && error) recover();
+    wasVisible.current = visible;
     window.addEventListener('online', recover);
     document.addEventListener('visibilitychange', recover);
     return () => { window.removeEventListener('online', recover);document.removeEventListener('visibilitychange', recover); };
-  }, [loaded, inView, waiting, error]);
+  }, [loaded, inView, waiting, error, visible, nearViewport]);
 
   const fitClass = imageFit === 'width' ? 'block w-full h-auto' : imageFit === 'height'
     ? 'block max-h-screen max-w-full w-auto h-auto mx-auto object-contain' : 'block max-w-full h-auto mx-auto';

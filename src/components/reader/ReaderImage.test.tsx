@@ -177,3 +177,65 @@ it.each(['truyenqq', 'mangadex'])('releases decoded %s reader blobs for bounded 
   expect(request).toHaveBeenCalledTimes(7);
   expect(screen.queryByRole('button')).toBeNull();
 });
+
+it.each(['online', 'visibilitychange'])('only resumes nearby failed images after %s, and automatically resumes a distant page when read again', async event => {
+  vi.useFakeTimers();
+  const observers: Array<{ callback: IntersectionObserverCallback }> = [];
+  vi.stubGlobal('IntersectionObserver', class {
+    observe() {} unobserve() {} disconnect() {}
+    constructor(public callback: IntersectionObserverCallback) { observers.push(this); }
+  });
+  let farAway = true;
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+    const top = this.getAttribute('data-reader-page') === '1' && farAway ? 5000 : 0;
+    return { x: 0, y: top, top, left: 0, right: 390, bottom: top + 600,
+      width: 390, height: 600, toJSON: () => ({}) };
+  });
+  vi.stubGlobal('URL', class extends URL {
+    static createObjectURL = vi.fn(() => 'blob:resumed-nearby-page');
+    static revokeObjectURL = vi.fn();
+  });
+  let healthy = false;
+  const request = vi.spyOn(transport, 'fetchImageResponse').mockImplementation(async () => {
+    if (!healthy) throw new Error('temporary source failure');
+    return new Response('page', { headers: { 'Content-Type': 'image/jpeg' } });
+  });
+  const api = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  const view = render(<>{[0, 1].map(index => <ReaderImage key={index}
+    src={`${api}/api/manga/truyenqq/image/resume-book-123/1/${index + 1}`}
+    alt={`Resumed page ${index + 1}`} index={index} imageFit="width" pageGap={0} priority />)}</>);
+  await act(async () => {});
+  expect(request).toHaveBeenCalledTimes(2);
+  const distant = view.container.querySelector('[data-reader-page="1"]')!;
+  act(() => observers[1].callback([{ target: distant, isIntersecting: false }] as IntersectionObserverEntry[], {} as IntersectionObserver));
+  healthy = true;
+  await act(async () => (event === 'online' ? window : document).dispatchEvent(new Event(event)));
+  expect(request).toHaveBeenCalledTimes(3);
+  fireEvent.load(screen.getByRole('img', { name: 'Resumed page 1' }));
+  expect(screen.queryByRole('img', { name: 'Resumed page 2' })).toBeNull();
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(request).toHaveBeenCalledTimes(3);
+  farAway = false;
+  await act(async () => observers[1].callback([{ target: distant, isIntersecting: true }] as IntersectionObserverEntry[], {} as IntersectionObserver));
+  expect(request).toHaveBeenCalledTimes(4);
+  expect(screen.getByRole('img', { name: 'Resumed page 2' })).toHaveAttribute('src', 'blob:resumed-nearby-page');
+});
+
+it('preserves the original retry delay when a waiting image crosses the viewport edge', () => {
+  vi.useFakeTimers();
+  const observers: Array<{ callback: IntersectionObserverCallback }> = [];
+  vi.stubGlobal('IntersectionObserver', class {
+    observe() {} unobserve() {} disconnect() {}
+    constructor(public callback: IntersectionObserverCallback) { observers.push(this); }
+  });
+  const view = render(<ReaderImage src="https://cdn.example/viewport-retry.jpg" alt="Viewport retry" index={0} imageFit="width" pageGap={0} priority />);
+  const target = view.container.querySelector('[data-reader-page]')!;
+  fireEvent.error(screen.getByRole('img'));
+  act(() => vi.advanceTimersByTime(750));
+  for (const isIntersecting of [false, true]) act(() => observers[1].callback(
+    [{ target, isIntersecting }] as IntersectionObserverEntry[], {} as IntersectionObserver));
+  act(() => vi.advanceTimersByTime(249));
+  expect(screen.queryByRole('img')).toBeNull();
+  act(() => vi.advanceTimersByTime(1));
+  expect(screen.getByRole('img')).toHaveAttribute('src', 'https://cdn.example/viewport-retry.jpg?retry=1');
+});
