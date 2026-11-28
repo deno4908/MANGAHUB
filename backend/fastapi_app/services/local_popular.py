@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from fastapi_app.services import card_metadata, truyenqq_service
 from fastapi_app.services.catalog_visibility import legacy_qq_identifier, published_uploads, remember_matches
 from fastapi_app.services.request_coalescing import coalesce_reads
-from fastapi_app.services.truyenqq_recovery import source_matches, surface_stale_hints
+from fastapi_app.services.truyenqq_recovery import failure_hints, source_matches, surface_stale_hints
 
 logger = logging.getLogger(__name__)
 SOURCE_WAIT_SECONDS = 30.0
@@ -79,6 +79,17 @@ def _cached_labels(identifiers):
         [key for identifier in identifiers for key in card_metadata.metadata_keys(identifier)])
     return {identifier: item for identifier in identifiers
             if (item := card_metadata.cached_metadata(identifier, values)) and item.get("source") == "truyenqq"}
+
+
+def _source_window(rows, page, limit, source_size):
+    uploads = sum(row.get("source") == "uploaded" for row in rows)
+    prefix_size = len(rows) - uploads
+    offset = (page - 1) * limit
+    start = max(prefix_size, offset - uploads)
+    end = max(start, offset + limit - uploads)
+    prefix = set(range(1, math.ceil(prefix_size / source_size) + 1))
+    requested = set(range(start // source_size + 1, math.ceil(end / source_size) + 1))
+    return uploads, start, end, prefix, requested
 
 
 async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, http_response=None, sort="popular"):
@@ -206,8 +217,12 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
     async def freeze_ranking():
         nonlocal snapshot, rows, excluded
         if not pending and snapshot is None:
+            pagination = ((first_source_page.get('data') or {}).get('params') or {}).get('pagination') or {}
+            layout = {'key': source_key,
+                      'size': manga._safe_int(pagination.get('totalItemsPerPage')),
+                      'pages': manga._otruyen_payload_total_pages(first_source_page)}
             snapshot = await asyncio.to_thread(_frozen, snapshot_key + ":ranking",
-                                               {"rows": rows, "excluded": sorted(excluded)})
+                                               {"rows": rows, "excluded": sorted(excluded), 'source_layout': layout})
             rows, excluded = snapshot["rows"], set(snapshot["excluded"])
 
     def response(items, *, refreshing=False, total=None, pages=None, source_error=None):
@@ -228,6 +243,18 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
         return {"data": data}
 
     source_tasks = {initial_number: first_source_task}
+    layout = (snapshot or {}).get('source_layout') or {}
+    if (sort != 'rating' and len(rows[offset:offset + limit]) < limit
+            and layout.get('key') == source_key
+            and type(layout.get('size')) is int and 1 <= layout['size'] <= 96
+            and type(layout.get('pages')) is int and layout['pages'] > 0):
+        # Reuse the measured layout from this exact source/filter/revision.
+        # Start only the prefix and target pages the response already needs;
+        # no adjacent-page speculation or extra source reads are introduced.
+        _, _, _, prefix, requested = _source_window(rows, page, limit, layout['size'])
+        for number in sorted((prefix | requested) - {initial_number}):
+            if number <= layout['pages']:
+                source_tasks[number] = create_task(source(number))
     if initial_number == 1 and limit == 42 and page > 1 and len(rows) < offset + limit:
         # Older callers can still request native-sized pages. The 24-title UI
         # uses the measured source size below, never an assumed page size.
@@ -285,20 +312,21 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
                         pages=max(1, math.ceil(total_items / limit)))
     native_rows = [row for row in rows if row.get("source") != "uploaded"]
     prefix_size = len(native_rows)
-    start = max(prefix_size, offset - uploads)
-    end = max(start, offset + limit - uploads)
-    prefix_pages = set(range(1, math.ceil(prefix_size / source_size) + 1))
-    requested_pages = set(range(start // source_size + 1, math.ceil(end / source_size) + 1))
+    _, start, end, prefix_pages, requested_pages = _source_window(rows, page, limit, source_size)
     numbers = sorted((prefix_pages | requested_pages) - {initial_number})
     numbers = [number for number in numbers if number <= source_pages]
     payloads = {initial_number: first_source_page}
     source_failure = None
+    failed_paths = []
     results = await asyncio.gather(*(source_tasks[number] if number in source_tasks else source(number)
                                      for number in numbers), return_exceptions=True)
     for number, value in zip(numbers, results):
         if isinstance(value, (asyncio.TimeoutError, HTTPException)):
             pending = True
             source_failure = value
+            path = failure_hints(value).get('X-TruyenQQ-Source-Path')
+            if path and path not in failed_paths:
+                failed_paths.append(path)
             logger.warning("QQ popular source failed page=%d status=%s reason=%s", number,
                            value.status_code if isinstance(value, HTTPException) else 504,
                            (value.headers or {}).get("X-TruyenQQ-Error", "source-error")
@@ -307,6 +335,15 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
             raise value
         else:
             payloads[number] = value
+
+    if isinstance(source_failure, HTTPException) and failure_hints(source_failure) and len(failed_paths) > 1:
+        # The browser already has a two-source recovery budget. Tell it the
+        # exact failed reads so those same two fills can overlap, without
+        # guessing adjacent pages or expanding the request budget.
+        primary = source_failure.headers['X-TruyenQQ-Source-Path']
+        paths = [primary, *(path for path in failed_paths if path != primary)][:2]
+        source_failure = HTTPException(source_failure.status_code, source_failure.detail, headers={
+            **source_failure.headers, 'X-TruyenQQ-Source-Paths': json.dumps(paths, separators=(',', ':'))})
 
     def visible(item):
         # These cards already came from the source's genre/status query. QQ

@@ -8,6 +8,53 @@ const json = (body: unknown, status = 200, headers = {}) => new Response(JSON.st
   status, headers: { 'Content-Type': 'application/json', ...headers },
 });
 
+it('overlaps the same two proven failed page fills and hands each proof back without extra relay requests', async () => {
+  setSiteAccessRestricted(true);
+  const paths = ['/tim-kiem-nang-cao/trang-58?sort=4', '/tim-kiem-nang-cao/trang-57?sort=4'];
+  const started = new Set<string>();
+  let release!: () => void;
+  const both = new Promise<void>(resolve => { release = resolve; });
+  let apiCalls = 0;
+  const fetcher = vi.fn().mockImplementation(async (url: string) => {
+    if (url.includes('workers.dev')) {
+      started.add(url);
+      if (started.size === 2) release();
+      await both;
+      return new Response('list_grid', { headers: { 'X-TruyenQQ-Proof': url.endsWith('58?sort=4') ? 'proof58' : 'proof57' } });
+    }
+    apiCalls++;
+    return apiCalls < 3 ? json({}, 503, {
+      'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Recovery': '1',
+      'X-TruyenQQ-Source-Path': paths[apiCalls - 1],
+      ...(apiCalls === 1 ? { 'X-TruyenQQ-Source-Paths': JSON.stringify(paths) } : {}),
+    }) : json({ data: { items: Array.from({ length: 24 }, (_, index) => ({ slug: `book-${index}` })) } });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const response = await fetchWithTruyenQQRelay(api, { headers: { Authorization: 'Bearer reader' } }, 1000);
+  expect((await response.json()).data.items).toHaveLength(24);
+  expect(fetcher).toHaveBeenCalledTimes(5);
+  expect(fetcher.mock.calls.filter(([url]) => url.includes('workers.dev'))).toHaveLength(2);
+  const posts = fetcher.mock.calls.filter(([, options]) => options.method === 'POST');
+  expect(posts.map(([, options]) => JSON.parse(options.body).proof)).toEqual(['proof58', 'proof57']);
+});
+
+it.each([
+  ['//external.example/secret'],
+  ['/truyen-tranh/unrelated-123'],
+  ['/tim-kiem-nang-cao/trang-57?sort=2'],
+  ['/tim-kiem-nang-cao/trang-57?sort=4', '/tim-kiem-nang-cao/trang-58?sort=4', '/tim-kiem-nang-cao/trang-59?sort=4'],
+])('ignores unrelated or over-budget recovery page hints %j', async (...paths) => {
+  const fetcher = vi.fn().mockResolvedValueOnce(json({}, 503, {
+    'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Recovery': '1',
+    'X-TruyenQQ-Source-Path': '/tim-kiem-nang-cao/trang-58?sort=4',
+    'X-TruyenQQ-Source-Paths': JSON.stringify(paths),
+  })).mockResolvedValueOnce(new Response('list_grid', { headers: { 'X-TruyenQQ-Proof': 'proof' } }))
+    .mockResolvedValueOnce(json({ data: { items: [] } }));
+  vi.stubGlobal('fetch', fetcher);
+  expect((await fetchWithTruyenQQRelay(api, {}, 1000)).ok).toBe(true);
+  expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
 it('warms the exact blocked QQ source page, then retries the original backend request', async () => {
   const blocked = json({ detail: 'Unavailable' }, 502, {
     'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/tim-kiem-nang-cao/trang-53?sort=4',

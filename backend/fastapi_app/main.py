@@ -403,7 +403,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-TruyenQQ-Error", "X-TruyenQQ-Source-Path", "X-TruyenQQ-Search", "X-TruyenQQ-Recovery", "X-TruyenQQ-Stale"],
+    expose_headers=["X-TruyenQQ-Error", "X-TruyenQQ-Source-Path", "X-TruyenQQ-Source-Paths", "X-TruyenQQ-Search", "X-TruyenQQ-Recovery", "X-TruyenQQ-Stale"],
 )
 
 

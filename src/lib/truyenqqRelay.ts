@@ -135,6 +135,7 @@ export async function fetchWithTruyenQQRelay(url: string, options: RequestInit, 
   const recover = async () => {
   let response = initial;
   const recovered = new Set<string>();
+  const prepared = new Map<string, Recovery>();
   for (let attempt = 0; attempt < 2 && response.headers.get('X-TruyenQQ-Error') === 'http-403'; attempt++) {
     const hint = source(response.headers.get('X-TruyenQQ-Source-Path'), response.headers.get('X-TruyenQQ-Search'));
     let remaining = deadline - Date.now();
@@ -153,7 +154,32 @@ export async function fetchWithTruyenQQRelay(url: string, options: RequestInit, 
       remaining = deadline - Date.now();
       if (remaining <= 0) return response;
     }
-    const recovery = await warm(hint, options.signal, remaining, authorization);
+    const hintKey = JSON.stringify(hint);
+    if (!prepared.has(hintKey)) {
+      if (prepared.size >= 2) return response;
+      const hints = [hint];
+      if (attempt === 0 && response.headers.get('X-TruyenQQ-Recovery') === '1' &&
+          /^\/tim-kiem-nang-cao\/trang-\d+(?:\?|$)/.test(hint.path) &&
+          /^\/api\/manga\/(?:truyenqq|otruyen)-filtered$/.test(apiUrl.pathname)) {
+        try {
+          const raw = response.headers.get('X-TruyenQQ-Source-Paths') || '';
+          const paths: unknown = raw.length <= 4096 ? JSON.parse(raw) : null;
+          if (Array.isArray(paths) && paths.length <= 2) {
+            for (const path of paths) {
+              const extra = typeof path === 'string' ? source(path) : null;
+              // Only the same filtered query's proven failed native pages.
+              // Keep the existing two-fill budget and fixed owned relay.
+              if (extra && /^\/tim-kiem-nang-cao\/trang-\d+(?:\?|$)/.test(extra.path) &&
+                  extra.path.split('?')[1] === hint.path.split('?')[1] &&
+                  !hints.some(value => value.path === extra.path) && hints.length < 2) hints.push(extra);
+            }
+          }
+        } catch { /* Older servers expose only the single source hint. */ }
+      }
+      const fills = await Promise.all(hints.map(value => warm(value, options.signal, remaining, authorization)));
+      hints.forEach((value, index) => prepared.set(JSON.stringify(value), fills[index]));
+    }
+    const recovery = prepared.get(hintKey)!;
     if (options.signal?.aborted) throw new DOMException('QQ read cancelled', 'AbortError');
     if (started !== generation) return response;
     if (!recovery.ok) {

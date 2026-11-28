@@ -147,6 +147,68 @@ def test_warm_page_ranking_still_rechecks_a_changed_hidden_selection(monkeypatch
     source.assert_awaited_once()
 
 
+@pytest.mark.parametrize('sort,page', [('popular', 99), ('popular', 100), ('latest', 100)])
+def test_deep_jump_starts_only_the_required_source_pages_without_waiting_for_the_header(monkeypatch, sort, page):
+    snapshots, calls = {}, []
+    def frozen(key, value=None):
+        if value is not None:
+            snapshots.setdefault(key, deepcopy(value))
+        return deepcopy(snapshots.get(key))
+    monkeypatch.setattr(local_popular, '_frozen', frozen)
+    monkeypatch.setattr(manga, '_fetch_local_views_lookup', lambda db: {})
+    async def listing(**kwargs):
+        number = kwargs['page']
+        calls.append(number)
+        start = (number - 1) * 42
+        return {'data': {'items': [{'slug': f'book-{index}'} for index in range(start, start + 42)],
+            'params': {'pagination': {'totalItemsPerPage': 42, 'totalPages': 445}}}}
+    monkeypatch.setattr(local_popular.truyenqq_service, 'get_filtered', listing)
+    original = local_popular._source_page
+    async def run():
+        args = dict(limit=24, genres=[], status='', show_mature=True, hidden={}, db=EmptyDB(), sort=sort)
+        await local_popular.qq_popular(page=1, **args)
+        target_started = asyncio.Event()
+        async def delayed_header(genres, status, number, snapshot_key, source_sort='views_desc'):
+            if number == 1:
+                await asyncio.wait_for(target_started.wait(), .5)
+            else:
+                target_started.set()
+            return await original(genres, status, number, snapshot_key, source_sort)
+        monkeypatch.setattr(local_popular, '_source_page', delayed_header)
+        result = (await local_popular.qq_popular(page=page, **args))['data']
+        assert [row['slug'] for row in result['items']] == [f'book-{index}' for index in range((page-1)*24, page*24)]
+        assert result['ranking_pending'] is False
+    asyncio.run(run())
+    assert calls == ([1, 57] if page == 99 else [1, 57, 58])
+
+
+@pytest.mark.parametrize('gateway', [False, True])
+def test_only_proven_source_failures_expose_the_existing_two_page_recovery_budget(monkeypatch, gateway):
+    import json
+    monkeypatch.setattr(manga, '_fetch_local_views_lookup', lambda db: {})
+    calls = []
+    async def listing(**kwargs):
+        number = kwargs['page']
+        calls.append(number)
+        if number != 1:
+            raise HTTPException(503, 'Source unavailable', headers={
+                'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Recovery': '1',
+                'X-TruyenQQ-Transport': 'edge-gateway' if gateway else 'edge-source',
+                'X-TruyenQQ-Source-Path': f'/tim-kiem-nang-cao/trang-{number}?sort=4'})
+        return {'data': {'items': [{'slug': f'book-{index}'} for index in range(42)],
+            'params': {'pagination': {'totalItemsPerPage': 42, 'totalPages': 445}}}}
+    monkeypatch.setattr(local_popular.truyenqq_service, 'get_filtered', listing)
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(local_popular.qq_popular(page=100, limit=24, genres=[], status='',
+            show_mature=True, hidden={}, db=EmptyDB()))
+    assert calls == [1, 57, 58]
+    if gateway:
+        assert 'X-TruyenQQ-Source-Paths' not in error.value.headers
+    else:
+        assert json.loads(error.value.headers['X-TruyenQQ-Source-Paths']) == [
+            '/tim-kiem-nang-cao/trang-58?sort=4', '/tim-kiem-nang-cao/trang-57?sort=4']
+
+
 @pytest.mark.parametrize("sort", ["latest", "popular", "rating"])
 def test_24_title_pages_share_native_pages_without_losing_or_repeating_books(monkeypatch, sort):
     snapshots = {}
