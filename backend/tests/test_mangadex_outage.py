@@ -1,16 +1,29 @@
 import asyncio
 import json
 from unittest.mock import AsyncMock, Mock
-from urllib.parse import parse_qs, urlparse
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request, Response
 
-from fastapi_app.routers import manga
+from fastapi_app.routers import images, manga
 from fastapi_app.services import mangadex_service as mdx
 
 MANGA = "11111111-1111-4111-8111-111111111111"
 COVER = f"https://uploads.mangadex.org/covers/{MANGA}/cover.jpg.512.jpg"
+
+
+def cover_request():
+    return Request({'type': 'http', 'method': 'GET', 'path': '/api/manga/mangadex-cover/' + MANGA,
+                    'query_string': b'', 'headers': [], 'scheme': 'https'})
+
+
+@pytest.fixture(autouse=True)
+def delivery(monkeypatch):
+    # Covers now serve bytes directly through the existing image proxy.
+    # Keep outage tests isolated from real CDN/network requests.
+    proxy = AsyncMock(side_effect=lambda *args, **kwargs: Response(b'cover-fixture', media_type='image/jpeg'))
+    monkeypatch.setattr(images, 'proxy_image', proxy)
+    return proxy
 
 
 @pytest.fixture
@@ -27,7 +40,7 @@ def stored(monkeypatch):
 
 
 @pytest.mark.parametrize("source", ["url", "stale", "card", "metadata", "lookup", "catalog"])
-def test_cover_uses_existing_urls_without_contacting_a_down_source(stored, monkeypatch, source):
+def test_cover_uses_existing_urls_without_contacting_a_down_source(stored, monkeypatch, delivery, source):
     values, _ = stored
     if source in {"url", "stale"}:
         values[f"mangadex:cover-url:v2:{MANGA}" + (":stale" if source == "stale" else "")] = COVER
@@ -41,18 +54,17 @@ def test_cover_uses_existing_urls_without_contacting_a_down_source(stored, monke
         monkeypatch.setattr(mdx, "_get_cached_vi_catalog_manga", lambda _: {"cover_url": COVER})
     upstream = AsyncMock(side_effect=RuntimeError("source down"))
     monkeypatch.setattr(mdx, "_request_json", upstream)
-    response = asyncio.run(manga.mangadex_cover(MANGA))
-    assert response.status_code == 302
-    target = urlparse(response.headers["location"])
-    assert target.path == "/api/images/img"
-    assert parse_qs(target.query)["url"] == [COVER]
+    response = asyncio.run(manga.mangadex_cover(MANGA, cover_request()))
+    assert response.status_code == 200 and response.body == b'cover-fixture'
+    assert 'location' not in response.headers
+    assert delivery.await_args.args[0] == COVER
     upstream.assert_not_called()
 
 
 def test_cover_outage_is_not_reported_or_cached_as_missing(stored, monkeypatch):
     values, cache = stored
     monkeypatch.setattr(mdx, "_request_json", AsyncMock(side_effect=mdx._MangaDexStatusError("private source detail", status_code=503)))
-    response = asyncio.run(manga.mangadex_cover(MANGA))
+    response = asyncio.run(manga.mangadex_cover(MANGA, cover_request()))
     assert response.status_code == 503
     assert json.loads(response.body)["code"] == "MANGADEX_UNAVAILABLE"
     assert b"private source" not in response.body
@@ -64,7 +76,7 @@ def test_cover_outage_is_not_reported_or_cached_as_missing(stored, monkeypatch):
 def test_true_missing_cover_is_still_404(stored, monkeypatch):
     monkeypatch.setattr(mdx, "_request_json", AsyncMock(return_value={"data": {"relationships": []}}))
     with pytest.raises(HTTPException) as error:
-        asyncio.run(manga.mangadex_cover(MANGA))
+        asyncio.run(manga.mangadex_cover(MANGA, cover_request()))
     assert error.value.status_code == 404
 
 
@@ -99,18 +111,20 @@ def test_untrusted_or_different_book_cover_hints_are_not_used(stored, monkeypatc
 
 
 @pytest.mark.parametrize('filename', ['original.png', 'cover.jpg.512.jpg', 'cover.jpg.256.jpg'])
-def test_current_cover_fallback_keeps_list_thumbnails_small_without_changing_detail_default(monkeypatch, filename):
+def test_current_cover_fallback_keeps_list_thumbnails_small_without_changing_detail_default(monkeypatch, delivery, filename):
     source = f'https://uploads.mangadex.org/covers/{MANGA}/{filename}'
     monkeypatch.setattr(mdx, 'get_cover_url', AsyncMock(return_value=source))
-    small = asyncio.run(manga.mangadex_cover(MANGA, size=256))
-    target = parse_qs(urlparse(small.headers['location']).query)['url'][0]
+    small = asyncio.run(manga.mangadex_cover(MANGA, cover_request(), size=256))
+    assert small.status_code == 200
+    target = delivery.await_args.args[0]
     original = filename.replace('.512.jpg', '').replace('.256.jpg', '')
     assert target == f'https://uploads.mangadex.org/covers/{MANGA}/{original}.256.jpg'
-    default = asyncio.run(manga.mangadex_cover(MANGA))
-    assert parse_qs(urlparse(default.headers['location']).query)['url'][0] == source
+    default = asyncio.run(manga.mangadex_cover(MANGA, cover_request()))
+    assert default.status_code == 200 and 'location' not in default.headers
+    assert delivery.await_args.args[0] == source
 
 
-def test_small_cover_http_query_accepts_numeric_size_and_rejects_other_sizes(monkeypatch):
+def test_small_cover_http_query_accepts_numeric_size_and_rejects_other_sizes(monkeypatch, delivery):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     monkeypatch.setattr(mdx, 'get_cover_url', AsyncMock(return_value=COVER))
@@ -118,10 +132,12 @@ def test_small_cover_http_query_accepts_numeric_size_and_rejects_other_sizes(mon
     app.include_router(manga.router, prefix='/api/manga')
     with TestClient(app) as client:
         response = client.get(f'/api/manga/mangadex-cover/{MANGA}?size=256', follow_redirects=False)
-        assert response.status_code == 302
-        target = parse_qs(urlparse(response.headers['location']).query)['url'][0]
+        assert response.status_code == 200 and response.content == b'cover-fixture'
+        assert 'location' not in response.headers
+        target = delivery.await_args.args[0]
         assert target == COVER.replace('.512.jpg', '.256.jpg')
         assert client.get(f'/api/manga/mangadex-cover/{MANGA}?size=100000').status_code == 400
+        assert delivery.await_count == 1
 
 
 def test_search_recovers_the_exact_page_after_catalog_invalidation(stored, monkeypatch):

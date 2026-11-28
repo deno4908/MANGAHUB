@@ -1,5 +1,6 @@
 """Reader side effects must not stall unrelated image/data requests."""
 import asyncio
+import json
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -231,3 +232,72 @@ def test_background_chapter_check_keeps_reader_images_responsive(monkeypatch, st
                 'message': 'Chương 2 đã được cập nhật!', 'manga_slug': 'book-123',
                 'chapter_id': token, 'is_read': False,
             }]
+
+
+@pytest.mark.parametrize('operation', ['tags', 'latest', 'metadata', 'lookup', 'detail', 'pages', 'search'])
+def test_slow_mangadex_cache_reads_do_not_hold_unrelated_reader_images(monkeypatch, operation):
+    from fastapi_app.services import mangadex_service as mdx
+    identifier = '11111111-1111-4111-8111-111111111111'
+    values = {
+        'tags': {'action': 'tag-1'},
+        'latest': {'id': 'chapter-1', 'chapter_name': '2'},
+        'metadata': {'data': {'id': identifier}},
+        'lookup': {'manga': {'id': identifier, 'title': 'Cached title'}},
+        'detail': {'manga': {'id': identifier, 'chapters': [{'id': 'chapter-1'}]}},
+        'pages': {'chapter_id': identifier, 'mode': 'data-saver', 'image_urls': ['https://cdn.example/1.jpg']},
+        'search': {'data': {'items': [{'slug': identifier}], 'params': {'pagination': {'currentPage': 3}}}},
+    }
+    expected = values[operation]
+    monkeypatch.setattr(mdx, '_live_revision', lambda *args: '')
+    source = AsyncMock(side_effect=AssertionError('A cached result must not refetch its source'))
+    monkeypatch.setattr(mdx, '_request_json', source)
+    def make(blocked):
+        def get(key):
+            blocked()
+            return json.dumps(expected)
+        monkeypatch.setattr(mdx, 'cache', SimpleNamespace(get=get))
+        return {
+            'tags': lambda: mdx._get_mangadex_tag_id_by_slug(),
+            'latest': lambda: mdx._get_latest_vi_chapter_for_manga(identifier),
+            'metadata': lambda: mdx._get_manga_metadata(identifier),
+            'lookup': lambda: mdx.get_manga_lookup(identifier),
+            'detail': lambda: mdx.get_manga_detail(identifier),
+            'pages': lambda: mdx.get_chapter_pages(identifier, mode='saver'),
+            'search': lambda: mdx.search_manga('', page=3, sort='popular', attach_latest=False),
+        }[operation]()
+    assert asyncio.run(image_while_waiting(monkeypatch, make)) == expected
+    source.assert_not_awaited()
+
+
+@pytest.mark.parametrize('stage', ['revision', 'manifest-write'])
+def test_mangadex_cache_revisions_and_image_manifest_writes_do_not_stop_other_images(monkeypatch, stage):
+    from fastapi_app.services import mangadex_service as mdx
+    identifier = '11111111-1111-4111-8111-111111111111'
+    writes = []
+    monkeypatch.setattr(mdx, '_live_revision', lambda *args: '')
+    source = AsyncMock(return_value={'baseUrl': 'https://cdn.example',
+        'chapter': {'hash': 'hash', 'dataSaver': ['small.jpg'], 'data': ['large.jpg']}})
+    monkeypatch.setattr(mdx, '_request_json', source)
+    def make(blocked):
+        if stage == 'revision':
+            def revision(*args):
+                blocked()
+                return 'revision-1'
+            monkeypatch.setattr(mdx, '_live_revision', revision)
+            monkeypatch.setattr(mdx, 'cache', SimpleNamespace(get=lambda key: json.dumps({'manga': {'id': identifier}})))
+            # Bypass the outer decorator to exercise the per-book key read.
+            return mdx.get_manga_detail.__wrapped__(identifier)
+        def set_value(key, value, ttl):
+            blocked()
+            writes.append((key, json.loads(value), ttl))
+        monkeypatch.setattr(mdx, 'cache', SimpleNamespace(get=lambda key: None, set=set_value))
+        return mdx.get_chapter_pages(identifier, mode='saver')
+    result = asyncio.run(image_while_waiting(monkeypatch, make))
+    if stage == 'revision':
+        assert result == {'manga': {'id': identifier}}
+        source.assert_not_awaited()
+    else:
+        assert result['image_urls'] == ['https://cdn.example/data-saver/hash/small.jpg']
+        assert result['fallback_image_urls'] == ['https://cdn.example/data/hash/large.jpg']
+        assert writes == [(f'mangadex:chapter-pages:{identifier}:data-saver', result, mdx.CHAPTER_PAGES_TTL)]
+        source.assert_awaited_once_with('/at-home/server/' + identifier)

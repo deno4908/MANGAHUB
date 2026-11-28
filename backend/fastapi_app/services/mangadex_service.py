@@ -452,7 +452,7 @@ def _schedule_vi_catalog_cover_enrich(
             payload_copy["mangas"] = list(mangas_map.values())
 
             if after_missing < before_missing and _payload_has_mangas(payload_copy):
-                _cache_payload(cache_key, payload_copy, ttl=VI_CATALOG_TTL)
+                await asyncio.to_thread(_cache_payload, cache_key, payload_copy, ttl=VI_CATALOG_TTL)
                 logger.info(
                     "MangaDex vi-catalog background cover enrich improved covers (%s -> %s, reason=%s)",
                     before_missing,
@@ -521,7 +521,7 @@ def _schedule_vi_catalog_top_up(
                 "target_manga": target_count,
             }
             payload_copy["mangas"] = list(mangas_map.values())
-            _cache_payload(cache_key, payload_copy, ttl=VI_CATALOG_TTL)
+            await asyncio.to_thread(_cache_payload, cache_key, payload_copy, ttl=VI_CATALOG_TTL)
 
             logger.info(
                 "MangaDex vi-catalog background top-up improved manga count (%s -> %s, reason=%s)",
@@ -552,7 +552,7 @@ def schedule_vi_catalog_refresh(max_chapters: int | None, *, force: bool = False
     async def _job() -> None:
         try:
             if force:
-                cache.delete(cache_key)
+                await asyncio.to_thread(cache.delete, cache_key)
             await get_vi_catalog(max_chapters=max_chapters)
         except Exception as error:
             logger.warning(
@@ -931,14 +931,14 @@ def _slugify_tag(value: Any) -> str:
 
 async def _get_mangadex_tag_id_by_slug() -> dict[str, str]:
     cache_key = "mangadex:tag-id-by-slug:v1"
-    cached = cache.get(cache_key)
+    cached = await asyncio.to_thread(cache.get, cache_key)
     if cached:
         try:
             parsed = json.loads(cached)
             if isinstance(parsed, dict):
                 return {str(k): str(v) for k, v in parsed.items() if k and v}
         except Exception:
-            cache.delete(cache_key)
+            await asyncio.to_thread(cache.delete, cache_key)
 
     payload = await _request_json("/manga/tag")
     tag_map: dict[str, str] = {}
@@ -978,7 +978,7 @@ async def _get_mangadex_tag_id_by_slug() -> dict[str, str]:
         if target in tag_map:
             tag_map.setdefault(alias, tag_map[target])
 
-    cache.set(cache_key, json.dumps(tag_map, ensure_ascii=False), ttl=24 * 60 * 60)
+    await asyncio.to_thread(cache.set, cache_key, json.dumps(tag_map, ensure_ascii=False), ttl=24 * 60 * 60)
     return tag_map
 
 
@@ -1462,14 +1462,14 @@ async def _get_latest_vi_chapter_for_manga(
     raise_on_error: bool = False,
 ) -> dict[str, str]:
     language = _normalize_latest_chapter_language(translated_language)
-    cache_key = _latest_chapter_cache_key(manga_id, language)
+    cache_key = await asyncio.to_thread(_latest_chapter_cache_key, manga_id, language)
     if not ignore_cache:
-        cached = cache.get(cache_key)
+        cached = await asyncio.to_thread(cache.get, cache_key)
         if cached:
             try:
                 return json.loads(cached)
             except Exception:
-                cache.delete(cache_key)
+                await asyncio.to_thread(cache.delete, cache_key)
 
     chapter_info = {"id": "", "chapter_name": "", "chapter_title": "", "publish_at": ""}
     best_entry: dict[str, Any] | None = None
@@ -1521,7 +1521,7 @@ async def _get_latest_vi_chapter_for_manga(
     # Only cache if we got a real result — don't lock in empty data
     if chapter_info.get("id"):
         chapter_info["verified_head"] = True
-        cache.set(cache_key, json.dumps(chapter_info, ensure_ascii=False), ttl=VI_CATALOG_TTL)
+        await asyncio.to_thread(cache.set, cache_key, json.dumps(chapter_info, ensure_ascii=False), ttl=VI_CATALOG_TTL)
     return chapter_info
 
 
@@ -1824,7 +1824,7 @@ async def get_popular_first_catalog(max_chapters: int | None = 2000) -> dict[str
         "mangas": list(mangas.values()),
     }
 
-    _cache_payload(cache_key, result, ttl=VI_CATALOG_TTL)
+    await asyncio.to_thread(_cache_payload, cache_key, result, ttl=VI_CATALOG_TTL)
 
     if len(mangas) < target_manga_count:
         _schedule_vi_catalog_top_up(
@@ -1888,7 +1888,7 @@ async def get_vi_catalog(
             max(VI_CATALOG_TARGET_MANGA_MIN, VI_CATALOG_ALL_SYNC_TARGET_MANGA),
         )
 
-    cached_payload = _load_json_cache_payload(cache_key)
+    cached_payload = await asyncio.to_thread(_load_json_cache_payload, cache_key)
     cached_is_usable_for_latest = (
         not prefer_latest or _payload_has_latest_sort_signal(cached_payload)
     )
@@ -1917,7 +1917,7 @@ async def get_vi_catalog(
                     },
                     "mangas": list(mangas_map.values()),
                 }
-                _cache_payload(cache_key, cached_payload, ttl=VI_CATALOG_TTL)
+                await asyncio.to_thread(_cache_payload, cache_key, cached_payload, ttl=VI_CATALOG_TTL)
 
         if mangas_map:
             missing_popularity = _count_missing_popularity_scores(mangas_map)
@@ -1945,9 +1945,9 @@ async def get_vi_catalog(
 
         return cached_payload
     if cached_payload is not None and not _payload_has_mangas(cached_payload):
-        cache.delete(cache_key)
+        await asyncio.to_thread(cache.delete, cache_key)
 
-    stale_payload = _load_json_cache_payload(f"{cache_key}:stale")
+    stale_payload = await asyncio.to_thread(_load_json_cache_payload, f"{cache_key}:stale")
     if (
         stale_payload is not None and
         (
@@ -1955,7 +1955,7 @@ async def get_vi_catalog(
             (prefer_latest and not _payload_has_latest_sort_signal(stale_payload))
         )
     ):
-        cache.delete(f"{cache_key}:stale")
+        await asyncio.to_thread(cache.delete, f"{cache_key}:stale")
         stale_payload = None
 
     # "all" mode can be very large. Bootstrap with a bounded first pass,
@@ -2182,7 +2182,7 @@ async def get_vi_catalog(
                 len(result["mangas"]),
             )
             # Cache briefly so background enrichment can update it
-            _cache_payload(cache_key, result, ttl=30)
+            await asyncio.to_thread(_cache_payload, cache_key, result, ttl=30)
             _schedule_vi_catalog_cover_enrich(
                 cache_key,
                 result,
@@ -2190,7 +2190,7 @@ async def get_vi_catalog(
             )
             return result
 
-        _cache_payload(cache_key, result, ttl=VI_CATALOG_TTL)
+        await asyncio.to_thread(_cache_payload, cache_key, result, ttl=VI_CATALOG_TTL)
         return result
 
     if _payload_has_mangas(stale_payload):
@@ -2461,7 +2461,7 @@ async def _get_latest_vi_chapter_feed_live(
         try:
             return json.loads(cached)
         except Exception:
-            cache.delete(cache_key)
+            await asyncio.to_thread(cache.delete, cache_key)
 
     manga_total = None if snapshot or chapter_paging else await get_total_vi_manga_count(
         content_ratings=normalized_content_ratings, translated_language=language,
@@ -2662,7 +2662,7 @@ async def _get_latest_vi_chapter_feed_live(
             },
         }
     }
-    _cache_payload(cache_key, result, ttl=60)
+    await asyncio.to_thread(_cache_payload, cache_key, result, ttl=60)
     return result
 
 
@@ -2678,7 +2678,7 @@ async def get_total_vi_manga_count(
         try:
             return int(cached)
         except Exception:
-            cache.delete(cache_key)
+            await asyncio.to_thread(cache.delete, cache_key)
     params = {
         "limit": 1,
         "offset": 0,
@@ -2796,25 +2796,25 @@ async def search_manga(
         f"lang={normalized_language}:latest={1 if should_attach_latest else 0}:"
         f"tags={','.join(tag_ids)}:tag_mode={normalized_tags_mode}:status={','.join(normalized_statuses)}:"
         f"orig_lang={','.join(normalized_original_languages)}:"
-        f"sort={normalized_sort}:rating={','.join(normalized_content_ratings)}:ids={manga_ids_key}:rev={_live_revision()}"
+        f"sort={normalized_sort}:rating={','.join(normalized_content_ratings)}:ids={manga_ids_key}:rev={await asyncio.to_thread(_live_revision)}"
     )
     # Keep an exact query snapshot outside the short-lived invalidation namespace.
     snapshot_key = "mangadex:search-fallback:v1:" + hashlib.sha256(
         cache_key.rsplit(":rev=", 1)[0].encode("utf-8")
     ).hexdigest()
-    cached = cache.get(cache_key)
+    cached = await asyncio.to_thread(cache.get, cache_key)
     if cached:
         try:
             return json.loads(cached)
         except Exception:
-            cache.delete(cache_key)
-    stale = cache.get(f"{cache_key}:stale")
+            await asyncio.to_thread(cache.delete, cache_key)
+    stale = await asyncio.to_thread(cache.get, f"{cache_key}:stale")
     stale_payload: dict[str, Any] | None = None
     if stale:
         try:
             stale_payload = json.loads(stale)
         except Exception:
-            cache.delete(f"{cache_key}:stale")
+            await asyncio.to_thread(cache.delete, f"{cache_key}:stale")
 
     normalized_lc = normalized_keyword.lower()
     is_mangadex_tag = normalized_lc in {
@@ -2938,7 +2938,7 @@ async def search_manga(
             },
         }
     }
-    _cache_payload(cache_key, result, ttl=VI_CATALOG_TTL)
+    await asyncio.to_thread(_cache_payload, cache_key, result, ttl=VI_CATALOG_TTL)
     if items:
         await asyncio.to_thread(cache.set, snapshot_key, json.dumps(result, ensure_ascii=False), ttl=SEARCH_SNAPSHOT_TTL)
         await asyncio.to_thread(_cache_stale_cover_urls,
@@ -2948,13 +2948,13 @@ async def search_manga(
 
 @coalesce_reads(revision=lambda: _live_revision())
 async def _get_manga_metadata(manga_id: str) -> dict[str, Any]:
-    key = f"mangadex:metadata:{manga_id}:rev={_live_revision(manga_id)}"
-    cached = _load_json_cache_payload(key)
+    key = f"mangadex:metadata:{manga_id}:rev={await asyncio.to_thread(_live_revision, manga_id)}"
+    cached = await asyncio.to_thread(_load_json_cache_payload, key)
     if cached is not None:
         return cached
     payload = await _request_json(f"/manga/{manga_id}", {"includes[]": ["author", "artist", "cover_art"]})
     if payload.get("data"):
-        _cache_payload(key, payload, ttl=MANGA_DETAIL_TTL)
+        await asyncio.to_thread(_cache_payload, key, payload, ttl=MANGA_DETAIL_TTL)
         cover_url = _extract_cover_url(manga_id, payload["data"].get("relationships") or [])
         if cover_url:
             await asyncio.to_thread(_cache_stale_cover_urls, {manga_id: cover_url})
@@ -2966,13 +2966,13 @@ async def _get_manga_chapter_page(params: dict[str, Any]) -> dict[str, Any]:
     # The quick detail and the full chapter list request the same first page.
     # Keep it briefly so progressive loading does not download it twice.
     digest = hashlib.sha256(_request_fingerprint("/chapter", params).encode()).hexdigest()
-    key = f"mangadex:detail-chapter-page:{params.get('manga', '')}:{digest}:rev={_live_revision(params.get('manga', ''))}"
-    cached = _load_json_cache_payload(key)
+    key = f"mangadex:detail-chapter-page:{params.get('manga', '')}:{digest}:rev={await asyncio.to_thread(_live_revision, params.get('manga', ''))}"
+    cached = await asyncio.to_thread(_load_json_cache_payload, key)
     if cached is not None:
         return cached
     payload = await _request_json("/chapter", params)
     if isinstance(payload.get("data"), list):
-        cache.set(key, json.dumps(payload, ensure_ascii=False), ttl=30)
+        await asyncio.to_thread(cache.set, key, json.dumps(payload, ensure_ascii=False), ttl=30)
     return payload
 
 
@@ -2982,15 +2982,15 @@ async def get_manga_lookup(manga_id: str) -> dict[str, Any]:
     if not normalized_manga_id:
         return {"manga": None}
 
-    cache_key = f"mangadex:lookup:{normalized_manga_id}:rev={_live_revision(normalized_manga_id)}"
-    cached = cache.get(cache_key)
+    cache_key = f"mangadex:lookup:{normalized_manga_id}:rev={await asyncio.to_thread(_live_revision, normalized_manga_id)}"
+    cached = await asyncio.to_thread(cache.get, cache_key)
     if cached:
         try:
             return json.loads(cached)
         except Exception:
-            cache.delete(cache_key)
+            await asyncio.to_thread(cache.delete, cache_key)
 
-    stale_payload = _load_json_cache_payload(f"{cache_key}:stale")
+    stale_payload = await asyncio.to_thread(_load_json_cache_payload, f"{cache_key}:stale")
 
     try:
         manga_payload = await _get_manga_metadata(normalized_manga_id)
@@ -3030,7 +3030,7 @@ async def get_manga_lookup(manga_id: str) -> dict[str, Any]:
             "chapters": [],
         },
     }
-    _cache_payload(cache_key, result, ttl=MANGA_DETAIL_TTL)
+    await asyncio.to_thread(_cache_payload, cache_key, result, ttl=MANGA_DETAIL_TTL)
     return result
 
 
@@ -3051,36 +3051,36 @@ async def get_manga_detail(
     cache_key = (
         f"mangadex:detail:v{MANGA_DETAIL_CACHE_VERSION}:{manga_id}:"
         f"{'all' if max_chapters is None else max_chapters}:"
-        f"lang={normalized_language}:group={normalized_group_id or 'all'}:rev={_live_revision(manga_id)}"
+        f"lang={normalized_language}:group={normalized_group_id or 'all'}:rev={await asyncio.to_thread(_live_revision, manga_id)}"
     )
-    cached = cache.get(cache_key)
+    cached = await asyncio.to_thread(cache.get, cache_key)
     if cached:
         try:
             return json.loads(cached)
         except Exception:
-            cache.delete(cache_key)
+            await asyncio.to_thread(cache.delete, cache_key)
 
-    stale_payload = _load_json_cache_payload(f"{cache_key}:stale")
+    stale_payload = await asyncio.to_thread(_load_json_cache_payload, f"{cache_key}:stale")
     if stale_payload is None and max_chapters is not None and int(max_chapters) <= 1:
         for fallback_cap in (120, 200, 500, None):
             fallback_key = (
                 f"mangadex:detail:v{MANGA_DETAIL_CACHE_VERSION}:{manga_id}:"
                 f"{'all' if fallback_cap is None else fallback_cap}:"
-                f"lang={normalized_language}:group={normalized_group_id or 'all'}:rev={_live_revision(manga_id)}:stale"
+                f"lang={normalized_language}:group={normalized_group_id or 'all'}:rev={await asyncio.to_thread(_live_revision, manga_id)}:stale"
             )
-            fallback_payload = _load_json_cache_payload(fallback_key)
+            fallback_payload = await asyncio.to_thread(_load_json_cache_payload, fallback_key)
             if isinstance(fallback_payload, dict) and isinstance(fallback_payload.get("manga"), dict):
                 stale_payload = fallback_payload
                 break
 
     if (
         not normalized_group_id
-        and not _live_revision(manga_id)
+        and not await asyncio.to_thread(_live_revision, manga_id)
         and normalized_language == "vi"
         and max_chapters is not None
         and int(max_chapters) <= 1
     ):
-        cached_manga = _get_cached_vi_catalog_manga(manga_id)
+        cached_manga = await asyncio.to_thread(_get_cached_vi_catalog_manga, manga_id)
         if isinstance(cached_manga, dict):
             cached_chapters = cached_manga.get("chapters")
             if not isinstance(cached_chapters, list):
@@ -3106,7 +3106,7 @@ async def get_manga_detail(
                 },
                 "manga": cached_manga,
             }
-            _cache_payload(cache_key, quick_result, ttl=60)
+            await asyncio.to_thread(_cache_payload, cache_key, quick_result, ttl=60)
             return quick_result
 
     chapters: list[dict[str, Any]] = []
@@ -3293,7 +3293,7 @@ async def get_manga_detail(
     }
     result["meta"]["chapters_complete"] = chapters_complete
     if chapters_complete:
-        _cache_payload(cache_key, result, ttl=MANGA_DETAIL_TTL)
+        await asyncio.to_thread(_cache_payload, cache_key, result, ttl=MANGA_DETAIL_TTL)
     return result
 
 
@@ -3311,25 +3311,25 @@ async def get_chapter_pages(chapter_id: str, mode: str = "data", refresh: bool =
         }
     cache_key = f"mangadex:chapter-pages:{chapter_id}:{normalized_mode}"
     if not refresh:
-        cached = cache.get(cache_key)
+        cached = await asyncio.to_thread(cache.get, cache_key)
         if cached:
             try:
                 return json.loads(cached)
             except Exception:
-                cache.delete(cache_key)
+                await asyncio.to_thread(cache.delete, cache_key)
     try:
         payload = await _request_json(f"/at-home/server/{chapter_id}")
     except RuntimeError as first_error:
         if normalized_mode == "data-saver":
             fallback_cache_key = f"mangadex:chapter-pages:{chapter_id}:data"
-            fallback_cached = cache.get(fallback_cache_key)
+            fallback_cached = await asyncio.to_thread(cache.get, fallback_cache_key)
             if fallback_cached:
                 try:
                     fallback = json.loads(fallback_cached)
                     fallback["mode"] = "data"
                     return fallback
                 except Exception:
-                    cache.delete(fallback_cache_key)
+                    await asyncio.to_thread(cache.delete, fallback_cache_key)
         try:
             chapter_payload = await _request_json(f"/chapter/{chapter_id}")
             chapter_data = chapter_payload.get("data") or {}
@@ -3342,7 +3342,7 @@ async def get_chapter_pages(chapter_id: str, mode: str = "data", refresh: bool =
                 "external_url": str(chapter_attributes.get("externalUrl") or ""),
                 "error": str(first_error),
             }
-            cache.set(cache_key, json.dumps(result, ensure_ascii=False), ttl=30)
+            await asyncio.to_thread(cache.set, cache_key, json.dumps(result, ensure_ascii=False), ttl=30)
             return result
         except RuntimeError:
             result = {
@@ -3352,7 +3352,7 @@ async def get_chapter_pages(chapter_id: str, mode: str = "data", refresh: bool =
                 "image_urls": [],
                 "error": str(first_error),
             }
-            cache.set(cache_key, json.dumps(result, ensure_ascii=False), ttl=15)
+            await asyncio.to_thread(cache.set, cache_key, json.dumps(result, ensure_ascii=False), ttl=15)
             return result
 
     chapter = payload.get("chapter") or {}
@@ -3377,9 +3377,10 @@ async def get_chapter_pages(chapter_id: str, mode: str = "data", refresh: bool =
         "image_urls": image_urls,
         "fallback_image_urls": fallback_image_urls,
     }
-    cache.set(cache_key, json.dumps(result, ensure_ascii=False), ttl=CHAPTER_PAGES_TTL)
+    await asyncio.to_thread(cache.set, cache_key, json.dumps(result, ensure_ascii=False), ttl=CHAPTER_PAGES_TTL)
     if used_mode == "data":
-        cache.set(
+        await asyncio.to_thread(
+            cache.set,
             f"mangadex:chapter-pages:{chapter_id}:data",
             json.dumps(result, ensure_ascii=False),
             ttl=CHAPTER_PAGES_TTL,
