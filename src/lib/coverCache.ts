@@ -99,7 +99,12 @@ function pump() {
       try {
         const response = await fetchImageResponse(entry.key, { signal: entry.controller.signal,
           priority: entry.priority === 'visible' ? 'high' : entry.priority === 'prefetch' ? 'low' : 'auto' }, entry.timeout);
-        if (!response.ok || !response.headers.get('content-type')?.toLowerCase().startsWith('image/')) throw new Error('Cover unavailable');
+        if (!response.ok || !response.headers.get('content-type')?.toLowerCase().startsWith('image/')) {
+          const seconds = Number(response.headers.get('Retry-After'));
+          throw Object.assign(new Error('Cover unavailable'), {
+            retryAfterMs: Number.isFinite(seconds) && seconds > 0 ? Math.min(60_000, seconds * 1000) : 0,
+          });
+        }
         const blob = await response.blob();
         if (!blob.size || entry.controller.signal.aborted) throw new DOMException('Cover cancelled', 'AbortError');
         entry.objectUrl = URL.createObjectURL(blob);

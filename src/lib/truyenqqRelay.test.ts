@@ -128,6 +128,27 @@ it('shares failed manifest recovery across sequential chapter images and retries
   expect(fetcher.mock.calls.filter(([url]) => url.includes('workers.dev'))).toHaveLength(2);
 });
 
+it('reports the same remaining relay cooldown to every waiting image without extending or bypassing it', async () => {
+  vi.useFakeTimers();
+  const fetcher = vi.fn().mockImplementation(async (url: string) => url.includes('workers.dev')
+    ? new Response('Temporary relay failure', { status: 503 })
+    : json({ detail: 'Source unavailable' }, 503, { 'X-TruyenQQ-Error': 'http-403',
+      'X-TruyenQQ-Source-Path': '/truyen-tranh/cooldown-shared-123-chap-1' }));
+  vi.stubGlobal('fetch', fetcher);
+  const first = await fetchWithTruyenQQRelay(api, {}, 60_000);
+  expect(first.headers.get('Retry-After')).toBe('30');
+  expect(await first.json()).toEqual({ detail: 'Source unavailable' });
+  await vi.advanceTimersByTimeAsync(10_000);
+  const second = await fetchWithTruyenQQRelay(api + '&image=2', {}, 60_000);
+  expect(second.headers.get('Retry-After')).toBe('20');
+  await vi.advanceTimersByTimeAsync(19_000);
+  expect((await fetchWithTruyenQQRelay(api + '&image=3', {}, 60_000)).headers.get('Retry-After')).toBe('1');
+  expect(fetcher.mock.calls.filter(([url]) => url.includes('workers.dev'))).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect((await fetchWithTruyenQQRelay(api, {}, 60_000)).headers.get('Retry-After')).toBe('30');
+  expect(fetcher.mock.calls.filter(([url]) => url.includes('workers.dev'))).toHaveLength(2);
+});
+
 it('shares successful recovery hints but still asks the backend to authorize each image', async () => {
   const blocked = () => json({}, 503, {
     'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/truyen-tranh/successful-123-chap-1',

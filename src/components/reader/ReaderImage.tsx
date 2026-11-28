@@ -33,6 +33,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
   const resourceRef = useRef<ReturnType<typeof acquireReaderImage>>();
   const began = useRef(0);
   const failedAt = useRef(0);
+  const retryAfterAt = useRef(0);
   const wasVisible = useRef(priority);
   const onVisibleRef = useRef(onVisible);
   onVisibleRef.current = onVisible;
@@ -64,8 +65,10 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
   const url = retry ? `${activeSrc}${activeSrc.includes('?') ? '&' : '?'}retry=${retry}` : activeSrc;
   const key = `${activeSrc}:${cycle}:${attempt}`;
   const managed = canCacheReaderImage(activeSrc);
-  const failed = useCallback(() => {
+  const failed = useCallback((reason?: unknown) => {
     failedAt.current = Date.now();
+    const cooldown = reason && typeof reason === 'object' && 'retryAfterMs' in reason ? Number(reason.retryAfterMs) : 0;
+    retryAfterAt.current = failedAt.current + (Number.isFinite(cooldown) ? Math.max(0, Math.min(60_000, cooldown)) : 0);
     rememberMangaDexImageFailure(activeSrc);
     invalidateCover(url);setLoaded(false);setWaiting(true);
   }, [url, activeSrc]);
@@ -78,7 +81,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
     const resource = acquireReaderImage(url, visible || priority ? 'visible' : 'prefetch');
     resourceRef.current = resource;
     void resource.promise.then(objectUrl => { if (!disposed) setDownload({ key, url: objectUrl }); },
-      () => { if (!disposed) failed(); });
+      reason => { if (!disposed) failed(reason); });
     return () => { disposed = true;resource.release();if (resourceRef.current === resource) resourceRef.current = undefined; };
     // Visibility only sets the priority at acquisition. Scrolling must not
     // cancel an in-flight download or replace an already decoded <img>.
@@ -104,8 +107,9 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
 
   useEffect(() => {
     if (!waiting || error || !inView) return;
-    const delay = attempt < RETRY_DELAYS.length ? Math.max(0, RETRY_DELAYS[attempt] - (Date.now() - failedAt.current))
+    const backoff = attempt < RETRY_DELAYS.length ? Math.max(0, RETRY_DELAYS[attempt] - (Date.now() - failedAt.current))
       : Math.max(0, MIN_RECOVERY_MS - (Date.now() - began.current));
+    const delay = Math.max(backoff, retryAfterAt.current - Date.now());
     const timer = window.setTimeout(() => {
       if (navigator.onLine === false || document.visibilityState === 'hidden' || !nearViewport()) return;
       if (attempt >= RETRY_DELAYS.length || Date.now() - began.current >= RECOVERY_DEADLINE_MS) setError(true);

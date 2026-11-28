@@ -239,3 +239,37 @@ it('preserves the original retry delay when a waiting image crosses the viewport
   act(() => vi.advanceTimersByTime(1));
   expect(screen.getByRole('img')).toHaveAttribute('src', 'https://cdn.example/viewport-retry.jpg?retry=1');
 });
+
+it('waits out a shared QQ relay failure and then recovers once without premature API retries or reload', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} });
+  vi.stubGlobal('URL', class extends URL {
+    static createObjectURL = vi.fn(() => 'blob:after-relay-cooldown');
+    static revokeObjectURL = vi.fn();
+  });
+  const api = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  let relayCalls = 0;
+  const request = vi.fn(async (url: string, options: RequestInit) => {
+    if (url.includes('workers.dev')) return ++relayCalls === 1
+      ? new Response('Temporary source failure', { status: 503 })
+      : new Response('chapter_content', { headers: { 'X-TruyenQQ-Proof': 'fixture-proof' } });
+    if (options.method === 'POST') return new Response('page', { headers: { 'Content-Type': 'image/jpeg' } });
+    return new Response('{}', { status: 503, headers: { 'X-TruyenQQ-Error': 'http-403',
+      'X-TruyenQQ-Source-Path': '/truyen-tranh/cooldown-book-123-chap-1', 'X-TruyenQQ-Recovery': '1' } });
+  });
+  vi.stubGlobal('fetch', request);
+  render(<ReaderImage src={`${api}/api/manga/truyenqq/image/cooldown-book-123/1/1`}
+    alt="Relay cooldown page" index={0} imageFit="width" pageGap={0} priority />);
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(relayCalls).toBe(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
+  expect(request).toHaveBeenCalledTimes(2); // one authorized API read and one relay failure
+  expect(screen.queryByRole('button')).toBeNull();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(relayCalls).toBe(2);
+  expect(screen.getByRole('img')).toHaveAttribute('src', 'blob:after-relay-cooldown');
+  fireEvent.load(screen.getByRole('img'));
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(request).toHaveBeenCalledTimes(5); // two API reads, two relay attempts and one signed handoff
+  expect(screen.queryByRole('button')).toBeNull();
+});

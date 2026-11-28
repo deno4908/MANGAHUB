@@ -3,7 +3,7 @@ import { isSiteAccessRestricted } from './siteAccessState';
 
 const EDGE = import.meta.env.VITE_TRUYENQQ_EDGE_URL ||
   'https://mangahub-mangadex-edge.vinhytb3010.workers.dev/api/truyenqq-edge';
-type Recovery = { ok: boolean; snapshot?: { html: string; proof: string } };
+type Recovery = { ok: boolean; snapshot?: { html: string; proof: string }; retryAt?: number };
 type Pending = { promise: Promise<Recovery>; controller: AbortController; readers: number; done: boolean };
 const pending = new Map<string, Pending>();
 const recent = new Map<string, Recovery & { until: number }>();
@@ -37,13 +37,15 @@ function remember(key: string, result: Recovery) {
     if (Number.isFinite(metadata.expires)) until = Math.min(until, metadata.expires * 1000 - 1000);
   } catch { /* An older relay can omit its signed expiry. */ }
   if (until <= Date.now()) return;
-  recent.delete(key);recent.set(key, { until, ...result });
+  const remembered = { ...result, until, ...(!result.ok ? { retryAt: until } : {}) };
+  recent.delete(key);recent.set(key, remembered);
   // Keep at most 4 MB of recovery HTML on mobile, with no account data.
   let bytes = [...recent.values()].reduce((sum, row) => sum + (row.snapshot?.html.length || 0) * 2, 0);
   while (recent.size > 64 || bytes > 4 * 1024 * 1024) {
     const oldest = recent.keys().next().value!;
     bytes -= (recent.get(oldest)?.snapshot?.html.length || 0) * 2;recent.delete(oldest);
   }
+  return remembered;
 }
 
 async function warm(value: Source, signal: AbortSignal | null | undefined, timeout: number, authorization?: string | null): Promise<Recovery> {
@@ -75,8 +77,7 @@ async function warm(value: Source, signal: AbortSignal | null | undefined, timeo
     } catch { return { ok: false }; }
     })();
     entry.promise = job.then(result => {
-      if (!entry.controller.signal.aborted) remember(key, result);
-      return result;
+      return !entry.controller.signal.aborted ? remember(key, result) || result : result;
     }).finally(() => {
       entry.done = true;
       if (pending.get(key) === entry) pending.delete(key);
@@ -154,7 +155,19 @@ export async function fetchWithTruyenQQRelay(url: string, options: RequestInit, 
     }
     const recovery = await warm(hint, options.signal, remaining, authorization);
     if (options.signal?.aborted) throw new DOMException('QQ read cancelled', 'AbortError');
-    if (!recovery.ok || started !== generation) return response;
+    if (started !== generation) return response;
+    if (!recovery.ok) {
+      // Every image sharing this source must wait for the same failed fill
+      // to expire. Early retries can only get the same cached failure.
+      const seconds = Math.ceil(((recovery.retryAt || 0) - Date.now()) / 1000);
+      if (!response.ok && seconds > 0) {
+        const headers = new Headers(response.headers);headers.set('Retry-After', String(seconds));
+        const deferred = new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+        Object.defineProperty(deferred, 'url', { value: response.url });
+        return deferred;
+      }
+      return response;
+    }
     const retryRemaining = deadline - Date.now();
     if (retryRemaining <= 0) return response;
     const canHandoff = response.headers.get('X-TruyenQQ-Recovery') === '1' && recovery.snapshot &&
