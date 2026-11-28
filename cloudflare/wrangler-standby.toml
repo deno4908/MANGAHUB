@@ -10,3 +10,6 @@ FAILOVER_ENABLED = "false"
 BALANCE_ENABLED = "false"
 BACKUP_ORIGIN = "https://standby.mangahub.art"
 DAILY_HEALTH_SHARED = "true"
+# Public API byte routes can resolve to standby without using Workers.
+# Primary requests still reach the verified Vercel ingress through this alias.
+PRIMARY_RESOLVE_OVERRIDE = "primary-origin.mangahub.art"

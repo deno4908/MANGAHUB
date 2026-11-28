@@ -69,6 +69,14 @@ jobs:
         run: |
           python3 - <<'PY'
           import os,json,urllib.request,time
+          import importlib.util
+          spec=importlib.util.spec_from_file_location('standby_manager','cloudflare/manage-standby.py')
+          manager=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(manager)
+          settings=manager.api('accounts/'+os.environ['CLOUDFLARE_ACCOUNT_ID']+'/workers/scripts/mangahub-standby-router/settings')
+          override=next((b.get('text') for b in settings.get('bindings',[]) if b.get('name')=='PRIMARY_RESOLVE_OVERRIDE'),None)
+          assert override=='primary-origin.mangahub.art','Primary ingress alias was not deployed'
+          print(json.dumps({'primary_override_verified':True}))
           base='https://standby.mangahub.art/internal/router-probe'
           for query in ['kind=daily-health','kind=readiness','kind=frontend&target=backup','kind=api&target=backup','kind=auth&target=backup']:
               request=urllib.request.Request(base+'?'+query,headers={'X-MangaHub-Probe-Secret':os.environ['STANDBY_ORIGIN_SECRET'],'User-Agent':'MangaHub-Standby-Operator/1.0'})
