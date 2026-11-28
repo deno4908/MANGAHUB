@@ -129,3 +129,69 @@ def test_one_http_error_does_not_close_a_pool_with_other_images_in_flight(monkey
                 release.set()
             assert (await pending)[0] == JPEG
     asyncio.run(run())
+
+
+def test_a_placeholder_image_does_not_interrupt_other_pages_or_close_the_pool(monkeypatch):
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = []
+        placeholder = b'\xff\xd8\xffhotlink-placeholder'
+
+        class PageStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                started.set()
+                await release.wait()
+                yield JPEG
+
+        def upstream(request):
+            calls.append(request.url.path)
+            if request.url.path.endswith('placeholder.jpg'):
+                return httpx.Response(200, headers={'Content-Type': 'image/jpeg'}, content=placeholder)
+            return httpx.Response(200, headers={'Content-Type': 'image/jpeg'}, stream=PageStream())
+
+        monkeypatch.setattr(images, '_validate_image_url', AsyncMock(return_value=None))
+        monkeypatch.setattr(images, '_looks_like_mangadex_hotlink_placeholder', lambda data: data == placeholder)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+            monkeypatch.setattr(images, '_mangadex_http_client', client)
+            pending = asyncio.create_task(images._fetch_once_httpx(PAGE))
+            try:
+                await asyncio.wait_for(started.wait(), 1)
+                failed = await images._fetch_once_httpx(PAGE.replace('page.jpg', 'placeholder.jpg'))
+                assert failed == (None, None, 'MangaDex returned hotlink placeholder', True)
+                assert not client.is_closed, 'A rejected placeholder closed unrelated image connections'
+            finally:
+                release.set()
+                completed = await pending
+            assert completed == (JPEG, 'image/jpeg', '', False)
+            assert calls == ['/data/hash/page.jpg', '/data/hash/placeholder.jpg']
+            assert images._mangadex_http_client is client
+
+    asyncio.run(run())
+
+
+def test_saver_failure_never_fetches_a_guessed_original_filename(monkeypatch):
+    # At-Home's data and dataSaver arrays use different filenames. Replacing
+    # only the directory invents an asset that is not in the chapter manifest.
+    saver = 'https://node.mangadex.network/data-saver/hash/5-small.jpg'
+    download = AsyncMock(return_value=(None, None, 'HTTP 404', True, 'httpx'))
+    monkeypatch.setattr(images, '_fetch_mangadex_candidate', download)
+    monkeypatch.setattr(images, '_mangadex_image_semaphore', asyncio.Semaphore(3))
+
+    async def run():
+        result = await images._fetch_image(saver)
+        assert result[0] is None
+        assert [call.args[0] for call in download.await_args_list] == [saver, saver]
+
+    asyncio.run(run())
+
+
+def test_resized_cover_still_recovers_using_its_real_original_asset(monkeypatch):
+    original = COVER.removesuffix('.512.jpg')
+    download = AsyncMock(side_effect=[
+        (None, None, 'HTTP 404', True, 'httpx'),
+        (JPEG, 'image/jpeg', '', False, 'httpx'),
+    ])
+    monkeypatch.setattr(images, '_fetch_mangadex_candidate', download)
+    monkeypatch.setattr(images, '_mangadex_image_semaphore', asyncio.Semaphore(3))
+    assert asyncio.run(images._fetch_image(COVER)) == (JPEG, original, 'image/jpeg', 'httpx')
+    assert [call.args[0] for call in download.await_args_list] == [COVER, original]

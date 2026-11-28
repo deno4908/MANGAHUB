@@ -748,8 +748,9 @@ def _candidate_urls(url: str) -> list[str]:
                 other_resized = f"{other_resized}?{parsed.query}"
             if other_resized not in candidates:
                 candidates.append(other_resized)
-    if _is_mangadex_host(host) and "/data-saver/" in url:
-        candidates.append(url.replace("/data-saver/", "/data/", 1))
+    # Original chapter pages have filenames supplied by At-Home's separate
+    # `data` array. Swapping /data-saver/ for /data/ invents an asset and adds
+    # failed downloads; the existing saver URL still gets its normal retries.
     return candidates
 
 
@@ -812,7 +813,8 @@ async def _fetch_once_httpx(url: str) -> tuple[bytes | None, str | None, str, bo
                         _image_cache_executor, _validate_mangadex_image_payload, data or b"", current_url
                     )
                     if mangadex_payload_error:
-                        await _reset_client(mangadex=is_mangadex)
+                        # This response was rejected, but its completed HTTP
+                        # exchange does not invalidate other in-flight images.
                         return None, None, mangadex_payload_error, True
                     return data, content_type, "", False
 
