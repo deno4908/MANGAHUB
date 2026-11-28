@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { acquireCover, cachedCover, canCacheCover, clearCoverCache, invalidateCover, retainCachedCover, warmCovers } from './coverCache';
+import { acquireCover, acquireReaderImage, cachedCover, canCacheCover, clearCoverCache, invalidateCover, retainCachedCover, warmCovers, warmReaderImages } from './coverCache';
 const origin = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const cover = (id: number) => `${origin}/api/manga/truyenqq/cover/book-${id}`;
 const image = () => new Response(new Blob(['bytes'], { type: 'image/jpeg' }), { headers: { 'content-type': 'image/jpeg' } });
@@ -127,13 +127,38 @@ it('limits active downloads and aborts queued covers after leaving a page', asyn
     finish.push(() => resolve(image()));
     options?.signal?.addEventListener('abort', () => reject(new DOMException('cancelled', 'AbortError')));
   }));
-  const jobs = Array.from({ length: 10 }, (_, n) => acquireCover(cover(n)));
+  const jobs = Array.from({ length: 14 }, (_, n) => acquireCover(cover(n)));
   const results = Promise.allSettled(jobs.map(job => job.promise));
-  expect(fetch).toHaveBeenCalledTimes(6);
-  jobs.slice(6).forEach(job => job.release());
+  expect(fetch).toHaveBeenCalledTimes(10);
+  jobs.slice(10).forEach(job => job.release());
   finish.forEach(done => done()); await results;
-  jobs.slice(0,6).forEach(job => job.release());
-  expect(fetch).toHaveBeenCalledTimes(6);
+  jobs.slice(0,10).forEach(job => job.release());
+  expect(fetch).toHaveBeenCalledTimes(10);
+});
+
+it('shows a larger reader batch without downloading preloaded, duplicate or revisited images again', async () => {
+  const finish: Array<() => void> = [];
+  vi.mocked(fetch).mockImplementation(() => new Promise(resolve => { finish.push(() => resolve(image())); }));
+  const urls = Array.from({ length: 12 }, (_, index) => `${origin}/api/images/img?url=${encodeURIComponent(`https://uploads.mangadex.org/data/chapter/${index}.jpg`)}`);
+  const stopWarming = warmReaderImages(urls);
+  expect(fetch).toHaveBeenCalledTimes(4);
+
+  const visible = urls.map(url => acquireReaderImage(url, 'visible'));
+  const duplicate = acquireReaderImage(urls[0], 'visible');
+  // Visible pages start together instead of waiting for the four preloads.
+  expect(fetch).toHaveBeenCalledTimes(10);
+  finish.splice(0).forEach(done => done());
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(12));
+  finish.splice(0).forEach(done => done());
+  const objects = await Promise.all(visible.map(resource => resource.promise));
+  expect(await duplicate.promise).toBe(objects[0]);
+  visible.forEach(resource => resource.release()); duplicate.release(); stopWarming();
+
+  const revisited = urls.map(url => acquireReaderImage(url, 'visible'));
+  expect(await Promise.all(revisited.map(resource => resource.promise))).toEqual(objects);
+  revisited.forEach(resource => resource.release());
+  expect(fetch).toHaveBeenCalledTimes(12);
+  expect(new Set(vi.mocked(fetch).mock.calls.map(([url]) => url)).size).toBe(12);
 });
 
 it('leaves download slots available for visible covers while warming another page', async () => {

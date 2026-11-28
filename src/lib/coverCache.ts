@@ -7,8 +7,9 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const TTL = 2 * 60_000;
 const MAX_BYTES = 24 * 1024 * 1024;
 const MAX_ENTRIES = 80;
-const MAX_ACTIVE = 6;
-const MAX_PREFETCH_ACTIVE = MAX_ACTIVE - 2;
+const MAX_ACTIVE = 10;
+// Give visible grids more capacity without starting more speculative work.
+const MAX_PREFETCH_ACTIVE = 4;
 
 type CoverPriority = 'visible' | 'normal' | 'prefetch';
 const priorityOrder: Record<CoverPriority, number> = { visible: 0, normal: 1, prefetch: 2 };
@@ -85,7 +86,7 @@ function prune() {
 function pump() {
   while (active < MAX_ACTIVE && waiting.length) {
     // Visible images must not queue behind a previous page's speculative work.
-    // Leave two slots free when only prefetches are waiting.
+    // Reserve the remaining capacity when only prefetches are waiting.
     waiting.sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority]);
     const next = waiting.findIndex(entry => entry.controller.signal.aborted || !entry.users ||
       entry.priority !== 'prefetch' || active < MAX_PREFETCH_ACTIVE);
