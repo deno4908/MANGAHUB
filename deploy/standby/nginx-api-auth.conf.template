@@ -1,0 +1,47 @@
+# Public API/auth ingress when Vercel is disabled. DNS stays proxied so the
+# existing Cloudflare ingress allowlist, backend authentication, whitelist,
+# revocation, CSRF and rate limits still apply. No image Worker is involved.
+map $http_cf_connecting_ip $mh_api_client_ip {
+    default $http_cf_connecting_ip;
+    "" $remote_addr;
+}
+server {
+    listen 80;
+    server_name api.mangahub.art auth.mangahub.art;
+    server_tokens off;
+    include /etc/nginx/mangahub-origin-rules/*.conf;
+    location / { return 308 https://$host$request_uri; }
+}
+server {
+    listen 443 ssl;
+    server_name api.mangahub.art auth.mangahub.art;
+    server_tokens off;
+    include /etc/nginx/mangahub-origin-rules/*.conf;
+    ssl_certificate /etc/mangahub/tls/api-auth-origin.pem;
+    ssl_certificate_key /etc/mangahub/tls/api-auth-origin.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 50m;
+    add_header Cache-Control "private, no-store" always;
+
+    location ~ ^/(api(/|$)|auth(/|$)|health$) {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Real-IP $mh_api_client_ip;
+        proxy_set_header X-Forwarded-For $mh_api_client_ip;
+        proxy_set_header CF-Connecting-IP "";
+        # These private Worker hints cannot be supplied by a public API client.
+        proxy_set_header X-MangaHub-Origin-Secret "";
+        proxy_set_header X-MangaHub-Public-Host "";
+        proxy_set_header X-MangaHub-Client-IP "";
+        proxy_hide_header X-MangaHub-Origin;
+        proxy_next_upstream off;
+        proxy_buffering off;
+        proxy_read_timeout 310s;
+        proxy_connect_timeout 5s;
+    }
+    # Readiness, saved health metadata and origin addresses stay private.
+    location / { return 404; }
+}

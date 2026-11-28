@@ -6,11 +6,15 @@ on:
     paths:
       - deploy/standby/nginx.conf.template
       - deploy/standby/test_nginx_navigation.py
+      - deploy/standby/nginx-api-auth.conf.template
+      - deploy/standby/test_nginx_api_auth.py
       - .github/workflows/nginx-navigation.yml
   pull_request:
     paths:
       - deploy/standby/nginx.conf.template
       - deploy/standby/test_nginx_navigation.py
+      - deploy/standby/nginx-api-auth.conf.template
+      - deploy/standby/test_nginx_api_auth.py
       - .github/workflows/nginx-navigation.yml
 
 permissions:
@@ -28,4 +32,4 @@ jobs:
             sudo apt-get install -y nginx
           fi
       - name: Verify HTML handoff, API writes and origin access gates
-        run: python3 deploy/standby/test_nginx_navigation.py
+        run: python3 -m unittest discover -s deploy/standby -p 'test_nginx_*.py'

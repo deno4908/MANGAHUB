@@ -42,6 +42,49 @@ test('healthy default stays on Vercel and strips provider markers',async()=>{
   assert.equal(new URL(f.calls[0].url).hostname,'api.mangahub.art');
 });
 
+test('a fixed primary DNS alias preserves the public host, credentials and a single write', async()=>{
+  const calls=[], jobs=[];
+  const worker=createStandbyWorker(async(input,options={})=>{
+    const r=typeof input==='string'?new Request(input,options):input, u=new URL(r.url);
+    calls.push({r,options});
+    if(u.pathname==='/index.html')return new Response('<html>fixture</html>',{headers:{'Content-Type':'text/html'}});
+    if(u.pathname==='/health'||u.pathname==='/auth/health')return Response.json({status:'ok'});
+    if(u.pathname==='/internal/origin-status')return Response.json({status:'ready',accept_extra:true});
+    return new Response(await r.text());
+  },()=>1000);
+  const configured={...env,BALANCE_ENABLED:'false',PRIMARY_RESOLVE_OVERRIDE:'primary-origin.mangahub.art'};
+  const r=await worker.fetch(request('auth.mangahub.art','/auth/refresh',{method:'POST',body:'only-once',headers:{
+    Authorization:'Bearer fixture',Origin:'https://mangahub.art','X-MangaHub-CSRF':'fixture',
+    'X-Resolve-Override':'untrusted.example'}}),configured,{waitUntil:p=>jobs.push(p)});
+  await Promise.all(jobs);
+  assert.equal(await r.text(),'only-once');
+  const writes=calls.filter(({r})=>r.method==='POST');
+  assert.equal(writes.length,1);
+  assert.equal(writes[0].r.url,'https://auth.mangahub.art/auth/refresh');
+  assert.equal(writes[0].r.headers.get('Authorization'),'Bearer fixture');
+  assert.equal(writes[0].r.headers.get('X-MangaHub-CSRF'),'fixture');
+  assert.equal(writes[0].options.cf.resolveOverride,'primary-origin.mangahub.art');
+  const primaryChecks=calls.filter(({r})=>['mangahub.art','api.mangahub.art','auth.mangahub.art'].includes(new URL(r.url).hostname)&&r.method==='GET');
+  assert.equal(primaryChecks.length,3);
+  assert.ok(primaryChecks.every(({options})=>options.cf.resolveOverride==='primary-origin.mangahub.art'));
+  assert.ok(calls.filter(({r})=>new URL(r.url).hostname==='standby.example').every(({options})=>!options.cf?.resolveOverride));
+});
+
+test('an unapproved primary DNS override never selects a caller-controlled server', async()=>{
+  const calls=[], jobs=[];
+  const worker=createStandbyWorker(async(input,options={})=>{
+    const r=typeof input==='string'?new Request(input,options):input;
+    calls.push({r,options});
+    if(new URL(r.url).pathname==='/index.html')return new Response('<html/>',{headers:{'Content-Type':'text/html'}});
+    if(new URL(r.url).pathname==='/internal/origin-status')return Response.json({status:'ready',accept_extra:true});
+    return new Response('backup');
+  },()=>1000);
+  await worker.fetch(request(undefined,undefined,{method:'OPTIONS'}),{...env,PRIMARY_RESOLVE_OVERRIDE:'attacker.example'},
+    {waitUntil:p=>jobs.push(p)});
+  await Promise.all(jobs);
+  assert.ok(calls.every(({r,options})=>new URL(r.url).hostname==='standby.example'&&!options.cf?.resolveOverride));
+});
+
 test('a measured faster standby raises the eligible share to 25 percent',async()=>{
   // Complete independent probes with controlled elapsed times, as in a real
   // network. Initiation itself must not advance the shared fake clock.

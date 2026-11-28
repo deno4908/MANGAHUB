@@ -51,6 +51,14 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
         value.search || value.hash || [FRONT, API, AUTH].includes(value.hostname)) throw new Error('Invalid standby configuration');
     return value.origin;
   }
+  function primaryResolution(env) {
+    // DNS for public byte routes may point at standby, independently of Workers.
+    // Keep Vercel routing and its daily check on the fixed owned ingress alias.
+    // Caller headers, paths and query parameters can never select this target.
+    if (!env.PRIMARY_RESOLVE_OVERRIDE) return {};
+    if (env.PRIMARY_RESOLVE_OVERRIDE !== 'primary-origin.mangahub.art') throw new Error('Invalid primary resolution');
+    return { resolveOverride: env.PRIMARY_RESOLVE_OVERRIDE };
+  }
   async function timed(url, options = {}, ms = 5000, html = false) {
     const started = now(), controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms);
@@ -61,11 +69,11 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       return { response, value, milliseconds: Math.max(0, now() - started) };
     } finally { clearTimeout(timer); }
   }
-  async function primaryProbe(host) {
+  async function primaryProbe(host, env) {
     const html = host === FRONT, path = html ? '/index.html' : host === API ? '/health' : '/auth/health';
     try {
       const { response, value, milliseconds } = await timed('https://' + host + path, {
-        headers: { Accept: html ? 'text/html' : 'application/json', 'Cache-Control': 'no-cache' }, cf: { cacheTtl: 0 },
+        headers: { Accept: html ? 'text/html' : 'application/json', 'Cache-Control': 'no-cache' }, cf: { cacheTtl: 0, ...primaryResolution(env) },
       },5000,html);
       return { ok: response.status === 200 && (html ? value?.html : value?.status === 'ok'), milliseconds };
     } catch { return { ok: false }; }
@@ -87,7 +95,7 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
   }
   async function measure(env) {
     const [front, api, auth, backup] = await Promise.all([
-      primaryProbe(FRONT), primaryProbe(API), primaryProbe(AUTH), backupProbe(env, false)]);
+      primaryProbe(FRONT, env), primaryProbe(API, env), primaryProbe(AUTH, env), backupProbe(env, false)]);
     return { checkedAt: now(), primary: { [FRONT]: front, [API]: api, [AUTH]: auth }, backup };
   }
   function validSnapshot(value) {
@@ -198,7 +206,8 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
     const signal = AbortSignal.any([controller.signal, request.signal]);
     try {
       const response = await send(new Request(url, { method: request.method, headers,
-        body: SAFE(request.method) ? undefined : request.body, redirect: 'manual', signal, duplex: 'half' }));
+        body: SAFE(request.method) ? undefined : request.body, redirect: 'manual', signal, duplex: 'half' }),
+        target === 'primary' ? { cf: primaryResolution(env) } : undefined);
       // Supabase's authorize URL carries an explicit, allowlisted redirect_to.
       // Change only that fixed callback for a login begun on our standby UI;
       // PKCE, provider URL, protected verifier cookie and errors stay intact.
