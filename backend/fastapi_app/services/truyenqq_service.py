@@ -16,6 +16,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from functools import partial
 from urllib.parse import quote, urlsplit
 
@@ -384,6 +385,15 @@ async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=
                                "source_url": raw.get("source_url")}
                     value = await asyncio.to_thread(_page, raw)
                     await asyncio.to_thread(cache.set, key, json.dumps({"payload": value, "fresh_until": time.time() + 45}), ttl=CATALOG_LAST_GOOD_SECONDS)
+                    if method == 'collection' and args == ('latest', 1) and _source_read_scope():
+                        # Reuse this approved source response for native live
+                        # updates. Do not make another relay request or retain
+                        # the reader token in the unauthenticated probe loop.
+                        from fastapi_app.services.catalog_updates import catalog_updates
+                        try:
+                            await catalog_updates.observe_qq_listing(value)
+                        except Exception:
+                            logger.warning('QQ revision publication unavailable after a successful source read')
                     return value
                 except Exception:
                     if snapshot:
@@ -592,6 +602,39 @@ def _valid_detail(payload):
     return isinstance(item, dict) and item.get('source') == 'truyenqq' and 'chapters' in item
 
 
+def _overlay_detail_latest(payload, latest):
+    """Expose a newly observed chapter while a full source detail refresh runs."""
+    item = payload['data']['item']
+    canonical = item.get('source_slug') or item.get('slug')
+    incoming = next((row for row in ((latest or {}).get('data') or {}).get('items', [])
+                     if row.get('slug') == canonical), None)
+    chapter = next(iter((incoming or {}).get('chaptersLatest') or []), None)
+    if not chapter:
+        return payload
+    path = str(chapter.get('chapter_api_data') or '')
+    if not path.startswith('/api/manga/chapter/'):
+        return payload
+    try:
+        slug, number = parse_chapter_token(path.rsplit('/', 1)[-1])
+        incoming_number = Decimal(number.replace('-', '.'))
+        if slug != canonical or not incoming_number.is_finite():
+            return payload
+        groups = item.get('chapters') or []
+        chapters = [row for group in groups for row in group.get('server_data', [])]
+        if any(row.get('chapter_api_data') == path for row in chapters):
+            return payload
+        existing = [Decimal(str(row.get('chapter_name', '')).replace(',', '.')) for row in chapters]
+        if existing and (not all(value.is_finite() for value in existing) or incoming_number <= max(existing)):
+            return payload
+    except (HTTPException, InvalidOperation, ValueError):
+        return payload
+    if not groups:
+        groups = item['chapters'] = [{'server_name': 'TruyenQQ', 'server_data': []}]
+    groups[0].setdefault('server_data', []).insert(0, deepcopy(chapter))
+    item['chaptersLatest'] = [deepcopy(chapter)]
+    return payload
+
+
 @coalesce_reads(scope=_source_read_scope)
 async def _load_manga_detail(slug):
     try:
@@ -618,7 +661,7 @@ async def get_manga_detail(slug):
     stale_key = f'truyenqq:detail-last-good:{slug}'
     retry_key = f'truyenqq:detail-refresh:{slug}:{int(_source_read_scope())}'
     legacy = not re.fullmatch(r"[a-zA-Z0-9]+(?:-+[a-zA-Z0-9]+)*-\d+", slug)
-    keys = [fresh_key, stale_key, retry_key]
+    keys = [fresh_key, stale_key, retry_key, 'truyenqq:list:truyen-moi:1']
     if legacy:
         keys += [f'truyenqq:cover-hint:{slug}', f'catalog:card-metadata:v1:{slug}']
     values = await asyncio.to_thread(cache.get_many, keys)
@@ -646,6 +689,7 @@ async def get_manga_detail(slug):
         # and downloading the same comic separately for every saved alias.
         identifier = _cached_detail_identifier(slug, values) if legacy else slug
         payload = await get_manga_detail(identifier) if identifier != slug else await _load_manga_detail(slug)
+    payload = _overlay_detail_latest(payload, _decode_cached(values.get('truyenqq:list:truyen-moi:1')))
     item = payload["data"]["item"]
     canonical = item["slug"]
     # Keep existing website IDs so ratings, views, comments and bookmarks keep

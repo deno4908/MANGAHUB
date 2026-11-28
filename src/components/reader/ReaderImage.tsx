@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, memo } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { getMangaDexImageFallback, getPreferredMangaDexImageUrl, rememberMangaDexImageFailure } from '@/lib/mangaDexImages';
 import { acquireReaderImage, canCacheReaderImage, invalidateCover } from '@/lib/coverCache';
+import { observeReaderPage } from '@/lib/readerViewport';
 
 interface ReaderImageProps {
   src: string;
@@ -37,15 +38,13 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
   useEffect(() => {
     const el = imgRef.current;
     if (!el) return;
-    if (typeof IntersectionObserver === 'undefined') { setInView(true);setVisible(true);return; }
-    const preload = new IntersectionObserver(([entry]) => { if (entry.isIntersecting) setInView(true); },
-      { rootMargin: '1000px 0px', threshold: 0 });
-    const viewport = new IntersectionObserver(([entry]) => {
-      setVisible(entry.isIntersecting);
-      if (entry.isIntersecting) onVisibleRef.current?.(index);
-    }, { rootMargin: '0px', threshold: .05 });
-    preload.observe(el);viewport.observe(el);
-    return () => { preload.disconnect();viewport.disconnect(); };
+    return observeReaderPage(el, {
+      near: () => setInView(true),
+      visible: value => {
+        setVisible(value);
+        if (value) onVisibleRef.current?.(index);
+      },
+    });
   }, [index]);
 
   useEffect(() => {

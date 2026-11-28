@@ -24,6 +24,15 @@ SOURCES = ("truyenqq", "mangadex")
 STATE_PREFIX = "catalog:revision:v1:"
 
 
+def qq_listing_entries(payload):
+    """Use chapter identities from a verified source listing, without a probe."""
+    items = (payload.get("data") or {}).get("items") or []
+    return {item["slug"]: {"slug": item["slug"], "chapter_id":
+            ((item.get("chaptersLatest") or [{}])[0].get("chapter_api_data") or "").rsplit("/", 1)[-1],
+            "chapter_name": (item.get("chaptersLatest") or [{}])[0].get("chapter_name", "")}
+            for item in items if item.get("slug")}
+
+
 class CatalogUpdates:
     def __init__(self):
         self.current = {}
@@ -59,10 +68,7 @@ class CatalogUpdates:
             if not value.get("items"):
                 raise ValueError("Empty QQ update probe")
             self._warm_qq = await asyncio.to_thread(qq._page, value)
-            return {item["slug"]: {"slug": item["slug"], "chapter_id":
-                    ((item.get("chaptersLatest") or [{}])[0].get("chapter_api_data") or "").rsplit("/", 1)[-1],
-                    "chapter_name": (item.get("chaptersLatest") or [{}])[0].get("chapter_name", "")}
-                    for item in self._warm_qq["data"]["items"]}
+            return qq_listing_entries(self._warm_qq)
         payload = await mdx._request_json("/chapter", {
             "translatedLanguage[]": "vi", "includes[]": ["user", "scanlation_group", "manga"],
             "contentRating[]": ["safe", "suggestive", "erotica", "pornographic"],
@@ -134,27 +140,41 @@ class CatalogUpdates:
         from fastapi_app.routers import manga
         manga._trending_memory_cache.clear()
 
-    async def publish(self, source, entries):
+    async def publish(self, source, entries, *, qq_payload=None):
+        latest = qq_payload if qq_payload is not None else self._warm_qq
         previous = await asyncio.to_thread(self._read_state, source)
         fingerprint = hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest()
         if previous and previous.get("fingerprint") == fingerprint:
-            if source == "truyenqq" and self._warm_qq:
-                await asyncio.to_thread(self._remember_qq)
+            if source == "truyenqq" and latest:
+                await asyncio.to_thread(self._remember_qq, latest)
             return None
         before = (previous or {}).get("entries") or {}
         changes = [entry for slug, entry in entries.items() if before.get(slug) != entry]
         event = {"source": source, "revision": uuid.uuid4().hex,
                  "observed_at": datetime.now(timezone.utc).isoformat(), "changes": changes}
         await asyncio.to_thread(self._invalidate, event, True, source == "truyenqq")
-        if source == "truyenqq" and self._warm_qq:
-            await asyncio.to_thread(self._remember_qq)
+        if source == "truyenqq" and latest:
+            await asyncio.to_thread(self._remember_qq, latest)
         state = {"event": event, "entries": entries, "fingerprint": fingerprint}
         await asyncio.to_thread(cache_service.cache.set, STATE_PREFIX + source, json.dumps(state), 86400)
         self.current[source] = event
         return event
 
-    def _remember_qq(self):
-        qq.remember_list('truyen-moi', 1, self._warm_qq, fresh_seconds=max(15, POLL_SECONDS * 2))
+    def _remember_qq(self, payload=None):
+        qq.remember_list('truyen-moi', 1, payload if payload is not None else self._warm_qq,
+                         fresh_seconds=max(15, POLL_SECONDS * 2))
+
+    async def observe_qq_listing(self, payload):
+        """Publish the result of an existing reader fetch, never fetch it again.
+
+        Native startup probes cannot borrow a logged-in reader's credentials.
+        Successful interactive reads must still reach the revision stream.
+        Only the unfiltered first latest page represents this source snapshot.
+        """
+        entries = qq_listing_entries(payload)
+        if not entries:
+            return None
+        return await self.publish("truyenqq", entries, qq_payload=payload)
 
     async def sync(self):
         for source in SOURCES:

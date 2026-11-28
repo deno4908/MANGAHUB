@@ -14,7 +14,7 @@ afterEach(() => {
 
 it('uses the proxy for subsequent MangaDex pages after the same CDN host fails', async () => {
   vi.useFakeTimers();
-  vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+  vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} });
   vi.stubGlobal('URL', class extends URL {
     static createObjectURL = vi.fn(() => 'blob:recovered-mangadex-page');
     static revokeObjectURL = vi.fn();
@@ -34,7 +34,7 @@ it('uses the proxy for subsequent MangaDex pages after the same CDN host fails',
 
 it('retries a protected QQ download and clears its cached private blob on access loss', async () => {
   vi.useFakeTimers();
-  vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+  vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} });
   vi.stubGlobal('URL', class extends URL {
     static createObjectURL = vi.fn(() => 'blob:reader-private-image');
     static revokeObjectURL = vi.fn();
@@ -59,7 +59,7 @@ it('retries a protected QQ download and clears its cached private blob on access
 
 it('silently retries transient decode/network errors and stops after a successful page', () => {
   vi.useFakeTimers();
-  vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+  vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} });
   render(<ReaderImage src="https://cdn.example/page.jpg" alt="Retrying page" index={1} imageFit="width" pageGap={0} priority />);
   fireEvent.error(screen.getByRole('img'));
   expect(screen.queryByRole('button')).toBeNull();
@@ -75,7 +75,7 @@ it('silently retries transient decode/network errors and stops after a successfu
 
 it('only offers manual retry after a bounded recovery window, and manual retry gets a fresh URL', () => {
   vi.useFakeTimers();
-  vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+  vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} });
   render(<ReaderImage src="https://cdn.example/outage.jpg" alt="Outage page" index={0} imageFit="width" pageGap={0} priority />);
   for (const delay of [1000, 2000, 4000, 8000]) {
     fireEvent.error(screen.getByRole('img'));act(() => vi.advanceTimersByTime(delay));
@@ -93,7 +93,7 @@ it('only offers manual retry after a bounded recovery window, and manual retry g
 
 it('recovers a failed page automatically when the network returns', () => {
   vi.useFakeTimers();
-  vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+  vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} });
   render(<ReaderImage src="https://cdn.example/offline.jpg" alt="Offline page" index={0} imageFit="width" pageGap={0} priority />);
   act(() => vi.advanceTimersByTime(60_000));
   expect(screen.getByRole('button')).toBeInTheDocument();
@@ -106,6 +106,7 @@ it('lets the QQ proxy finish CDN fallback before retrying an image', () => {
   vi.useFakeTimers();
   vi.stubGlobal('IntersectionObserver', class {
     observe() {}
+    unobserve() {}
     disconnect() {}
   });
   const src = 'http://localhost:8000/api/manga/truyenqq/image/truyen-123/1/1';
@@ -122,7 +123,7 @@ it('lets the QQ proxy finish CDN fallback before retrying an image', () => {
 
 it('adopts an in-flight preload once and keeps downloading through visibility changes', async () => {
   vi.useFakeTimers();
-  vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+  vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} });
   vi.stubGlobal('URL', class extends URL {
     static createObjectURL = vi.fn(() => 'blob:shared-reader-page');
     static revokeObjectURL = vi.fn();

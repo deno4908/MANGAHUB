@@ -228,3 +228,92 @@ def test_batched_redis_invalidation_scans_namespaces_once_and_keeps_unrelated_ke
     assert client.scan_iter.call_count == 2
     deleted = [key for call in client.delete.call_args_list for key in call.args]
     assert set(deleted) == set(keys) - {'mangadex:detail:v4:other:all'}
+
+
+def test_native_reader_fetch_publishes_qq_revision_without_an_additional_probe(monkeypatch, cache):
+    from unittest.mock import AsyncMock
+    import fastapi_app.services.catalog_updates as updates
+    from site_access import source_authorization
+    publisher = CatalogUpdates()
+    monkeypatch.setattr(updates, 'catalog_updates', publisher)
+    monkeypatch.setattr(qq, '_catalog_jobs', {})
+    number = 1
+    async def read(*args, **kwargs):
+        assert args == ('collection', 'latest', 1)
+        return {'items': [{'id': '123', 'url': 'https://truyenqqko.com/truyen-tranh/native-123',
+            'title': 'Native', 'latest_chapter': {'number': str(number), 'title': 'Latest'}}], 'page': 1}
+    fetch = AsyncMock(side_effect=read)
+    monkeypatch.setattr(qq, 'run_live', fetch)
+    async def check():
+        nonlocal number
+        token = source_authorization.set('Bearer fixture-reader')
+        try:
+            first = await qq.get_list()
+            assert first['data']['items'][0]['chaptersLatest'][0]['chapter_name'] == '1'
+            state = json.loads(cache.get(STATE_PREFIX + 'truyenqq'))
+            assert state['event']['changes'][0]['chapter_name'] == '1'
+            revision = publisher.current['truyenqq']['revision']
+            await publisher.observe_qq_listing(first)
+            assert publisher.current['truyenqq']['revision'] == revision
+            number = 2
+            for key in list(cache.values):
+                if key.startswith('truyenqq:page-snapshot:'):
+                    value = json.loads(cache.values[key]);value['fresh_until'] = 0
+                    cache.values[key] = json.dumps(value)
+            cache.delete(qq._fast_list_key('truyen-moi', 1))
+            await qq.get_list()
+            jobs = list(qq._catalog_jobs.values())
+            if jobs:
+                await asyncio.gather(*jobs)
+            result = await qq.get_list()
+            assert result['data']['items'][0]['chaptersLatest'][0]['chapter_name'] == '2'
+            worker = CatalogUpdates()
+            await worker.sync()
+            assert worker.current['truyenqq']['changes'][0]['chapter_name'] == '2'
+            assert worker.current['truyenqq']['revision'] != revision
+            assert fetch.await_count == 2  # only the two ordinary source reads
+        finally:
+            source_authorization.reset(token)
+    asyncio.run(check())
+
+
+def test_new_qq_revision_reaches_stale_detail_and_next_chapter_without_waiting_for_source(monkeypatch, cache):
+    from unittest.mock import AsyncMock
+    canonical = 'native-123'
+    old = {'data': {'item': {'slug': canonical, 'source': 'truyenqq', 'name': 'Native',
+        'chapters': [{'server_name': 'TruyenQQ', 'server_data': [{'chapter_name': '1',
+            'chapter_api_data': '/api/manga/chapter/qq--native-123--1'}]}]}}}
+    cache.set('truyenqq:detail:' + canonical, json.dumps(old))
+    cache.set('truyenqq:detail-last-good:' + canonical, json.dumps(old))
+    latest = {'data': {'items': [{'slug': canonical, 'chaptersLatest': [{'chapter_name': '2',
+        'chapter_api_data': '/api/manga/chapter/qq--native-123--2'}]}]}}
+    monkeypatch.setattr(qq, '_catalog_jobs', {})
+    async def check():
+        started, release = asyncio.Event(), asyncio.Event()
+        async def blocked(*args, **kwargs):
+            started.set();await release.wait();raise RuntimeError('temporary source challenge')
+        monkeypatch.setattr(qq, 'run_live', AsyncMock(side_effect=blocked))
+        await CatalogUpdates().observe_qq_listing(latest)
+        detail = await asyncio.wait_for(qq.get_manga_detail(canonical), 1)
+        item = detail['data']['item']
+        assert [row['chapter_name'] for row in item['chapters'][0]['server_data']] == ['2', '1']
+        assert item['chaptersLatest'][0]['chapter_api_data'].endswith('--2')
+        assert json.loads(cache.get('truyenqq:detail-last-good:' + canonical)) == old
+        await asyncio.wait_for(started.wait(), 1)
+        again = await qq.get_manga_detail(canonical)
+        assert again == detail
+        assert qq.run_live.await_count == 1
+        release.set()
+        await asyncio.gather(*list(qq._catalog_jobs.values()))
+    asyncio.run(check())
+
+
+def test_qq_detail_overlay_cannot_mix_books_regress_or_duplicate_chapters():
+    from copy import deepcopy
+    old = {'data': {'item': {'slug': 'native-123', 'source': 'truyenqq',
+        'chapters': [{'server_data': [{'chapter_name': '3',
+            'chapter_api_data': '/api/manga/chapter/qq--native-123--3'}]}]}}}
+    for path in ['qq--other-123--4', 'qq--native-123--2', 'qq--native-123--3', 'qq--native-123--NaN']:
+        latest = {'data': {'items': [{'slug': 'native-123', 'chaptersLatest': [{
+            'chapter_name': '4', 'chapter_api_data': '/api/manga/chapter/' + path}]}]}}
+        assert qq._overlay_detail_latest(deepcopy(old), latest) == old
