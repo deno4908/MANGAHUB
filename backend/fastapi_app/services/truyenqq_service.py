@@ -433,7 +433,9 @@ async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=
                             logger.warning('QQ revision publication unavailable after a successful source read')
                     return value
                 except Exception as error:
-                    if snapshot:
+                    anonymous_denial = (not _source_read_scope() and isinstance(error, HTTPException)
+                        and (error.headers or {}).get('X-TruyenQQ-Transport') == 'edge-gateway')
+                    if snapshot and not anonymous_denial:
                         def retain():
                             # An older failed refresh cannot roll back a
                             # verified handoff that finished in the meantime.

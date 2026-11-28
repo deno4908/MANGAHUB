@@ -301,3 +301,35 @@ def test_latest_overlay_never_reverts_a_newly_recovered_chapter(stored):
         latest = await asyncio.to_thread(qq._page, source_page())
         assert qq._overlay_latest(payload, latest_payload=latest)['data']['items'][0]['chaptersLatest'][0]['chapter_name'] == '5'
     asyncio.run(run())
+
+
+def test_denied_anonymous_warmup_cannot_postpone_a_readers_refresh_or_spend_browser_recovery_quota(stored, monkeypatch):
+    from fastapi import HTTPException
+    from fastapi_app.services import truyenqq_recovery as recovery
+    async def run():
+        original = await qq.get_filtered(page=3, overlay_latest=False)
+        key = next(key for key in stored.values if key.startswith('truyenqq:page-snapshot:'))
+        snapshot = json.loads(stored.values[key])
+        snapshot['fresh_until'] = 0
+        stored.values[key] = json.dumps(snapshot)
+        hints = {'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/tim-kiem-nang-cao/trang-3?sort=2',
+                 'X-TruyenQQ-Transport': 'edge-gateway', 'X-TruyenQQ-Recovery': '1'}
+        assert recovery.failure_hints(HTTPException(503, 'Anonymous relay denied', headers=hints)) == {}
+        monkeypatch.setattr(qq, 'run_live', AsyncMock(side_effect=HTTPException(503, 'Anonymous relay denied', headers=hints)))
+        marker = qq.source_authorization.set(None)
+        try:
+            assert await qq.get_filtered(page=3, overlay_latest=False) == original
+            await asyncio.gather(*list(qq._catalog_jobs.values()), return_exceptions=True)
+            assert json.loads(stored.values[key]) == snapshot
+            fresh = source_page()
+            fresh['items'][0]['latest_chapter']['number'] = '5'
+            source = AsyncMock(return_value=fresh)
+            monkeypatch.setattr(qq, 'run_live', source)
+            qq.source_authorization.set('Bearer approved-fixture')
+            await qq.get_filtered(page=3, overlay_latest=False)
+            await asyncio.gather(*list(qq._catalog_jobs.values()))
+            assert (await qq.get_filtered(page=3, overlay_latest=False))['data']['items'][0]['chaptersLatest'][0]['chapter_name'] == '5'
+            source.assert_awaited_once()
+        finally:
+            qq.source_authorization.reset(marker)
+    asyncio.run(run())

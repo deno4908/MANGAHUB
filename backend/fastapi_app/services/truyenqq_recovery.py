@@ -31,7 +31,8 @@ def failure_hints(error):
     """Keep only public source-denial hints, never auth denials or error bodies."""
     headers = (error.headers or {}) if hasattr(error, 'headers') else error if isinstance(error, dict) else {}
     path = headers.get('X-TruyenQQ-Source-Path', '')
-    if (headers.get('X-TruyenQQ-Error') != 'http-403' or not isinstance(path, str)
+    if (headers.get('X-TruyenQQ-Transport') == 'edge-gateway'
+            or headers.get('X-TruyenQQ-Error') != 'http-403' or not isinstance(path, str)
             or len(path) > 2048 or not SOURCE_PAGES.fullmatch(path.split('?', 1)[0])):
         return {}
     names = {'X-TruyenQQ-Error', 'X-TruyenQQ-Source-Path', 'X-TruyenQQ-Recovery',
