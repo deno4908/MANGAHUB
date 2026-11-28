@@ -9,6 +9,7 @@ from serverless_runtime import create_task
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import threading
@@ -34,6 +35,7 @@ from fastapi_app.services.request_coalescing import coalesce_reads
 from fastapi_app.services.truyenqq_transport import TruyenQQTransport
 from fastapi_app.services.truyenqq_recovery import failure_hints, recovered_source, source_matches, surface_stale_hints
 from site_access import source_authorization
+import site_access
 
 
 def _source_read_scope():
@@ -81,6 +83,25 @@ def get_live() -> LiveService:
 
 async def run_live(method: str, *args, _pool=None, **kwargs):
     try:
+        # An anonymous warmup cannot use the protected relay in whitelist
+        # mode. Reject it before queuing behind readers or entering the
+        # scraper's per-host request delay. Cached public payloads are read
+        # by the callers before this source operation; reader credentials,
+        # public mode, direct-source setups and binary CDN reads are unchanged.
+        prefer_edge = os.getenv("TRUYENQQ_PREFER_EDGE", os.getenv("VERCEL", "0")).lower() in {"1", "true", "yes"}
+        relay_configured = bool(os.getenv("TRUYENQQ_EDGE_URL", "default").rstrip("/"))
+        if prefer_edge and relay_configured and not source_authorization.get() and method not in {"image", "chapter_image"}:
+            try:
+                restricted = (await asyncio.to_thread(site_access.get_state))['enabled']
+            except site_access.AccessUnavailable as error:
+                raise HTTPException(503, "Không thể kiểm tra quyền truy cập.", headers={
+                    "Cache-Control": "no-store", "X-Site-Access-Error": "policy-unavailable",
+                }) from error
+            if restricted:
+                raise HTTPException(503, "Không tải được dữ liệu từ TruyenQQ.", headers={
+                    "Cache-Control": "no-store", "X-TruyenQQ-Error": "http-403",
+                    "X-TruyenQQ-Transport": "edge-gateway",
+                })
         # Creating the HTTP client also performs blocking TLS setup. Keep the
         # first request out of the event loop, just like subsequent scraping.
         def call():
