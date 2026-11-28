@@ -36,6 +36,36 @@ def test_httpx_image_request_identifies_as_a_server_client(monkeypatch, url):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('failure', [httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.PoolTimeout])
+def test_a_single_transport_failure_keeps_other_page_downloads_and_the_pool_alive(monkeypatch, failure):
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+        class PageStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                started.set()
+                await release.wait()
+                yield JPEG
+        def upstream(request):
+            if request.url.path.endswith('failed.jpg'):
+                raise failure('isolated request failure', request=request)
+            return httpx.Response(200, headers={'Content-Type':'image/jpeg'}, stream=PageStream())
+        monkeypatch.setattr(images, '_validate_image_url', AsyncMock(return_value=None))
+        async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+            monkeypatch.setattr(images, '_mangadex_http_client', client)
+            pending = asyncio.create_task(images._fetch_once_httpx(PAGE))
+            try:
+                await asyncio.wait_for(started.wait(), 1)
+                failed = await images._fetch_once_httpx(PAGE.replace('page.jpg', 'failed.jpg'))
+                assert failed[0] is None and failed[3] is True
+                assert not client.is_closed, 'One failed image closed every active image connection'
+            finally:
+                release.set()
+                completed = await pending
+            assert completed[0] == JPEG
+            assert (await images._fetch_once_httpx(PAGE))[0] == JPEG
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("url", [COVER, PAGE])
 def test_curl_image_request_uses_the_same_identity(monkeypatch, url):
     seen = []

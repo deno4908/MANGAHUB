@@ -798,7 +798,9 @@ async def _fetch_once_httpx(url: str) -> tuple[bytes | None, str | None, str, bo
                 # that are still downloading and makes the reader retry them.
                 return None, None, f"HTTP {response.status_code}", retryable
         except httpx.HTTPError as error:
-            await _reset_client(mangadex=is_mangadex)
+            # HTTPX discards the failed connection/request itself. Closing the
+            # shared client also interrupts unrelated pages and turns one
+            # timeout (including a pool wait) into a chapter-wide retry storm.
             return None, None, f"{type(error).__name__}: {error}", True
 
     return None, None, "Too many image redirects", False
