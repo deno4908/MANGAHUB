@@ -84,6 +84,11 @@ jobs:
             echo 'deploy=false' >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Verify source concurrency in the Workers runtime
+        if: steps.source.outputs.deploy == 'true'
+        run: |
+          npm install --prefix "$RUNNER_TEMP/mh-worker-runtime" --no-audit --no-fund miniflare@4.20260730.0
+          MANGAHUB_MINIFLARE_MODULE="$RUNNER_TEMP/mh-worker-runtime/node_modules/miniflare" node --test cloudflare/truyenqq-edge.runtime.test.mjs
       - name: Configure private QQ response signing
         if: steps.source.outputs.deploy == 'true' && env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.STANDBY_ORIGIN_SECRET != ''
         run: |

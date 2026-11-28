@@ -239,3 +239,177 @@ test('authorized source reads carry a verifiable handoff while denied/challenge 
   const challenge = await worker.fetch(new Request(edge + '/truyen-tranh/book-123'), { QQ_RECOVERY_SECRET: secret });
   assert.equal(challenge.headers.get('X-TruyenQQ-Proof'), null);
 });
+
+function gate() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+const turn = () => new Promise(resolve => setImmediate(resolve));
+function concurrentContext() {
+  const jobs = [];
+  return { waitUntil: job => jobs.push(job), done: () => Promise.all(jobs) };
+}
+function reader(path, token = 'same-reader', options = {}) {
+  return new Request(edge + path, { ...options, headers: { Authorization: 'Bearer ' + token, ...options.headers } });
+}
+
+test('a cold concurrent burst checks one reader once and fills the public source cache once', async () => {
+  const access = gate(), source = gate(), started = gate(), ctx = concurrentContext();
+  let checks = 0, reads = 0, writes = 0;
+  const env = { ACCESS_ROUTER: { fetch: async () => {
+    checks++; await access.promise; return Response.json({ enabled: true, allowed: true });
+  } }, QQ_RECOVERY_SECRET: 'fixture-concurrent-source-signing-key-not-production' };
+  const oldCaches = globalThis.caches;
+  globalThis.caches = { default: { match: async () => undefined, put: async (_, response) => {
+    writes++; assert.match(await response.text(), /Concurrent page/);
+  } } };
+  globalThis.fetch = async () => {
+    reads++; started.resolve(); await source.promise;
+    return new Response('<div class="list_grid">Concurrent page</div>', { headers: { 'Set-Cookie': 'private=fixture' } });
+  };
+  try {
+    const pending = Array.from({ length: 12 }, () => worker.fetch(reader('/doc-truyen'), env, ctx));
+    await turn(); assert.equal(checks, 1); assert.equal(reads, 0);
+    access.resolve(); await started.promise; await turn(); assert.equal(reads, 1);
+    source.resolve();
+    const responses = await Promise.all(pending);
+    const bodies = await Promise.all(responses.map(response => response.text()));
+    assert.equal(writes, 1); assert.equal(reads, 1); assert.equal(checks, 1);
+    assert.ok(bodies.every(body => body === '<div class="list_grid">Concurrent page</div>'));
+    assert.ok(responses.every(response => response.status === 200 && !response.headers.has('Set-Cookie')));
+    assert.ok(responses.every(response => response.headers.has('X-TruyenQQ-Proof')));
+    await ctx.done();
+  } finally { access.resolve(); source.resolve(); globalThis.caches = oldCaches; }
+});
+
+test('separate readers authorize independently and a denied reader cannot join an allowed source read', async () => {
+  const source = gate(), started = gate(), ctx = concurrentContext();
+  let reads = 0, checks = 0;
+  const env = { ACCESS_ROUTER: { fetch: async request => {
+    checks++;
+    return Response.json({ enabled: true, allowed: request.headers.get('Authorization') !== 'Bearer denied' });
+  } } };
+  globalThis.fetch = async () => {
+    reads++; started.resolve(); await source.promise; return new Response('<div class="book_info">Shared public detail</div>');
+  };
+  const first = worker.fetch(reader('/truyen-tranh/concurrent-book-123', 'allowed-one'), env, ctx);
+  try {
+    await started.promise;
+    const second = worker.fetch(reader('/truyen-tranh/concurrent-book-123', 'allowed-two'), env, ctx);
+    const denied = await worker.fetch(reader('/truyen-tranh/concurrent-book-123', 'denied'), env, ctx);
+    assert.equal(denied.status, 403); assert.equal(reads, 1);
+    source.resolve();
+    assert.deepEqual(await Promise.all([first, second].map(async job => (await job).text())),
+      ['<div class="book_info">Shared public detail</div>', '<div class="book_info">Shared public detail</div>']);
+    assert.equal(checks, 3); assert.equal(reads, 1); await ctx.done();
+  } finally { source.resolve(); }
+});
+
+test('source query strings and normalized search keywords retain independent concurrent results', async () => {
+  const release = gate(), ctx = concurrentContext();
+  let reads = 0;
+  mockFetch(async (url, options) => {
+    reads++; await release.promise;
+    return new Response('<div class="search_info list_grid">' + url + (options.body || '') + '</div>');
+  });
+  const inputs = [reader('/doc-truyen?sort=1'), reader('/doc-truyen?sort=2'),
+    reader('/frontend/search/search', 'search-reader', { method: 'POST', body: 'search=one+piece&type=1' }),
+    reader('/frontend/search/search', 'search-reader', { method: 'POST', body: 'search=one+piece&type=99' }),
+    reader('/frontend/search/search', 'search-reader', { method: 'POST', body: 'search=naruto' })];
+  const jobs = inputs.map(request => worker.fetch(request, undefined, ctx));
+  try {
+    // Body parsing is asynchronous; let all requests reach the source gate.
+    for (let i = 0; i < 5; i++) await turn();
+    assert.equal(reads, 4);
+    release.resolve();
+    const bodies = await Promise.all(jobs.map(async job => (await job).text()));
+    assert.match(bodies[0], /sort=1/); assert.match(bodies[1], /sort=2/);
+    assert.equal(bodies[2], bodies[3]); assert.match(bodies[4], /search=naruto/);
+    assert.equal(reads, 4); await ctx.done();
+  } finally { release.resolve(); }
+});
+
+test('completed policy decisions are not cached and revocation blocks even an existing source cache', async () => {
+  const access = gate(), ctx = concurrentContext();
+  let allowed = true, checks = 0, cacheReads = 0;
+  const env = { ACCESS_ROUTER: { fetch: async () => {
+    checks++; await access.promise; return Response.json({ enabled: true, allowed });
+  } } };
+  const oldCaches = globalThis.caches;
+  globalThis.caches = { default: { match: async () => {
+    cacheReads++; return new Response('<div class="list_grid">Cached public page</div>');
+  } } };
+  globalThis.fetch = () => { throw new Error('Cached page must not refetch source'); };
+  try {
+    const first = worker.fetch(reader('/doc-truyen', 'revocable-reader'), env, ctx);
+    const second = worker.fetch(reader('/doc-truyen', 'revocable-reader'), env, ctx);
+    await turn(); assert.equal(checks, 1); access.resolve();
+    assert.equal((await first).status, 200); assert.equal((await second).status, 200);
+    allowed = false;
+    const denied = await worker.fetch(reader('/doc-truyen', 'revocable-reader'), env, ctx);
+    assert.equal(denied.status, 403); assert.equal(checks, 2); assert.equal(cacheReads, 2);
+    await ctx.done();
+  } finally { access.resolve(); globalThis.caches = oldCaches; }
+});
+
+test('concurrent denials have independent bodies and a failed access check is retried on the next request', async () => {
+  for (const status of [403, 503]) {
+    const release = gate(), ctx = concurrentContext();
+    let checks = 0;
+    const env = { ACCESS_ROUTER: { fetch: async () => {
+      checks++; await release.promise;
+      return Response.json({ code: 'WHITELIST_REQUIRED', detail: 'private-source-detail' }, { status });
+    } } };
+    globalThis.fetch = () => { throw new Error('Failed access must never reach the source'); };
+    const jobs = [worker.fetch(reader('/doc-truyen'), env, ctx), worker.fetch(reader('/doc-truyen'), env, ctx)];
+    await turn(); assert.equal(checks, 1); release.resolve();
+    const responses = await Promise.all(jobs);
+    assert.deepEqual(responses.map(response => response.status), [status, status]);
+    const bodies = await Promise.all(responses.map(response => response.text()));
+    assert.equal(bodies[0], bodies[1]); assert.doesNotMatch(bodies[0], /private-source-detail/);
+    assert.equal((await worker.fetch(reader('/doc-truyen'), env, ctx)).status, status);
+    assert.equal(checks, 2); await ctx.done();
+  }
+});
+
+test('source failures are shared only while pending and do not poison a later attempt', async () => {
+  for (const failure of ['challenge', 'network']) {
+    const release = gate(), started = gate(), ctx = concurrentContext();
+    let reads = 0;
+    mockFetch(async () => {
+      reads++; started.resolve(); await release.promise;
+      if (reads > 1) return new Response('<div class="list_grid">Recovered page</div>');
+      if (failure === 'network') throw new Error('private network failure');
+      return new Response('<html>Just a moment challenge-platform</html>', { status: 403 });
+    });
+    const jobs = [worker.fetch(reader('/doc-truyen'), undefined, ctx), worker.fetch(reader('/doc-truyen'), undefined, ctx)];
+    try {
+      await started.promise; await turn(); assert.equal(reads, 1); release.resolve();
+      const responses = await Promise.all(jobs);
+      assert.deepEqual(responses.map(response => response.status), failure === 'network' ? [502, 502] : [403, 403]);
+      if (failure === 'challenge') assert.ok(responses.every(response => response.headers.get('X-TruyenQQ-Block') === 'challenge'));
+      const retry = await worker.fetch(reader('/doc-truyen'), undefined, ctx);
+      assert.equal(retry.status, 200); assert.match(await retry.text(), /Recovered page/);
+      assert.equal(reads, 2); await ctx.done();
+    } finally { release.resolve(); }
+  }
+});
+
+test('access coalescing remains bounded without delaying distinct readers or mixing their network identity', async () => {
+  const release = gate(), ctx = concurrentContext();
+  let checks = 0;
+  const env = { ACCESS_ROUTER: { fetch: async () => {
+    checks++; await release.promise; return Response.json({ enabled: true, allowed: false });
+  } } };
+  globalThis.fetch = () => { throw new Error('Denied readers must not reach source'); };
+  const jobs = Array.from({ length: 65 }, (_, index) => worker.fetch(reader('/doc-truyen', 'bounded-' + index), env, ctx));
+  jobs.push(worker.fetch(reader('/doc-truyen', 'bounded-0'), env, ctx));
+  jobs.push(worker.fetch(reader('/doc-truyen', 'bounded-64'), env, ctx));
+  jobs.push(worker.fetch(reader('/doc-truyen', 'bounded-0', { headers: { 'CF-Connecting-IP': '192.0.2.10' } }), env, ctx));
+  try {
+    await turn(); assert.equal(checks, 67); release.resolve();
+    assert.ok((await Promise.all(jobs)).every(response => response.status === 403));
+    await ctx.done();
+  } finally { release.resolve(); }
+});
