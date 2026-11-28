@@ -570,6 +570,45 @@ test('a submitted write is not replayed after Vercel pauses, and the next write 
   assert.equal(new URL(f.calls[1].url).hostname,'standby.example');
 });
 
+for (const transportFailure of [false,true]) test('a transient standby write failure never returns readers to a known disabled Vercel: '+transportFailure,async()=>{
+  const calls=[];let savedReads=0,fail=true;
+  const snapshot={checkedAt:900,primary:Object.fromEntries(['mangahub.art','api.mangahub.art','auth.mangahub.art'].map(h=>[h,{ok:false}])),backup:{ok:true,capacity:true}};
+  const worker=createStandbyWorker(async(input,options={})=>{
+    const r=typeof input==='string'?new Request(input,options):input,u=new URL(r.url);
+    if(u.pathname==='/internal/router-health'){savedReads++;return Response.json(snapshot);}
+    calls.push(r);
+    if(u.hostname!=='standby.example')return new Response('disabled',{status:402,headers:{'X-Vercel-Error':'DEPLOYMENT_DISABLED'}});
+    if(fail){fail=false;if(transportFailure)throw new TypeError('temporary connection failure');return new Response('temporary dependency failure',{status:503});}
+    return new Response('recovered',{headers:{'Content-Type':'text/html'}});
+  },()=>1000);
+  const shared={...env,DAILY_HEALTH_SHARED:'true'},ctx={waitUntil:()=>{}};
+  const first=await worker.fetch(request('auth.mangahub.art','/auth/refresh',{method:'POST',body:'one-write'}),shared,ctx);
+  assert.equal(first.status,503);assert.equal(calls.length,1,'never replay the submitted write');
+  const page=await worker.fetch(request('standby.mangahub.art','/manga',{headers:{Accept:'text/html'}}),shared,ctx);
+  assert.equal(page.status,200);assert.equal(page.headers.get('Location'),null);
+  for(const [host,path,method] of [['api.mangahub.art','/api/manga/homepage','GET'],['auth.mangahub.art','/auth/refresh','OPTIONS'],['auth.mangahub.art','/auth/refresh','POST']]){
+    const r=await worker.fetch(request(host,path,{method,...(method==='POST'?{body:'next-write'}:{})}),shared,ctx);
+    assert.equal(r.status,200);
+  }
+  assert.equal(savedReads,1,'reuse saved daily health without additional probes');
+  assert.ok(calls.every(r=>new URL(r.url).hostname==='standby.example'));
+});
+
+test('an unavailable saved decision cannot redirect a standby document to an unverified primary',async()=>{
+  const calls=[];
+  const worker=createStandbyWorker(async(input,options={})=>{
+    const r=typeof input==='string'?new Request(input,options):input,u=new URL(r.url);
+    calls.push(u.pathname);
+    if(u.pathname==='/internal/router-health')throw new TypeError('snapshot temporarily unreachable');
+    assert.equal(u.hostname,'standby.example');
+    return new Response('<html>standby</html>',{headers:{'Content-Type':'text/html'}});
+  },()=>1000);
+  const r=await worker.fetch(request('standby.mangahub.art','/',{headers:{Accept:'text/html'}}),
+    {...env,DAILY_HEALTH_SHARED:'true'},{waitUntil:()=>{}});
+  assert.equal(r.status,200);assert.equal(r.headers.get('Location'),null);
+  assert.deepEqual(calls,['/internal/router-health','/']);
+});
+
 test('an observed primary outage overrides an existing signed primary navigation lease',async()=>{
   const source=setup();
   const redirect=await source.worker.fetch(request('standby.mangahub.art','/',{headers:{accept:'text/html'}}),env,source.ctx);

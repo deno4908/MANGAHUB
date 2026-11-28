@@ -141,7 +141,9 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
   }
   function choose(s, host, b, env) {
     const primary = s.primary[host];
-    if (primary?.ok === false) return s.backup.ok ? 'backup' : 'primary';
+    // A transient standby error cannot make a known disabled deployment viable.
+    // Let the next real request reach standby again; never replay a write.
+    if (primary?.ok === false) return 'backup';
     // An operator can pin one trusted Cloudflare client IP for a short user
     // acceptance test. It grants no application access and expires by itself.
     if (b.test && s.backup.ok) return 'backup';
@@ -156,8 +158,9 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
     return b.value < share ? 'backup' : 'primary';
   }
   function standbyFrontendEligible(s,b,env) {
+    if ([FRONT,API,AUTH].some(host=>s.primary[host]?.ok===false)) return true;
     if (!s.backup.ok) return false;
-    if ([FRONT,API,AUTH].some(host=>s.primary[host]?.ok===false) || b.test) return true;
+    if (b.test) return true;
     if (env.BALANCE_ENABLED!=='true' || !s.backup.capacity) return false;
     const primary=s.primary[FRONT]?.milliseconds, backup=s.backup.frontendMilliseconds;
     return Number.isFinite(primary) && Number.isFinite(backup) && backup+100<primary*.8;
@@ -337,7 +340,10 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       const navigation = frontend && SAFE(request.method) && request.headers.get('accept')?.includes('text/html') &&
         !incoming.pathname.startsWith('/assets/') && !incoming.pathname.startsWith('/api/');
       const lease = navigation ? await frontendLease(request, env) : null;
-      let target = host === STANDBY ? (standbyFrontendEligible(s,b,env)?'backup':'primary') : choose(s,host,b,env);
+      // A cold snapshot connection can fail while the standby itself is fine.
+      // Returning to the primary requires a known healthy saved decision.
+      const primaryReady = [FRONT, API, AUTH].every(host => s.primary[host]?.ok === true);
+      let target = host === STANDBY ? (!primaryReady || standbyFrontendEligible(s,b,env)?'backup':'primary') : choose(s,host,b,env);
       if (host===FRONT) {
         if (!standbyFrontendEligible(s,b,env)) target='primary';
         else if ([FRONT,API,AUTH].some(host=>s.primary[host]?.ok===false)) target='backup';
@@ -351,6 +357,7 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
       // the redirect immediately. Actual origin errors can still fail over.
       // A sticky navigation must never keep a user on an observed failed host.
       if (lease && !(lease === 'primary' && [FRONT, API, AUTH].some(host => s.primary[host]?.ok === false)) &&
+          !(lease === 'primary' && host === STANDBY && !primaryReady) &&
           !(lease === 'backup' && s.backup.ok === false)) target = lease;
       // Spare capacity limits new spillover, not readers already using the
       // standby UI. Its API/auth requests must not drift back to a disabled
@@ -393,6 +400,7 @@ export function createStandbyWorker(send = fetch, now = Date.now, countryGate = 
         if (ORIGIN_FAILED(response) && !sourceFailure) failedOrigin(target);
         if (response.status === 429 && !sourceFailure) s.busyUntil = now() + BUSY_TTL;
         if (host === FRONT && target === 'primary' && response.ok) s.primary[FRONT] = { ...s.primary[FRONT], ok: true };
+        if (target === 'backup' && response.ok && !sourceFailure) s.backup.ok = true;
         const result = publicResponse(response, request, b);
         return navigation && response.ok && !lease ? rememberFrontend(result,target,env) : result;
       }
