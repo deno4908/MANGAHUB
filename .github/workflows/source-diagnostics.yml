@@ -1,0 +1,31 @@
+name: Inspect source connectivity without production changes
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: public-source-diagnostics
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 5
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_WORKERS_SUBDOMAIN: vinhytb3010
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: cloudflare
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify the diagnostic only reads fixed public paths
+        run: node --test cloudflare/source-diagnostic.test.mjs
+      - name: Read two source pages in two regions
+        run: python3 cloudflare/source-diagnostics.py run
+      - name: Remove this run's temporary Worker
+        if: always()
+        run: python3 cloudflare/source-diagnostics.py cleanup
