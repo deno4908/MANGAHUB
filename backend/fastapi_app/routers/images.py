@@ -457,20 +457,21 @@ def _prune_image_cache_sync() -> None:
         files: list[tuple[int, int, Path]] = []
         total_size = 0
 
-        for path in CACHE_DIR.iterdir():
-            try:
-                if not path.is_file():
+        # DirEntry reuses filesystem metadata. Resolving every full path on
+        # every scan made thousands of extra disk operations while reading.
+        # Never follow a symlink; only direct regular files can be evicted.
+        with os.scandir(cache_root) as entries:
+            for entry in entries:
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                except OSError:
                     continue
-                resolved = path.resolve()
-                if cache_root not in resolved.parents:
-                    continue
-                stat = path.stat()
-            except OSError:
-                continue
-            size = int(stat.st_size)
-            atime = int(getattr(stat, "st_atime_ns", 0) or stat.st_mtime_ns)
-            total_size += size
-            files.append((atime, size, path))
+                size = int(stat.st_size)
+                atime = int(getattr(stat, "st_atime_ns", 0) or stat.st_mtime_ns)
+                total_size += size
+                files.append((atime, size, cache_root / entry.name))
 
         if total_size <= MAX_CACHE_SIZE:
             return

@@ -130,6 +130,36 @@ def test_ready_qq_image_is_not_held_behind_catalog_disk_jobs(monkeypatch, tmp_pa
     asyncio.run(run())
 
 
+def test_cache_pruning_preserves_recent_images_and_ignores_links_outside_the_cache(monkeypatch, tmp_path):
+    import os
+    root = tmp_path / 'images'
+    root.mkdir()
+    protected = tmp_path / 'outside.jpg'
+    protected.write_bytes(b'outside-image')
+    nested = root / 'nested'
+    nested.mkdir()
+    (nested / 'nested.jpg').write_bytes(b'nested-image')
+    paths = []
+    for index in range(4):
+        path = root / f'cached-{index}.jpg'
+        path.write_bytes(b'x' * 10)
+        os.utime(path, (index + 1, index + 1))
+        paths.append(path)
+    try:
+        (root / 'external.jpg').symlink_to(protected)
+    except OSError:
+        pass  # Windows can require a separate permission for symlinks.
+    monkeypatch.setattr(images, 'CACHE_DIR', root)
+    monkeypatch.setattr(images, 'MAX_CACHE_SIZE', 35)
+    monkeypatch.setattr(images, 'IMAGE_CACHE_TARGET_SIZE', 20)
+    monkeypatch.setattr(images, '_image_cache_prune_running', True)
+    images._prune_image_cache_sync()
+    assert [path.exists() for path in paths] == [False, False, True, True]
+    assert protected.read_bytes() == b'outside-image'
+    assert (nested / 'nested.jpg').read_bytes() == b'nested-image'
+    assert not images._image_cache_prune_running
+
+
 def test_cached_qq_image_disk_check_does_not_block_the_api_loop(monkeypatch):
     from fastapi_app.routers import truyenqq
     entered, release = threading.Event(), threading.Event()
