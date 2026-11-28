@@ -33,6 +33,20 @@ map $uri $mh_api_accept_encoding {
     /auth/google "";
     /auth/discord "";
 }
+# Passive aggregate timings: no URLs, queries, IPs, cookies or credentials.
+map $uri $mh_api_timing_family {
+    default "other";
+    /api/manga/truyenqq-filtered "qq-browse";
+    ~^/api/manga/mangadex/ "mangadex-data";
+    ~^/api/manga/detail/ "qq-detail";
+    ~^/api/images/ "image";
+    ~^/api/manga/(truyenqq/cover|mangadex-cover)/ "cover";
+    ~^/auth/ "auth";
+}
+log_format mh_api_timing escape=json '{"at":"$time_iso8601","kind":"$mh_api_timing_family",'
+    '"method":"$request_method","status":$status,"total_s":$request_time,'
+    '"upstream_headers_s":"$upstream_header_time","upstream_s":"$upstream_response_time",'
+    '"bytes":$body_bytes_sent,"cache":"$upstream_http_x_cache"}';
 server {
     listen 80;
     server_name api.mangahub.art auth.mangahub.art;
@@ -49,6 +63,7 @@ server {
     ssl_certificate_key /etc/mangahub/tls/api-auth-origin.key;
     ssl_protocols TLSv1.2 TLSv1.3;
     client_max_body_size 50m;
+    access_log /var/log/nginx/mangahub-api-timing.log mh_api_timing;
     add_header Cache-Control "private, no-store" always;
     add_header Access-Control-Allow-Origin $mh_api_cors_origin always;
     add_header Access-Control-Allow-Credentials "true" always;

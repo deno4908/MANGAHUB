@@ -63,6 +63,8 @@ class PublicAPIOriginTests(unittest.TestCase):
         server = re.sub(r'^\s*ssl_\w+ [^;]+;\s*$', '', server, flags=re.M)
         server = server.replace('include /etc/nginx/mangahub-origin-rules/*.conf;', 'allow 127.0.0.1; deny all;')
         server = server.replace('127.0.0.1:8000', f'127.0.0.1:{cls.backend.server_port}')
+        cls.timing = root / 'api-timing.log'
+        server = server.replace('/var/log/nginx/mangahub-api-timing.log', str(cls.timing))
         config = root / 'nginx.conf'
         config.write_text(f'daemon off; master_process off; pid {root}/nginx.pid; error_log {root}/error.log;\n'
             'events { worker_connections 64; }\nhttp { access_log off;\n'
@@ -102,6 +104,22 @@ class PublicAPIOriginTests(unittest.TestCase):
             return response.status, dict(response.getheaders()), response.read()
         finally:
             connection.close()
+
+    def test_passive_timings_do_not_record_user_urls_or_credentials(self):
+        before = len(self.timing.read_text().splitlines()) if self.timing.exists() else 0
+        self.call('/api/manga/truyenqq-filtered?page=445&private=fixture-query')
+        for _ in range(50):
+            lines = self.timing.read_text().splitlines()
+            if len(lines) > before:
+                break
+            time.sleep(.01)
+        row = json.loads(lines[-1])
+        self.assertEqual(row['kind'], 'qq-browse')
+        self.assertEqual(row['status'], 200)
+        self.assertGreaterEqual(row['total_s'], 0)
+        self.assertGreaterEqual(float(row['upstream_headers_s']), 0)
+        for private in ['fixture-query', 'fixture-reader', '203.0.113.25', 'untrusted-secret', 'Bearer']:
+            self.assertNotIn(private, lines[-1])
 
     def test_images_preflight_and_api_reads_reach_the_backend_without_worker_headers(self):
         for path in ['/api/images/img?url=fixture', '/api/manga/truyenqq/cover/book-1', '/api/manga/mangadex/browse?page=1']:
