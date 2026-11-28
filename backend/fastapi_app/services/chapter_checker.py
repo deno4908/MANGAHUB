@@ -24,7 +24,8 @@ async def _check_new_chapters():
         db = get_supabase_admin()
 
         # Get all unique followed manga slugs
-        follows_result = db.table("follows").select("manga_slug, manga_title").execute()
+        follows_result = await asyncio.to_thread(
+            lambda: db.table("follows").select("manga_slug, manga_title").execute())
         if not follows_result.data:
             return
 
@@ -87,26 +88,26 @@ async def _check_single_manga(db, manga_slug: str, manga_title: str):
     # Use a simple cache key to track last known chapter per manga
     cache_key = f"last_chapter:truyenqq:{manga_slug}"
     from fastapi_app.services.cache_service import cache
-    last_known = cache.get(cache_key)
+    last_known = await asyncio.to_thread(cache.get, cache_key)
 
     if last_known == chapter_id:
         return  # Already notified
 
     # If this is the first time tracking, just store and skip notification
     if last_known is None:
-        cache.set(cache_key, chapter_id, 86400 * 7)  # Store for 7 days
+        await asyncio.to_thread(cache.set, cache_key, chapter_id, 86400 * 7)  # Store for 7 days
         return
 
     # New chapter found! Create notifications for all followers
     logger.info(f"[ChapterCheck] New chapter for {manga_slug}: Ch.{latest_chapter_name}")
 
     # Get all users following this manga
-    followers = db.table("follows").select("user_id").eq(
+    followers = await asyncio.to_thread(lambda: db.table("follows").select("user_id").eq(
         "manga_slug", manga_slug
-    ).execute()
+    ).execute())
 
     if not followers.data:
-        cache.set(cache_key, chapter_id, 86400 * 7)
+        await asyncio.to_thread(cache.set, cache_key, chapter_id, 86400 * 7)
         return
 
     # Create notification for each follower
@@ -125,7 +126,7 @@ async def _check_single_manga(db, manga_slug: str, manga_title: str):
     # Batch insert notifications
     if notifications:
         try:
-            db.table("notifications").insert(notifications).execute()
+            await asyncio.to_thread(lambda: db.table("notifications").insert(notifications).execute())
             logger.info(
                 f"[ChapterCheck] Created {len(notifications)} notifications "
                 f"for {manga_slug} Ch.{latest_chapter_name}"
@@ -134,7 +135,7 @@ async def _check_single_manga(db, manga_slug: str, manga_title: str):
             logger.error(f"[ChapterCheck] Failed to insert notifications: {e}")
 
     # Update last known chapter
-    cache.set(cache_key, chapter_id, 86400 * 7)
+    await asyncio.to_thread(cache.set, cache_key, chapter_id, 86400 * 7)
 
 
 async def chapter_check_loop():

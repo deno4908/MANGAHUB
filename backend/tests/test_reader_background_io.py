@@ -166,3 +166,68 @@ def test_slow_comment_list_does_not_block_images(monkeypatch):
     result = asyncio.run(image_while_waiting(monkeypatch, make))
     assert result == {"comments": [], "page": 1, "limit": 20, "has_more": False}
     assert db.executions == 1 and ("manga_slug", "book-1") in db.filters
+
+
+@pytest.mark.parametrize('stage', ['follow-list', 'cache-read', 'cache-write', 'followers', 'notify'])
+def test_background_chapter_check_keeps_reader_images_responsive(monkeypatch, stage):
+    from fastapi_app.services import chapter_checker as checker, cache_service
+    executions, notifications_written, cache_written, filters = [], [], [], []
+    token = 'qq--book-123--2'
+    detail = {'data': {'item': {'chapters': [{'server_data': [{
+        'chapter_name': '2', 'chapter_api_data': '/api/manga/chapter/' + token,
+    }]}]}}}
+    get_detail = AsyncMock(return_value=detail)
+    monkeypatch.setattr(checker.truyenqq_service, 'get_manga_detail', get_detail)
+
+    def make(blocked):
+        class Query:
+            def __init__(self, table):
+                self.table = table
+            def select(self, *args):
+                return self
+            def eq(self, key, value):
+                filters.append((key, value))
+                return self
+            def insert(self, values):
+                notifications_written.extend(values)
+                return self
+            def execute(self):
+                executions.append(self.table)
+                if (self.table == 'notifications' and stage == 'notify' or
+                    self.table == 'follows' and stage in {'follow-list', 'followers'}):
+                    blocked()
+                return SimpleNamespace(data=[] if stage == 'follow-list' else [{'user_id': 'follower-1'}])
+        db = SimpleNamespace(table=Query)
+        monkeypatch.setattr(checker, 'get_supabase_admin', lambda: db)
+        def get(key):
+            assert key == 'last_chapter:truyenqq:book-123'
+            if stage == 'cache-read':
+                blocked()
+                return token  # An already-seen chapter does not notify again.
+            return None if stage == 'cache-write' else 'qq--book-123--1'
+        def set_value(key, value, ttl):
+            if stage == 'cache-write':
+                blocked()
+            cache_written.append((key, value, ttl))
+        monkeypatch.setattr(cache_service, 'cache', SimpleNamespace(get=get, set=set_value))
+        return checker._check_new_chapters() if stage == 'follow-list' else checker._check_single_manga(db, 'book-123', 'Book title')
+
+    assert asyncio.run(image_while_waiting(monkeypatch, make)) is None
+    if stage == 'follow-list':
+        get_detail.assert_not_awaited()
+    else:
+        get_detail.assert_awaited_once_with('book-123')
+    if stage in {'follow-list', 'cache-read'}:
+        assert not cache_written and not notifications_written
+    else:
+        assert cache_written == [('last_chapter:truyenqq:book-123', token, 7 * 86400)]
+        if stage == 'cache-write':
+            assert not notifications_written and not executions
+        else:
+            assert executions == ['follows', 'notifications']
+            assert filters == [('manga_slug', 'book-123')]
+            assert notifications_written == [{
+                'user_id': 'follower-1', 'type': 'new_chapter', 'title': 'Chương mới: Book title',
+                'message': 'Chương 2 đã được cập nhật!', 'manga_slug': 'book-123',
+                'chapter_id': token, 'is_read': False,
+            }]
