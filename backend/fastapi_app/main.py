@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from config import config
 from fastapi_app.dependencies import (
+    _run_auth_read,
     authorize_api_request,
     get_supabase_admin,
     require_admin,
@@ -466,7 +467,7 @@ async def enforce_api_access_policy(request: Request, call_next):
             if not read_capability:
                 raise HTTPException(401, "Token đăng nhập là bắt buộc")
             try:
-                record = await asyncio.to_thread(access_tickets.decode, capability)
+                record = await _run_auth_read(access_tickets.decode, capability)
             except access_tickets.Rejected as error:
                 return JSONResponse(status_code=403, content={
                     "code": "ACCESS_TICKET_REVOKED", "detail": "Phiên truy cập đã hết hạn hoặc bị thu hồi",
