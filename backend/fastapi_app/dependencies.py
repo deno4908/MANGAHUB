@@ -7,7 +7,7 @@ import base64
 import json
 import logging
 from datetime import datetime, timezone
-from time import time, sleep
+from time import time, sleep, perf_counter
 from types import SimpleNamespace
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
@@ -40,8 +40,21 @@ _auth_read_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="auth
 async def _run_auth_read(load, *args):
     # Every image still checks the shared revocation ledger. Keep that read
     # out of the general catalog/metadata queue instead of caching its verdict.
-    return await asyncio.get_running_loop().run_in_executor(
-        _auth_read_executor, copy_context().run, load, *args)
+    queued_at = perf_counter()
+    context = copy_context()
+    def read():
+        started = perf_counter()
+        try:
+            return context.run(load, *args)
+        finally:
+            finished = perf_counter()
+            if finished - queued_at >= .5:
+                operation = {'decode': 'access-ticket', '_ticket_read': 'bearer-ticket',
+                             '_get_current_user_sync': 'live-user'}.get(getattr(load, '__name__', ''), 'verification')
+                # Passive server timings only; never log credentials or users.
+                logger.warning('Auth read timing operation=%s queue_ms=%.1f read_ms=%.1f',
+                               operation, (started - queued_at) * 1000, (finished - started) * 1000)
+    return await asyncio.get_running_loop().run_in_executor(_auth_read_executor, read)
 
 
 def _as_utc_datetime(value):
@@ -339,6 +352,14 @@ def _ticket_read(authorization):
 @coalesce_reads
 async def _shared_ticket_read(authorization):
     return await _run_auth_read(_ticket_read, authorization)
+
+
+@coalesce_reads
+async def _shared_capability_read(capability):
+    # Cookie/header reads use the same in-flight sharing as bearer reads.
+    # Completed verdicts are never cached: the next read rechecks revocation.
+    # The coalescer gives every request its own copy of the verified record.
+    return await _run_auth_read(access_tickets.decode, capability)
 
 
 async def get_current_user(authorization: str = Header(None)):
