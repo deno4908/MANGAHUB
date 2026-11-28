@@ -53,6 +53,13 @@ class TruyenQQTransport(httpx.BaseTransport):
         return self._local.session
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        from fastapi_app.services.truyenqq_recovery import lookup
+        recovered = lookup(request)
+        if recovered is not None:
+            return httpx.Response(200, content=recovered, request=request,
+                headers={'Content-Type': 'text/html; charset=utf-8'},
+                extensions={'truyenqq_transport': 'verified-snapshot',
+                            'qq_snapshot_expires': request.extensions['qq_snapshot_expires']})
         # Let curl supply Chrome's UA and compression headers. Preserve the
         # source Referer and encoded form body, including search POST requests.
         headers = {k: v for k, v in request.headers.items()

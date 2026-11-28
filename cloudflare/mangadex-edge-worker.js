@@ -68,7 +68,28 @@ export async function fetchQQOrigin(path, query, body) {
   return { status: upstream.status, headers: [...headers], body: html };
 }
 
-async function qqSource(request, url) {
+function qqFreshSeconds(path) {
+  return /^\/(?:doc-truyen|truyen-moi-cap-nhat|tim-kiem-nang-cao)(?:[/?]|$)/.test(path) ? 30 : 120;
+}
+
+export async function qqSourceProof(path, keyword, observed, html, secret, now = Math.floor(Date.now() / 1000)) {
+  const expires = observed + qqFreshSeconds(path);
+  if (typeof secret !== 'string' || secret.length < 32 || !Number.isInteger(observed) ||
+      observed > now + 30 || expires <= now) return null;
+  const bytes = new TextEncoder().encode(html);
+  if (!bytes.length || bytes.length > 2 * 1024 * 1024) return null;
+  const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+    .map(value => value.toString(16).padStart(2, '0')).join('');
+  const raw = new TextEncoder().encode(JSON.stringify({ v: 1, path, keyword: keyword || '',
+    observed, expires, sha256: sha }));
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, raw));
+  const encode = value => btoa(String.fromCharCode(...value)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+  return encode(raw) + '.' + encode(signature);
+}
+
+async function qqSource(request, url, env) {
   const path = url.pathname.slice(QQ_PREFIX.length);
   const search = path === "/frontend/search/search";
   const listing = QQ_PAGES.test(path) || /^\/sitemap(?:-[a-zA-Z0-9-]+)?\.xml$/.test(path);
@@ -106,23 +127,41 @@ async function qqSource(request, url) {
   const cacheUrl = new URL(url);
   if (search) cacheUrl.searchParams.set("qq_search", new URLSearchParams(body).get("search"));
   const cacheKey = new Request(cacheUrl, { method: "GET" });
-  const serve = (response, hit) => {
+  const serve = async (response, hit) => {
     const headers = new Headers(response.headers);
     headers.set("Cache-Control", "no-store");
     headers.set("Access-Control-Allow-Origin", "*");
     headers.set("X-TruyenQQ-Cache", hit ? "HIT" : "MISS");
+    headers.set('Access-Control-Expose-Headers', 'X-TruyenQQ-Proof');
+    // Carry the existing successful response to the backend, rather than
+    // assuming Cache API data is replicated between the reader and the VPS.
+    // A signed snapshot does not grant access: the API authorizes its reader.
+    if (env?.QQ_RECOVERY_SECRET && response.status === 200) {
+      const html = await response.clone().text();
+      const valid = search ? /search_info|no_result/.test(html) : /list_grid|book_info|chapter_content/.test(html);
+      if (valid && !/cf-chl-|challenge-platform|Just a moment/i.test(html)) {
+        const proof = await qqSourceProof(path + url.search,
+          search ? new URLSearchParams(body).get('search') : '',
+          Number(headers.get('X-TruyenQQ-Observed')), html, env.QQ_RECOVERY_SECRET);
+        if (proof) headers.set('X-TruyenQQ-Proof', proof);
+      }
+    }
     return new Response(response.body, { status: response.status, headers });
   };
   const cached = cache && await cache.match(cacheKey);
-  if (cached) return serve(cached, true);
+  const observed = Number(cached?.headers.get('X-TruyenQQ-Observed'));
+  const nearExpiry = env?.QQ_RECOVERY_SECRET && observed > 0 &&
+    observed + qqFreshSeconds(path) - Math.floor(Date.now() / 1000) <= 5;
+  if (cached && !nearExpiry) return serve(cached, true);
 
   try {
     const result = await fetchQQOrigin(path, url.search, body);
     const upstream = new Response(result.body, { status: result.status, headers: result.headers });
     const headers = new Headers(upstream.headers);
-    headers.set("Cache-Control", "public, max-age=120");
+    headers.set("Cache-Control", `public, max-age=${qqFreshSeconds(path)}`);
     headers.set("X-TruyenQQ-Relay", "1");
     headers.set("X-TruyenQQ-Colo", request.cf?.colo || "-");
+    headers.set('X-TruyenQQ-Observed', String(Math.floor(Date.now() / 1000)));
     headers.delete("Set-Cookie");
     headers.delete("Expires");
     headers.delete("Pragma");
@@ -161,7 +200,7 @@ export default {
       const denied = await checkSiteAccess(request, env);
       if (denied) return denied;
     }
-    if (url.pathname.startsWith(QQ_PREFIX + "/")) return qqSource(request, url);
+    if (url.pathname.startsWith(QQ_PREFIX + "/")) return qqSource(request, url, env);
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,

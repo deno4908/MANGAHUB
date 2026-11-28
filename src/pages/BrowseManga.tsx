@@ -2330,10 +2330,12 @@ const BrowseManga = () => {
 
       return requestPage(filters.sort);
     },
-    staleTime: 10 * 60 * 1000,
+    // Revisit/focus may refresh latest titles; no new polling timer is added.
+    // The shared server/source caches still coalesce the underlying reads.
+    staleTime: filters.sort === 'latest' ? 30_000 : 10 * 60 * 1000,
     gcTime: 8 * 60 * 1000,
     refetchOnMount: true,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: filters.sort === 'latest',
     refetchOnReconnect: false,
     retry: 1,
   }), [directOTruyenFilterGenreSlugs, filters.status, filters.sort, showMatureContent, activeCategorySlug]);

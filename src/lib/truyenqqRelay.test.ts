@@ -142,3 +142,75 @@ it('shares successful recovery hints but still asks the backend to authorize eac
   expect(apiCalls).toBe(6);
   expect(fetcher.mock.calls.filter(([url]) => url.includes('workers.dev'))).toHaveLength(1);
 });
+
+it('hands a signed successful source response to the same API read instead of asking the remote cache again', async () => {
+  setSiteAccessRestricted(true);
+  const html = '<div class="list_grid">Fresh QQ titles</div>';
+  const proof = 'signed-source-proof';
+  const fetcher = vi.fn().mockResolvedValueOnce(json({}, 503, {
+    'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/tim-kiem-nang-cao/trang-5?category=85&sort=2',
+    'X-TruyenQQ-Recovery': '1',
+  })).mockResolvedValueOnce(new Response(html, { headers: { 'X-TruyenQQ-Proof': proof } }))
+    .mockResolvedValueOnce(json({ data: { items: Array.from({ length: 24 }, (_, index) => ({ slug: `book-${index}` })) } }));
+  vi.stubGlobal('fetch', fetcher);
+  const response = await fetchWithTruyenQQRelay(api, { headers: { Authorization: 'Bearer reader' } }, 10_000);
+  expect((await response.json()).data.items).toHaveLength(24);
+  expect(fetcher).toHaveBeenCalledTimes(3);
+  const retry = fetcher.mock.calls[2][1];
+  expect(retry.method).toBe('POST');
+  expect(new Headers(retry.headers).get('Authorization')).toBe('Bearer reader');
+  expect(new Headers(retry.headers).get('X-TruyenQQ-Recovery')).toBe('1');
+  expect(JSON.parse(retry.body)).toEqual({ html, proof });
+  expect(fetcher.mock.calls.filter(([url]) => url.includes('workers.dev'))).toHaveLength(1);
+});
+
+it('uses the actual standby image host for a handoff and never retries its snapshot through disabled Vercel', async () => {
+  const original = 'https://api.mangahub.art/api/manga/truyenqq/image/book-123/1/2';
+  const standby = original.replace('https://api.mangahub.art', 'https://standby.mangahub.art');
+  const blocked = json({}, 503, { 'X-TruyenQQ-Error': 'http-403',
+    'X-TruyenQQ-Source-Path': '/truyen-tranh/book-123-chap-1', 'X-TruyenQQ-Recovery': '1' });
+  Object.defineProperty(blocked, 'url', { value: standby });
+  const fetcher = vi.fn().mockResolvedValueOnce(blocked)
+    .mockResolvedValueOnce(new Response('chapter_content', { headers: { 'X-TruyenQQ-Proof': 'proof' } }))
+    .mockResolvedValueOnce(new Response('image', { headers: { 'Content-Type': 'image/jpeg' } }));
+  vi.stubGlobal('fetch', fetcher);
+  expect((await fetchWithTruyenQQRelay(original, {}, 10_000)).ok).toBe(true);
+  expect(fetcher.mock.calls[2][0]).toBe(standby);
+  expect(fetcher.mock.calls[2][1].method).toBe('POST');
+});
+
+it('keeps the older recovery transport when the backend has not enabled signed handoffs', async () => {
+  const fetcher = vi.fn().mockResolvedValueOnce(json({}, 503, {
+    'X-TruyenQQ-Error': 'http-403', 'X-TruyenQQ-Source-Path': '/doc-truyen',
+  })).mockResolvedValueOnce(new Response('list_grid', { headers: { 'X-TruyenQQ-Proof': 'proof' } }))
+    .mockResolvedValueOnce(json({ data: { items: [] } }));
+  vi.stubGlobal('fetch', fetcher);
+  await fetchWithTruyenQQRelay(api, {}, 10_000);
+  expect(fetcher.mock.calls[2][1].method).toBeUndefined();
+  expect(fetcher.mock.calls[2][1].body).toBeUndefined();
+});
+
+it('changing one page cannot cancel a shared source recovery needed by another page', async () => {
+  const first = new AbortController();
+  let finish!: (response: Response) => void;
+  const blocked = () => json({}, 503, { 'X-TruyenQQ-Error': 'http-403',
+    'X-TruyenQQ-Source-Path': '/truyen-tranh/shared-navigation-123-chap-1', 'X-TruyenQQ-Recovery': '1' });
+  const fetcher = vi.fn().mockImplementation(async (url, options) => {
+    if (url.includes('workers.dev')) return new Promise<Response>(resolve => { finish = resolve; });
+    return options.method === 'POST' ? json({ data: { items: [{ slug: 'recovered' }] } }) : blocked();
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const previous = fetchWithTruyenQQRelay(api, { signal: first.signal }, 10_000);
+  const cancelled = expect(previous).rejects.toMatchObject({ name: 'AbortError' });
+  await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+  const next = fetchWithTruyenQQRelay(api, {}, 10_000);
+  // Let the second response body finish and subscribe to the shared fill,
+  // before a separate UI event aborts the old page's request.
+  await new Promise(resolve => setTimeout(resolve, 0));
+  first.abort();
+  finish(new Response('chapter_content', { headers: { 'X-TruyenQQ-Proof': 'proof' } }));
+  await cancelled;
+  expect((await next).ok).toBe(true);
+  expect(fetcher.mock.calls.filter(([url]) => url.includes('workers.dev'))).toHaveLength(1);
+  expect(fetcher.mock.calls.filter(([, options]) => options.method === 'POST')).toHaveLength(1);
+});

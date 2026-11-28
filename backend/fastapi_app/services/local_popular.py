@@ -75,10 +75,12 @@ async def qq_popular(*, page, limit, genres, status, show_mature, hidden, db, ht
     from fastapi_app.routers import manga
 
     source_sort = {"popular": "views_desc", "newest": "created_desc", "oldest": "created_asc"}.get(sort, "updated_desc")
+    revision = await asyncio.to_thread(card_metadata.cache.get, 'catalog:source-version:truyenqq')
+    revision = revision if isinstance(revision, str) else ''
     # Public source pages are identical across moderation/maturity/rating
     # selections. Share their cache rather than fetching each variant again.
     source_key = "qq:browse-source:v1:" + hashlib.sha256(json.dumps(
-        [source_sort, sorted(genres), status], sort_keys=True).encode()).hexdigest()
+        [source_sort, sorted(genres), status, revision], sort_keys=True).encode()).hexdigest()
     async def source(number):
         read = (_source_page(tuple(genres), status, number, source_key) if source_sort == "views_desc"
                 else _source_page(tuple(genres), status, number, source_key, source_sort))

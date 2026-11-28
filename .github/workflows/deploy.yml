@@ -47,7 +47,7 @@ jobs:
       - run: python -m pip install -r backend/requirements-test.txt
       - name: Test QQ source recovery and reading history
         working-directory: backend
-        run: python -m pytest tests/test_truyenqq_transport.py tests/test_qq_background_scope.py tests/test_truyenqq_integration.py tests/test_truyenqq_cache_performance.py tests/test_catalog_updates.py tests/test_qq_cover_resilience.py tests/test_auth_read_queue.py tests/test_access_tickets.py tests/test_local_popular.py tests/test_card_metadata.py tests/test_qq_gateway_recovery.py tests/test_library_reads.py tests/test_reading_history_lookup.py tests/test_saved_library_covers.py -q
+        run: python -m pytest tests/test_truyenqq_transport.py tests/test_qq_source_recovery.py tests/test_qq_background_scope.py tests/test_truyenqq_integration.py tests/test_truyenqq_cache_performance.py tests/test_catalog_updates.py tests/test_qq_cover_resilience.py tests/test_auth_read_queue.py tests/test_access_tickets.py tests/test_local_popular.py tests/test_card_metadata.py tests/test_qq_gateway_recovery.py tests/test_library_reads.py tests/test_reading_history_lookup.py tests/test_saved_library_covers.py -q
       - name: Test stable QQ rating pagination and cached legacy reads
         working-directory: backend
         run: python -m pytest tests/test_qq_rating.py tests/test_vercel_catalog_performance.py tests/test_legacy_qq_routes.py tests/test_mangadex_release_index.py tests/test_mangadex_index_mirror.py -q
@@ -61,6 +61,7 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      STANDBY_ORIGIN_SECRET: ${{ secrets.STANDBY_ORIGIN_SECRET }}
 
     steps:
       - uses: actions/checkout@v4
@@ -83,6 +84,20 @@ jobs:
             echo 'deploy=false' >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Configure private QQ response signing
+        if: steps.source.outputs.deploy == 'true' && env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.STANDBY_ORIGIN_SECRET != ''
+        run: |
+          python3 - <<'PY'
+          import hashlib, hmac, json, os
+          key = hmac.new(os.environ['STANDBY_ORIGIN_SECRET'].encode(), b'qq-recovery-v1', hashlib.sha256).hexdigest()
+          path = '/tmp/mh-qq-signing.json'
+          os.umask(0o077)
+          with open(path, 'w') as file:
+              json.dump({'QQ_RECOVERY_SECRET': key}, file)
+          os.chmod(path, 0o600)
+          PY
+          npx --yes wrangler@4 secret bulk /tmp/mh-qq-signing.json --config cloudflare/wrangler.toml
+          rm /tmp/mh-qq-signing.json
       - name: Deploy MangaDex edge worker
         if: steps.source.outputs.deploy == 'true' && env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
         run: npx --yes wrangler@4 deploy --config cloudflare/wrangler.toml

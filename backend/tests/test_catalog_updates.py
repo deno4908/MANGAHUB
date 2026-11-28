@@ -317,3 +317,29 @@ def test_qq_detail_overlay_cannot_mix_books_regress_or_duplicate_chapters():
         latest = {'data': {'items': [{'slug': 'native-123', 'chaptersLatest': [{
             'chapter_name': '4', 'chapter_api_data': '/api/manga/chapter/' + path}]}]}}
         assert qq._overlay_detail_latest(deepcopy(old), latest) == old
+
+
+def test_unfiltered_latest_browse_publishes_updates_but_a_genre_page_never_replaces_the_feed(monkeypatch, cache):
+    from unittest.mock import AsyncMock
+    import fastapi_app.services.catalog_updates as updates
+    from site_access import source_authorization
+    publisher = CatalogUpdates()
+    monkeypatch.setattr(updates, 'catalog_updates', publisher)
+    monkeypatch.setattr(qq, '_catalog_jobs', {})
+    monkeypatch.setattr(qq, 'run_live', AsyncMock(return_value={'items': [{
+        'id': '123', 'url': 'https://truyenqqko.com/truyen-tranh/browse-123', 'title': 'Browse',
+        'latest_chapter': {'number': '9'}}], 'page': 1}))
+    cache.set('qq:browse-source:old:source:1', json.dumps({'old': True}))
+    async def run():
+        token = source_authorization.set('Bearer reader')
+        try:
+            await qq.get_filtered(genres=['action'], page=1)
+            assert cache.get(STATE_PREFIX + 'truyenqq') is None
+            await qq.get_filtered(genres=[], page=1)
+            assert publisher.current['truyenqq']['changes'][0]['chapter_name'] == '9'
+            assert cache.get('qq:browse-source:old:source:1') is None
+            qq.run_live.assert_awaited()
+            assert qq.run_live.await_count == 2  # two requested selections, no separate update probe
+        finally:
+            source_authorization.reset(token)
+    asyncio.run(run())

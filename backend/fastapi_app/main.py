@@ -401,7 +401,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-TruyenQQ-Error", "X-TruyenQQ-Source-Path", "X-TruyenQQ-Search"],
+    expose_headers=["X-TruyenQQ-Error", "X-TruyenQQ-Source-Path", "X-TruyenQQ-Search", "X-TruyenQQ-Recovery"],
 )
 
 
@@ -516,6 +516,14 @@ async def enforce_api_access_policy(request: Request, call_next):
 
     context = access_policy.source_authorization.set(authorization if user else None)
     try:
+        snapshot = getattr(request.state, 'qq_source_snapshot', None)
+        if snapshot is not None:
+            from fastapi_app.services.truyenqq_recovery import accept as accept_source_snapshot
+            try:
+                await asyncio.to_thread(accept_source_snapshot, snapshot)
+            except ValueError:
+                return JSONResponse(status_code=400, content={'detail': 'Source recovery expired'},
+                                    headers=_api_auth_error_headers(request))
         response = await call_next(request)
     finally:
         access_policy.source_authorization.reset(context)
@@ -556,6 +564,11 @@ async def admin_set_maintenance(
         "message": "Đã bật chế độ bảo trì" if state.get("enabled") else "Đã tắt chế độ bảo trì",
         "maintenance": state,
     }
+
+# The signed handoff is a transport for allowlisted public GETs. It must be
+# normalized before the unchanged read-capability/whitelist middleware runs.
+from fastapi_app.services.truyenqq_recovery import QQRecoveryMiddleware
+app.add_middleware(QQRecoveryMiddleware, allowed_origins=_cors_origins)
 
 # Include routers
 app.include_router(manga.router, prefix="/api/manga", tags=["Manga"])

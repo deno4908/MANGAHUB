@@ -58,8 +58,15 @@ class LiveService:
         return url
 
     def html(self, url, *, ttl=None, refresh=False):
-        return self.html_cache.get(url, self.settings.cache_ttl if ttl is None else ttl,
-                                   lambda: self.client.request(url).text, refresh=refresh)
+        lifetime = self.settings.cache_ttl if ttl is None else ttl
+        def load():
+            nonlocal lifetime
+            response = self.client.request(url)
+            expires = response.extensions.get('qq_snapshot_expires')
+            if isinstance(expires, (int, float)):
+                lifetime = min(lifetime, max(0, expires - time.time()))
+            return response.text
+        return self.html_cache.get(url, lambda: lifetime, load, refresh=refresh)
 
     def html_lifetime(self, url, ttl):
         # A new parsed response must not extend the freshness of an older HTML snapshot.

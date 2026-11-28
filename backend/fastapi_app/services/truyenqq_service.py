@@ -116,6 +116,9 @@ def _source_error_headers(error):
             ("Missing comic listing", "invalid-listing"), ("Unexpected search response", "invalid-search"),
         ) if reason.startswith(prefix)), "invalid-response")
     headers = {"X-TruyenQQ-Error": code, "Cache-Control": "no-store"}
+    from fastapi_app.services.truyenqq_recovery import enabled as recovery_enabled
+    if recovery_enabled():
+        headers['X-TruyenQQ-Recovery'] = '1'
     response = getattr(error, "response", None)
     if response is not None:
         transport = response.extensions.get("truyenqq_transport")
@@ -385,7 +388,11 @@ async def _catalog_page(method, *args, background_refresh=True, refresh_timeout=
                                "source_url": raw.get("source_url")}
                     value = await asyncio.to_thread(_page, raw)
                     await asyncio.to_thread(cache.set, key, json.dumps({"payload": value, "fresh_until": time.time() + 45}), ttl=CATALOG_LAST_GOOD_SECONDS)
-                    if method == 'collection' and args == ('latest', 1) and _source_read_scope():
+                    latest_root = (method == 'collection' and args == ('latest', 1) or
+                        method == 'discover' and kwargs.get('page', 1) == 1 and
+                        kwargs.get('sort', 'updated_desc') == 'updated_desc' and
+                        not kwargs.get('genres') and not kwargs.get('status'))
+                    if latest_root and _source_read_scope():
                         # Reuse this approved source response for native live
                         # updates. Do not make another relay request or retain
                         # the reader token in the unauthenticated probe loop.

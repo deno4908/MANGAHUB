@@ -116,7 +116,8 @@ class CatalogUpdates:
             cache_service.cache.set(f"catalog:source-version:{source}", event["revision"], ttl=86400)
             patterns = ["manga:list-combined:*", "manga:trending:*", "manga:sitemap:*"]
             if source == "truyenqq":
-                patterns += ["truyenqq:live-list:*", "truyenqq:list:*", "truyenqq:home", "manga:truyenqq-filtered:*"]
+                patterns += ["truyenqq:live-list:*", "truyenqq:list:*", "truyenqq:home", "manga:truyenqq-filtered:*",
+                             "qq:browse-source:*"]
                 patterns += [f"truyenqq:detail:{slug}*" for slug in slugs]
             else:
                 patterns += ["mangadex:latest-vi-feed:*", "mangadex:search:*", "mangadex:vi-catalog:public:*",

@@ -1,6 +1,8 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import worker from './mangadex-edge-worker.js';
+import worker, { qqSourceProof } from './mangadex-edge-worker.js';
+import { createHash, createHmac, webcrypto } from 'node:crypto';
+if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const originalFetch = globalThis.fetch;
 const accessUrl = 'https://api.mangahub.art/api/site-access';
@@ -204,4 +206,36 @@ test('edge fails closed if the access service is unavailable or returns malforme
     assert.equal(result.headers.get('Cache-Control'), 'no-store');
     assert.doesNotMatch(await result.text(), /private failure/);
   }
+});
+
+test('source proofs bind exact HTML, path, query and original freshness without extra fetches', async () => {
+  const secret = 'fixture-qq-source-signing-key-not-production';
+  const html = '<div class="list_grid">Truyện mới</div>';
+  const path = '/tim-kiem-nang-cao/trang-5?category=85&sort=2';
+  const proof = await qqSourceProof(path, '', 1000, html, secret, 1029);
+  const [encoded, signature] = proof.split('.');
+  const raw = Buffer.from(encoded, 'base64url');
+  const metadata = JSON.parse(raw);
+  assert.deepEqual(metadata, { v: 1, path, keyword: '', observed: 1000, expires: 1030,
+    sha256: createHash('sha256').update(html).digest('hex') });
+  assert.equal(signature, createHmac('sha256', secret).update(raw).digest('base64url'));
+  assert.equal(await qqSourceProof(path, '', 1000, html, secret, 1030), null);
+  assert.equal(await qqSourceProof(path, '', 1200, html, secret, 1000), null);
+});
+
+test('authorized source reads carry a verifiable handoff while denied/challenge pages do not', async () => {
+  const secret = 'fixture-qq-source-signing-key-not-production';
+  let reads = 0;
+  mockFetch(async () => { reads++;return new Response('<div class="book_info">Source detail</div>'); });
+  const response = await worker.fetch(new Request(edge + '/truyen-tranh/book-123'), { QQ_RECOVERY_SECRET: secret });
+  assert.equal(response.status, 200);
+  assert.equal(reads, 1);
+  assert.equal(response.headers.get('Access-Control-Expose-Headers'), 'X-TruyenQQ-Proof');
+  const [encoded, signature] = response.headers.get('X-TruyenQQ-Proof').split('.');
+  const raw = Buffer.from(encoded, 'base64url');
+  assert.equal(JSON.parse(raw).sha256, createHash('sha256').update(await response.text()).digest('hex'));
+  assert.equal(signature, createHmac('sha256', secret).update(raw).digest('base64url'));
+  mockFetch(async () => new Response('chapter_content challenge-platform', { status: 403 }));
+  const challenge = await worker.fetch(new Request(edge + '/truyen-tranh/book-123'), { QQ_RECOVERY_SECRET: secret });
+  assert.equal(challenge.headers.get('X-TruyenQQ-Proof'), null);
 });

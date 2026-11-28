@@ -41,6 +41,18 @@ function show(url: string) {
 }
 function Location() { return <span data-testid="location">{useLocation().search}</span>; }
 
+it('does not keep the QQ latest selection fresh for ten minutes or start periodic source polling', async () => {
+  vi.mocked(mangaApi.getOTruyenFiltered).mockResolvedValue(page([{ slug: 'current-123', name: 'Current', source: 'truyenqq' }]));
+  show('/manga?source=truyenqq&sort=latest');
+  await waitFor(() => expect(screen.getByTestId('ranked-cards')).toHaveTextContent('Current'));
+  const query = client.getQueryCache().findAll().find(query => query.queryKey[1] === 'otruyen-filtered'
+    && query.queryKey.includes('latest'));
+  const options = query!.options as { staleTime: number; refetchOnWindowFocus: boolean; refetchInterval?: unknown };
+  expect(options.staleTime).toBe(30_000);
+  expect(options.refetchOnWindowFocus).toBe(true);
+  expect(mangaApi.getOTruyenFiltered).toHaveBeenCalledTimes(1);
+});
+
 it('warms only the next QQ page with identical filters and reuses it after clicking', async () => {
   vi.mocked(mangaApi.getOTruyenFiltered).mockImplementation(async options => ({ data: {
     items: [{ slug: `ready-${options.page}`, name: `Page ${options.page}`, source: 'truyenqq',

@@ -13,6 +13,7 @@ routes = [
 binding = "ACCESS_ROUTER"
 service = "mangahub-standby-router"
 
-# Keep browser and backend fetches on the same local source cache.
+# Keep source execution near Singapore. Cache API data is still regional;
+# signed source handoffs carry a successful reader fetch to the backend.
 [placement]
 region = "aws:ap-southeast-1"
