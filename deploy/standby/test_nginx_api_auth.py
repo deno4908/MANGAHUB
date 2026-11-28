@@ -30,12 +30,19 @@ class PublicAPIOriginTests(unittest.TestCase):
                        'origin_secret': self.headers.get('X-MangaHub-Origin-Secret'),
                        'public_host': self.headers.get('X-MangaHub-Public-Host'),
                        'client_hint': self.headers.get('X-MangaHub-Client-IP'),
-                       'csrf': self.headers.get('X-MangaHub-CSRF')}
+                       'csrf': self.headers.get('X-MangaHub-CSRF'),
+                       'origin': self.headers.get('Origin')}
                 cls.calls.append(row)
-                status = 204 if self.command == 'OPTIONS' else 403 if not self.headers.get('Authorization') else 503 if self.path == '/api/unavailable' else 200
+                trusted = self.headers.get('Origin') == 'https://mangahub.art'
+                status = (204 if trusted else 400) if self.command == 'OPTIONS' else 403 if not trusted or not self.headers.get('Authorization') else 503 if self.path == '/api/unavailable' else 200
+                if self.path in ['/auth/google', '/auth/discord', '/api/saved-url']:
+                    row['url'] = 'https://auth.example/auth/v1/authorize?provider=google&redirect_to=https%3A%2F%2Fmangahub.art%2Fauth%2Fcallback'
                 data = b'' if status == 204 else json.dumps(row).encode()
                 self.send_response(status)
                 self.send_header('Content-Type', 'application/json')
+                if trusted:
+                    self.send_header('Access-Control-Allow-Origin', 'https://mangahub.art')
+                    self.send_header('Access-Control-Allow-Credentials', 'true')
                 self.send_header('Content-Length', str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -81,10 +88,11 @@ class PublicAPIOriginTests(unittest.TestCase):
         cls.nginx.wait(timeout=5)
         cls.nginx.stderr.close()
 
-    def call(self, path, *, method='GET', host='api.mangahub.art', authorized=True, body=None):
+    def call(self, path, *, method='GET', host='api.mangahub.art', authorized=True, body=None,
+             origin='https://standby.mangahub.art'):
         headers = {'Host': host, 'CF-Connecting-IP': '203.0.113.25',
                    'X-MangaHub-Client-IP': '198.51.100.7', 'X-MangaHub-Public-Host': 'untrusted.example',
-                   'X-MangaHub-Origin-Secret': 'untrusted-secret', 'X-MangaHub-CSRF': 'fixture'}
+                   'X-MangaHub-Origin-Secret': 'untrusted-secret', 'X-MangaHub-CSRF': 'fixture', 'Origin': origin}
         if authorized:
             headers['Authorization'] = 'Bearer fixture'
         connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=3)
@@ -104,6 +112,8 @@ class PublicAPIOriginTests(unittest.TestCase):
                 data = json.loads(body)
                 self.assertEqual(data['host'], 'api.mangahub.art')
                 self.assertEqual(data['client'], '203.0.113.25')
+                self.assertEqual(data['origin'], 'https://mangahub.art')
+                self.assertEqual(headers['Access-Control-Allow-Origin'], 'https://standby.mangahub.art')
                 for key in ['origin_secret','public_host','client_hint']:
                     self.assertIsNone(data[key])
                 self.assertIn('no-store', headers['Cache-Control'])
@@ -118,6 +128,25 @@ class PublicAPIOriginTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)['host'], 'auth.mangahub.art')
         self.assertEqual(json.loads(body)['csrf'], 'fixture')
+
+    def test_only_fixed_oauth_responses_adopt_the_owned_standby_callback(self):
+        for path in ['/auth/google', '/auth/discord']:
+            for origin in ['https://standby.mangahub.art', 'https://mangahub.art']:
+                status, headers, body = self.call(path, method='POST', host='auth.mangahub.art', origin=origin)
+                self.assertEqual(status, 200)
+                self.assertEqual(headers['Access-Control-Allow-Origin'], origin)
+                callback = origin.replace(':', '%3A').replace('/', '%2F') + '%2Fauth%2Fcallback'
+                self.assertIn('redirect_to=' + callback, json.loads(body)['url'])
+        self.assertIn('redirect_to=https%3A%2F%2Fmangahub.art%2Fauth%2Fcallback',
+                      json.loads(self.call('/api/saved-url')[2])['url'])
+
+    def test_other_origins_are_not_authorized_or_given_credentialed_cors(self):
+        status, headers, _ = self.call('/api/manga/categories', method='OPTIONS', origin='https://untrusted.example')
+        self.assertEqual(status, 400)
+        self.assertNotIn('Access-Control-Allow-Origin', headers)
+        status, headers, _ = self.call('/auth/google', method='POST', host='auth.mangahub.art', origin='https://untrusted.example')
+        self.assertEqual(status, 403)
+        self.assertNotIn('Access-Control-Allow-Origin', headers)
 
     def test_private_and_frontend_paths_are_not_exposed(self):
         before = len(self.calls)

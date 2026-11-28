@@ -5,6 +5,34 @@ map $http_cf_connecting_ip $mh_api_client_ip {
     default $http_cf_connecting_ip;
     "" $remote_addr;
 }
+# Match the existing Worker's exact translation for our second frontend.
+# Unsupported origins still reach the backend unchanged and fail its policy.
+map $http_origin $mh_api_origin {
+    default $http_origin;
+    "https://standby.mangahub.art" "https://mangahub.art";
+}
+map $http_origin $mh_api_referer {
+    default $http_referer;
+    "https://standby.mangahub.art" "https://mangahub.art/";
+}
+map $http_origin $mh_api_cors_origin {
+    default "";
+    "https://mangahub.art" "https://mangahub.art";
+    "https://standby.mangahub.art" "https://standby.mangahub.art";
+}
+map $http_origin $mh_api_oauth_callback {
+    default "https://mangahub.art/auth/callback";
+    "https://standby.mangahub.art" "https://standby.mangahub.art/auth/callback";
+}
+map $http_origin $mh_api_oauth_callback_encoded {
+    default "https%3A%2F%2Fmangahub.art%2Fauth%2Fcallback";
+    "https://standby.mangahub.art" "https%3A%2F%2Fstandby.mangahub.art%2Fauth%2Fcallback";
+}
+map $uri $mh_api_accept_encoding {
+    default $http_accept_encoding;
+    /auth/google "";
+    /auth/discord "";
+}
 server {
     listen 80;
     server_name api.mangahub.art auth.mangahub.art;
@@ -22,25 +50,43 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     client_max_body_size 50m;
     add_header Cache-Control "private, no-store" always;
+    add_header Access-Control-Allow-Origin $mh_api_cors_origin always;
+    add_header Access-Control-Allow-Credentials "true" always;
+    add_header Vary "Origin" always;
 
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Real-IP $mh_api_client_ip;
+    proxy_set_header X-Forwarded-For $mh_api_client_ip;
+    proxy_set_header CF-Connecting-IP "";
+    proxy_set_header Origin $mh_api_origin;
+    proxy_set_header Referer $mh_api_referer;
+    proxy_set_header Accept-Encoding $mh_api_accept_encoding;
+    # These private Worker hints cannot be supplied by a public API client.
+    proxy_set_header X-MangaHub-Origin-Secret "";
+    proxy_set_header X-MangaHub-Public-Host "";
+    proxy_set_header X-MangaHub-Client-IP "";
+    proxy_hide_header X-MangaHub-Origin;
+    proxy_hide_header Access-Control-Allow-Origin;
+    proxy_hide_header Access-Control-Allow-Credentials;
+    proxy_next_upstream off;
+    proxy_buffering off;
+    proxy_read_timeout 310s;
+    proxy_connect_timeout 5s;
+
+    # Preserve the standby callback when quota bypasses the Worker. Rewrite
+    # only these fixed authorize-link responses, never arbitrary API JSON.
+    location ~ ^/auth/(google|discord)$ {
+        proxy_pass http://127.0.0.1:8000;
+        sub_filter_types application/json;
+        sub_filter_once off;
+        sub_filter 'https://mangahub.art/auth/callback' '$mh_api_oauth_callback';
+        sub_filter 'https%3A%2F%2Fmangahub.art%2Fauth%2Fcallback' '$mh_api_oauth_callback_encoded';
+    }
     location ~ ^/(api(/|$)|auth(/|$)|health$) {
         proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Real-IP $mh_api_client_ip;
-        proxy_set_header X-Forwarded-For $mh_api_client_ip;
-        proxy_set_header CF-Connecting-IP "";
-        # These private Worker hints cannot be supplied by a public API client.
-        proxy_set_header X-MangaHub-Origin-Secret "";
-        proxy_set_header X-MangaHub-Public-Host "";
-        proxy_set_header X-MangaHub-Client-IP "";
-        proxy_hide_header X-MangaHub-Origin;
-        proxy_next_upstream off;
-        proxy_buffering off;
-        proxy_read_timeout 310s;
-        proxy_connect_timeout 5s;
     }
     # Readiness, saved health metadata and origin addresses stay private.
     location / { return 404; }
