@@ -16,6 +16,7 @@ import re
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict
+from functools import partial
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from typing import Any
@@ -59,6 +60,7 @@ _last_image_cache_prune_at = 0.0
 _cache_fetch_locks: dict[str, asyncio.Lock] = {}
 _cache_fetch_locks_guard = threading.Lock()
 _checked_cache_files = OrderedDict()
+_checked_cache_files_lock = threading.Lock()
 
 REQUEST_TIMEOUT_SECONDS = 25.0
 REQUEST_CONNECT_TIMEOUT_SECONDS = 10.0
@@ -242,12 +244,14 @@ def _cached_file_is_mangadex_placeholder(path: Path) -> bool:
         if size <= 0 or size > 768 * 1024:
             return False
         key = (str(path), stat.st_mtime_ns, size)
-        if key in _checked_cache_files:
-            return _checked_cache_files[key]
+        with _checked_cache_files_lock:
+            if key in _checked_cache_files:
+                return _checked_cache_files[key]
         result = _looks_like_mangadex_hotlink_placeholder(path.read_bytes())
-        _checked_cache_files[key] = result
-        while len(_checked_cache_files) > 512:
-            _checked_cache_files.popitem(last=False)
+        with _checked_cache_files_lock:
+            _checked_cache_files[key] = result
+            while len(_checked_cache_files) > 512:
+                _checked_cache_files.popitem(last=False)
         return result
     except OSError:
         return False
@@ -528,22 +532,28 @@ COMMON_HEADERS = {
 }
 
 
+def _is_usable_cached_image(cached_path: Path) -> bool:
+    if not cached_path.exists():
+        return False
+    if not _is_usable_cache_file(cached_path):
+        _remove_broken_cache_file(cached_path)
+        return False
+    if _cached_file_is_mangadex_placeholder(cached_path):
+        try:
+            cached_path.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
+
 def _cached_image_response(
     cached_path: Path,
     request: Request,
     *,
     cache_status: str = "HIT",
 ) -> Response | None:
-    if not cached_path.exists():
-        return None
-    if not _is_usable_cache_file(cached_path):
-        _remove_broken_cache_file(cached_path)
-        return None
-    if _cached_file_is_mangadex_placeholder(cached_path):
-        try:
-            cached_path.unlink()
-        except OSError:
-            pass
+    if not _is_usable_cached_image(cached_path):
         return None
 
     try:
@@ -564,6 +574,17 @@ def _cached_image_response(
         cached_path,
         media_type=ct,
         headers={**COMMON_HEADERS, "ETag": etag, "X-Cache": cache_status},
+    )
+
+
+async def _read_cached_image_response(
+    cached_path: Path, request: Request, *, cache_status: str = "HIT",
+) -> Response | None:
+    # Disk reads and Pillow decoding can take time on a small VPS. Reuse the
+    # bounded image pool so they cannot pause authentication, OPTIONS or pages.
+    return await asyncio.get_running_loop().run_in_executor(
+        _image_cache_executor,
+        partial(_cached_image_response, cached_path, request, cache_status=cache_status),
     )
 
 
@@ -786,7 +807,9 @@ async def _fetch_once_httpx(url: str) -> tuple[bytes | None, str | None, str, bo
                     data, content_type, read_error = await _read_httpx_response_limited(response)
                     if read_error:
                         return None, None, read_error, False
-                    mangadex_payload_error = _validate_mangadex_image_payload(data or b"", current_url)
+                    mangadex_payload_error = await asyncio.get_running_loop().run_in_executor(
+                        _image_cache_executor, _validate_mangadex_image_payload, data or b"", current_url
+                    )
                     if mangadex_payload_error:
                         await _reset_client(mangadex=is_mangadex)
                         return None, None, mangadex_payload_error, True
@@ -986,7 +1009,7 @@ async def proxy_image(url: str, request: Request, retry: int = 0):
     # A frontend retry may arrive while another request has just finished
     # warming this cache entry. Always reuse a valid cached image instead of
     # forcing another slow upstream download merely because `retry` is set.
-    cached = _cached_image_response(cached_path, request)
+    cached = await _read_cached_image_response(cached_path, request)
     if cached is not None:
         _log_slow_image(request, key, "HIT", started)
         return cached
@@ -995,7 +1018,7 @@ async def proxy_image(url: str, request: Request, retry: int = 0):
     stage_started = time.perf_counter()
     async with lock:
         lock_ms = (time.perf_counter() - stage_started) * 1000
-        cached = _cached_image_response(cached_path, request)
+        cached = await _read_cached_image_response(cached_path, request)
         if cached is not None:
             _log_slow_image(request, key, "HIT", started, lock_ms=lock_ms)
             return cached
@@ -1017,7 +1040,7 @@ async def proxy_image(url: str, request: Request, retry: int = 0):
     _log_slow_image(request, key, "MISS" if data is not None else "FAIL", started,
                     lock_ms=lock_ms, fetch_ms=fetch_ms, write_ms=write_ms)
     if data is None:
-        stale = _cached_image_response(cached_path, request, cache_status="STALE")
+        stale = await _read_cached_image_response(cached_path, request, cache_status="STALE")
         if stale is not None:
             return stale
         logger.warning("Image fetch failed: %s - %s", url, fetch_info)
@@ -1066,7 +1089,9 @@ async def preload_images(urls: str):
         key = _cache_key(url)
         path = CACHE_DIR / key
         async with _cache_lock_for_key(key):
-            if _is_usable_cache_file(path) and not _cached_file_is_mangadex_placeholder(path):
+            if await asyncio.get_running_loop().run_in_executor(
+                _image_cache_executor, _is_usable_cached_image, path
+            ):
                 cached += 1
                 return
             data, _, _, _ = await _fetch_image(url)

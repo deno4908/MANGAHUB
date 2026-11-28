@@ -45,13 +45,19 @@ def _cached_image(key, request, ttl):
     return FileResponse(path, media_type=images.EXT_CONTENT_TYPE[path.suffix], headers=headers)
 
 
+async def _read_cached_image(key, request, ttl):
+    return await asyncio.get_running_loop().run_in_executor(
+        images._image_cache_executor, _cached_image, key, request, ttl
+    )
+
+
 async def _serve_image(identity, request, loader, ttl, *, stale_ttl=None):
     key = "qq-v1-" + hashlib.sha256(identity.encode()).hexdigest()
-    cached = _cached_image(key, request, ttl)
+    cached = await _read_cached_image(key, request, ttl)
     if cached is not None:
         return cached
     if stale_ttl:
-        stale = _cached_image(key, request, stale_ttl)
+        stale = await _read_cached_image(key, request, stale_ttl)
         if stale is not None:
             # These are previously verified image bytes, still behind the
             # normal reader/whitelist middleware. A source challenge must not
@@ -83,7 +89,7 @@ async def _serve_image(identity, request, loader, ttl, *, stale_ttl=None):
 
 async def _load_image(key, request, loader, ttl):
     async with images._cache_lock_for_key(key):
-        cached = _cached_image(key, request, ttl)
+        cached = await _read_cached_image(key, request, ttl)
         if cached is not None:
             return cached
         result = await loader()
@@ -91,7 +97,12 @@ async def _load_image(key, request, loader, ttl):
         extension = IMAGE_TYPES.get(mime)
         if extension and content:
             try:
-                await asyncio.to_thread(images._write_cache_atomic, IMAGE_CACHE_DIR / (key + extension), content)
+                # A completed image must not wait behind unrelated catalog
+                # jobs in the general executor before reaching the reader.
+                await asyncio.get_running_loop().run_in_executor(
+                    images._image_cache_executor, images._write_cache_atomic,
+                    IMAGE_CACHE_DIR / (key + extension), content
+                )
                 images.schedule_image_cache_prune()
             except OSError:
                 pass

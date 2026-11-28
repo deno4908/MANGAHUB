@@ -49,7 +49,7 @@ async def image_while_waiting(monkeypatch, make_operation):
 
     monkeypatch.setattr(images, "_validate_image_url", AsyncMock(return_value=None))
     monkeypatch.setattr(images, "_cached_image_response",
-                        lambda *args: Response(b"cached-image", media_type="image/jpeg"))
+                        lambda *args, **kwargs: Response(b"cached-image", media_type="image/jpeg"))
     scheduled_at = asyncio.get_running_loop().time()
     task = asyncio.create_task(make_operation(blocked))
     try:
