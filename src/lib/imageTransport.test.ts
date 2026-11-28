@@ -3,6 +3,7 @@ import { fetchImageResponse } from './imageTransport';
 import { setSiteAccessRestricted } from './siteAccessState';
 import { clearQQRecovery } from './truyenqqRelay';
 vi.mock('./api', async () => ({ getAccessToken: () => 'fixture-website-token',
+  getQQRecoveryAuthorization: () => Promise.resolve('Bearer fixture-website-token'),
   isSiteAccessRestricted: (await import('./siteAccessState')).isSiteAccessRestricted }));
 afterEach(() => { clearQQRecovery();vi.unstubAllGlobals();setSiteAccessRestricted(false); });
 const api = import.meta.env.VITE_API_URL || 'http://localhost:8000';

@@ -573,6 +573,12 @@ export function getAccessToken() {
   return accessToken;
 }
 
+export async function getQQRecoveryAuthorization(): Promise<string | null> {
+  if (!isSiteAccessRestricted()) return null;
+  if (!accessToken && hasSessionHint()) await refreshAccessToken();
+  return accessToken ? `Bearer ${accessToken}` : null;
+}
+
 export type AvatarCropArea = {
   x: number;
   y: number;
@@ -693,7 +699,7 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
 
   let res: Response;
   try {
-    res = await fetchWithTruyenQQRelay(url, { ...requestOptions, headers }, requestTimeoutMs);
+    res = await fetchWithTruyenQQRelay(url, { ...requestOptions, headers }, requestTimeoutMs, getQQRecoveryAuthorization);
   } catch (err: any) {
     if (err?.name === "AbortError") {
       throw new Error("Yêu cầu quá thời gian, vui lòng thử lại");
@@ -719,10 +725,11 @@ async function apiFetchResponse(url: string, options: ApiRequestInit = {}): Prom
     const refreshed = await refreshAccessToken();
     if (refreshed) {
       headers["Authorization"] = `Bearer ${accessToken}`;
-      const retry = await fetchWithTimeout(
+      const retry = await fetchWithTruyenQQRelay(
         url,
         { ...requestOptions, headers },
         requestTimeoutMs,
+        getQQRecoveryAuthorization,
       );
       if (retry.status === 503) {
         const body = await retry.json().catch(() => ({}));

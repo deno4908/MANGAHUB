@@ -250,3 +250,53 @@ it('keeps the rendered last-good body readable when background source recovery f
   expect((await response.json()).data.items[0].slug).toBe('last-good');
   expect(fetcher).toHaveBeenCalledTimes(2);
 });
+
+const cookieDeniedSource = () => json({}, 503, { 'X-TruyenQQ-Error': 'http-403',
+  'X-TruyenQQ-Source-Path': '/truyen-tranh/cookie-reader-123', 'X-TruyenQQ-Recovery': '1' });
+
+it('never restores authorization for healthy reads, unrelated failures, or a ready token', async () => {
+  setSiteAccessRestricted(true);
+  const restore = vi.fn().mockResolvedValue('Bearer restored');
+  const fetcher = vi.fn().mockResolvedValueOnce(json({ data: {} }))
+    .mockResolvedValueOnce(json({}, 503)).mockResolvedValueOnce(cookieDeniedSource())
+    .mockResolvedValueOnce(new Response('book_info', { headers: { 'X-TruyenQQ-Proof': 'proof' } }))
+    .mockResolvedValueOnce(json({ data: {} }));
+  vi.stubGlobal('fetch', fetcher);
+  await fetchWithTruyenQQRelay(api, {}, 10_000, restore);
+  await fetchWithTruyenQQRelay(api, {}, 10_000, restore);
+  await fetchWithTruyenQQRelay(api, { headers: { Authorization: 'Bearer ready' } }, 10_000, restore);
+  expect(restore).not.toHaveBeenCalled();
+  expect(fetcher).toHaveBeenCalledTimes(5);
+});
+
+it.each([null, 'throws'])('does not spend a relay request when restoring authorization fails (%s)', async result => {
+  setSiteAccessRestricted(true);
+  const restore = vi.fn(async () => { if (result === 'throws') throw new Error('offline');return null; });
+  const fetcher = vi.fn().mockImplementation(async () => cookieDeniedSource());
+  vi.stubGlobal('fetch', fetcher);
+  expect((await fetchWithTruyenQQRelay(api, {}, 10_000, restore)).status).toBe(503);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(restore).toHaveBeenCalledTimes(1);
+});
+
+it.each(['deadline', 'abort', 'logout'])('stops cookie recovery after %s without sending a late relay request', async reason => {
+  vi.useFakeTimers();
+  setSiteAccessRestricted(true);
+  let finish!: (authorization: string | null) => void;
+  const restore = vi.fn(() => new Promise<string | null>(resolve => { finish = resolve; }));
+  const fetcher = vi.fn().mockImplementation(async () => cookieDeniedSource());
+  vi.stubGlobal('fetch', fetcher);
+  const controller = new AbortController();
+  const running = fetchWithTruyenQQRelay(api, { signal: controller.signal }, 200, restore);
+  const checked = reason === 'abort' ? expect(running).rejects.toMatchObject({ name: 'AbortError' })
+    : expect(running).resolves.toMatchObject({ status: 503 });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(restore).toHaveBeenCalledTimes(1);
+  if (reason === 'deadline') await vi.advanceTimersByTimeAsync(201);
+  else if (reason === 'abort') controller.abort();
+  else clearQQRecovery();
+  finish('Bearer late-restored-reader');
+  await checked;
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});

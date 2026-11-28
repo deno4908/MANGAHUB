@@ -1,4 +1,4 @@
-import { getAccessToken, isSiteAccessRestricted } from './api';
+import { getAccessToken, getQQRecoveryAuthorization, isSiteAccessRestricted } from './api';
 import { fetchWithTruyenQQRelay } from './truyenqqRelay';
 import { fetchWithTimeout } from './http';
 
@@ -22,6 +22,6 @@ export function fetchImageResponse(url: string, options: RequestInit = {}, timeo
   }
   const request = { ...options, headers, credentials: owned ? 'include' as const : 'omit' as const, referrerPolicy: 'no-referrer' as const };
   return owned && new URL(url, window.location.origin).pathname.startsWith('/api/manga/truyenqq/')
-    ? fetchWithTruyenQQRelay(url, request, timeout)
+    ? fetchWithTruyenQQRelay(url, request, timeout, getQQRecoveryAuthorization)
     : fetchWithTimeout(url, request, timeout);
 }

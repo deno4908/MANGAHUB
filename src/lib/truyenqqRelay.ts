@@ -100,32 +100,67 @@ async function warm(value: Source, signal: AbortSignal | null | undefined, timeo
   }
 }
 
-/** Recover public QQ reads without forwarding account credentials to the relay. */
-export async function fetchWithTruyenQQRelay(url: string, options: RequestInit, timeout: number): Promise<Response> {
+async function waitForAuthorization(resolve: () => Promise<string | null>, signal: AbortSignal | null | undefined,
+  timeout: number): Promise<string | null> {
+  if (signal?.aborted || timeout <= 0) return null;
+  let timer: ReturnType<typeof setTimeout>;
+  let cancel!: () => void;
+  try {
+    return await new Promise<string | null>(done => {
+      cancel = () => done(null);
+      timer = setTimeout(cancel, timeout);
+      signal?.addEventListener('abort', cancel, { once: true });
+      // Refresh can be shared by other requests. Stop waiting, not their job.
+      Promise.resolve().then(resolve).then(done, cancel);
+    });
+  } finally {
+    clearTimeout(timer!);
+    signal?.removeEventListener('abort', cancel);
+  }
+}
+
+/** Recover public QQ reads; only the owned relay may receive website authorization. */
+export async function fetchWithTruyenQQRelay(url: string, options: RequestInit, timeout: number,
+  resolveAuthorization?: () => Promise<string | null>): Promise<Response> {
   const apiUrl = new URL(url, window.location.origin);
   if (!apiUrl.pathname.startsWith('/api/manga/') || (options.method || 'GET').toUpperCase() !== 'GET') {
     return fetchWithTimeout(url, options, timeout);
   }
   const deadline = Date.now() + timeout;
-  const authorization = isSiteAccessRestricted() ? new Headers(options.headers).get('Authorization') : null;
+  let authorization = isSiteAccessRestricted() ? new Headers(options.headers).get('Authorization') : null;
+  let retryOptions = options;
+  const started = generation;
   const initial = await fetchWithTimeout(url, options, timeout);
   const recover = async () => {
   let response = initial;
   const recovered = new Set<string>();
   for (let attempt = 0; attempt < 2 && response.headers.get('X-TruyenQQ-Error') === 'http-403'; attempt++) {
     const hint = source(response.headers.get('X-TruyenQQ-Source-Path'), response.headers.get('X-TruyenQQ-Search'));
-    const remaining = deadline - Date.now();
+    let remaining = deadline - Date.now();
     if (!hint || recovered.has(JSON.stringify(hint)) || remaining <= 0) return response;
     recovered.add(JSON.stringify(hint));
+    if (isSiteAccessRestricted() && !authorization) {
+      // The API can authorize a read with its HttpOnly cookie while a new tab
+      // has no in-memory token. Restore only after a proven source failure;
+      // healthy reads keep their cookie fast path and cost no auth request.
+      authorization = resolveAuthorization ? await waitForAuthorization(resolveAuthorization, options.signal, remaining) : null;
+      if (options.signal?.aborted) throw new DOMException('QQ read cancelled', 'AbortError');
+      if (!authorization || started !== generation) return response;
+      const headers = new Headers(options.headers);
+      headers.set('Authorization', authorization);
+      retryOptions = { ...options, headers };
+      remaining = deadline - Date.now();
+      if (remaining <= 0) return response;
+    }
     const recovery = await warm(hint, options.signal, remaining, authorization);
     if (options.signal?.aborted) throw new DOMException('QQ read cancelled', 'AbortError');
-    if (!recovery.ok) return response;
+    if (!recovery.ok || started !== generation) return response;
     const retryRemaining = deadline - Date.now();
     if (retryRemaining <= 0) return response;
     const canHandoff = response.headers.get('X-TruyenQQ-Recovery') === '1' && recovery.snapshot &&
       /^\/api\/manga\/(?:homepage|categories|truyenqq-filtered|otruyen-filtered|search|trending|detail\/[a-zA-Z0-9-]+|chapter\/[a-zA-Z0-9._-]+|(?:list|category)\/[a-zA-Z0-9-]+(?:\/batch)?|truyenqq\/(?:cover\/[a-zA-Z0-9-]+|image\/[a-zA-Z0-9-]+\/[a-zA-Z0-9._-]+\/[0-9]+))$/.test(apiUrl.pathname);
     if (canHandoff) {
-      const headers = new Headers(options.headers);
+      const headers = new Headers(retryOptions.headers);
       headers.set('Content-Type', 'application/json');headers.set('X-TruyenQQ-Recovery', '1');
       let retryUrl = url;
       try {
@@ -133,9 +168,9 @@ export async function fetchWithTruyenQQRelay(url: string, options: RequestInit, 
         if ([apiUrl.origin, 'https://standby.mangahub.art'].includes(actual.origin) &&
           actual.pathname === apiUrl.pathname && actual.search === apiUrl.search) retryUrl = actual.href;
       } catch { /* A synthetic response has no origin. Keep the original API. */ }
-      response = await fetchWithTimeout(retryUrl, { ...options, method: 'POST', headers,
+      response = await fetchWithTimeout(retryUrl, { ...retryOptions, method: 'POST', headers,
         body: JSON.stringify(recovery.snapshot) }, retryRemaining);
-    } else response = await fetchWithTimeout(url, options, retryRemaining);
+    } else response = await fetchWithTimeout(url, retryOptions, retryRemaining);
   }
   // Healthy backend reads already have their source data. Only an explicit
   // source denial needs the browser's relay; speculative warming spends quota
