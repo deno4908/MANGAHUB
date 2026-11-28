@@ -147,3 +147,33 @@ it('adopts an in-flight preload once and keeps downloading through visibility ch
   fireEvent.load(screen.getByRole('img'));
   expect(request).toHaveBeenCalledTimes(1);
 });
+
+it.each(['truyenqq', 'mangadex'])('releases decoded %s reader blobs for bounded eviction without replacing displayed images or refetching', async source => {
+  vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} });
+  let sequence = 0;
+  vi.stubGlobal('URL', class extends URL {
+    static createObjectURL = vi.fn(() => `blob:decoded-page-${++sequence}`);
+    static revokeObjectURL = vi.fn();
+  });
+  const request = vi.spyOn(transport, 'fetchImageResponse').mockImplementation(async () => ({
+    ok: true, headers: new Headers({ 'Content-Type': 'image/jpeg' }),
+    blob: async () => ({ size: 4 * 1024 * 1024 }),
+  }) as Response);
+  const api = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  render(<>{Array.from({ length: 7 }, (_, index) => <ReaderImage key={index}
+    src={source === 'truyenqq' ? `${api}/api/manga/truyenqq/image/long-book-123/1/${index + 1}`
+      : `${api}/api/images/img?url=${encodeURIComponent(`https://reader.mangadex.network/data/hash/${index + 1}.jpg`)}`}
+    alt={`Decoded page ${index + 1}`} index={index} imageFit="width" pageGap={0} priority />)}</>);
+  await act(async () => {});
+  const images = screen.getAllByRole('img');
+  expect(images).toHaveLength(7);
+  const originalSources = images.map(image => image.getAttribute('src'));
+  expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+  for (const image of images) fireEvent.load(image);
+  await act(async () => {});
+  expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
+  expect(images.map(image => image.getAttribute('src'))).toEqual(originalSources);
+  act(() => document.dispatchEvent(new Event('visibilitychange')));
+  expect(request).toHaveBeenCalledTimes(7);
+  expect(screen.queryByRole('button')).toBeNull();
+});

@@ -74,7 +74,7 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
       () => { if (!disposed) failed(); });
     return () => { disposed = true;resource.release();if (resourceRef.current === resource) resourceRef.current = undefined; };
     // Visibility only sets the priority at acquisition. Scrolling must not
-    // cancel an image that is already downloading or revoke a decoded image.
+    // cancel an in-flight download or replace an already decoded <img>.
   }, [key, inView, managed, error, waiting, url, failed]);
 
   useEffect(() => {
@@ -135,7 +135,14 @@ const ReaderImage = memo(({ src, alt, index, imageFit, pageGap, onVisible, prior
       </div> : inView && !waiting && imageSrc ? <img key={key} src={imageSrc} alt={alt}
         className={`${fitClass} select-none ${loaded ? '' : 'invisible absolute'}`} loading="eager" decoding="async"
         fetchPriority={visible || priority ? 'high' : 'auto'} referrerPolicy="no-referrer" draggable={false}
-        onLoad={event => { setNaturalSize({ w: event.currentTarget.naturalWidth, h: event.currentTarget.naturalHeight });setLoaded(true); }}
+        onLoad={event => {
+          setNaturalSize({ w: event.currentTarget.naturalWidth, h: event.currentTarget.naturalHeight });setLoaded(true);
+          // The decoded <img> keeps its pixels when its object URL is revoked.
+          // Stop pinning every previously read blob in JS for a long chapter;
+          // the shared cache can now enforce its byte limit without replacing
+          // the displayed image or downloading it again on reverse scroll.
+          resourceRef.current?.release();resourceRef.current = undefined;
+        }}
         onError={failed} /> : null}
     </div>
   );
