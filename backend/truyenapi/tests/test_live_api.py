@@ -104,6 +104,54 @@ def test_images_reuse_fast_source_host_without_waiting_for_slow_losers():
         service.close()
 
 
+def test_slow_unused_mirrors_cannot_fill_the_pool_and_stall_the_next_reader_page():
+    release = threading.Event()
+    def handler(request):
+        if request.url.host.startswith('mirror'):
+            assert release.wait(4)
+        elif request.url.host == 'original.example':
+            time.sleep(.45)  # Healthy source, just slower than the old .35s fan-out.
+        return httpx.Response(200, content=b'page', headers={'content-type': 'image/jpeg'})
+    service, calls = setup_service(handler)
+    service.image_pool.shutdown(wait=True)
+    service.image_pool = ThreadPoolExecutor(max_workers=6)
+    try:
+        for number in [1, 2]:
+            urls = [f'https://{host}/{number}.jpg' for host in
+                    ['original.example', 'mirror1.example', 'mirror2.example', 'mirror3.example']]
+            assert service.image(urls, BASE)[0] == b'page'
+        with ThreadPoolExecutor(1) as reader:
+            pending = reader.submit(service.image, ['https://foreground.example/next.jpg'], BASE)
+            try:
+                assert pending.result(timeout=.5)[0] == b'page'
+            finally:
+                release.set()
+        assert len([request for request in calls if request.url.host.startswith('mirror')]) <= 2
+    finally:
+        release.set();service.close()
+
+
+def test_a_slow_original_and_first_mirror_do_not_delay_a_healthy_second_mirror():
+    release = threading.Event()
+    def handler(request):
+        if request.url.host != 'fast.example':
+            assert release.wait(4)
+        return httpx.Response(200, content=b'page', headers={'content-type': 'image/jpeg'})
+    service, calls = setup_service(handler)
+    try:
+        with ThreadPoolExecutor(1) as reader:
+            pending = reader.submit(service.image, ['https://slow.example/1.jpg',
+                'https://mirror.example/1.jpg', 'https://fast.example/1.jpg'], BASE)
+            try:
+                assert pending.result(timeout=1.5)[0] == b'page'
+                assert service.image_preferred_host[0] == 'fast.example'
+            finally:
+                release.set()
+        assert {request.url.host for request in calls} == {'slow.example', 'mirror.example', 'fast.example'}
+    finally:
+        release.set();service.close()
+
+
 def test_image_preference_expires_and_falls_back_without_inventing_urls():
     def handler(request):
         if request.url.host == "fast.example":

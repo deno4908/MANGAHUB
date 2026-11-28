@@ -41,6 +41,11 @@ class LiveService:
         self.image_pool = ThreadPoolExecutor(max_workers=24, thread_name_prefix="truyen-image-fetch")
         self.image_preference_lock = threading.Lock()
         self.image_preferred_host = None
+        self.image_preferred_delay = .35
+        # Cancelling a Future cannot stop an already running HTTP request.
+        # Bound speculative losers until their physical requests really finish.
+        self.image_hedge_slots = threading.BoundedSemaphore(4)
+        self.image_hedge_hosts = set()
         self.base = settings.base_url.rstrip("/") + "/"
         self.origin = urlsplit(self.base).netloc
 
@@ -436,7 +441,10 @@ class LiveService:
         targets = cache_targets
         with self.image_preference_lock:
             preferred = self.image_preferred_host
-        if preferred and preferred[1] > time.monotonic():
+            usable_preference = preferred and preferred[1] > time.monotonic() and any(
+                urlsplit(url).netloc == preferred[0] for url in targets)
+            head_start = self.image_preferred_delay if usable_preference else .35
+        if usable_preference:
             # Reorder only URLs supplied by this page, never invent a mirror.
             targets = tuple(sorted(targets, key=lambda url: urlsplit(url).netloc != preferred[0]))
         def fetch(url):
@@ -451,26 +459,50 @@ class LiveService:
         def load():
             if not targets:
                 raise HTTPException(502, "Chương chưa có máy chủ ảnh")
-            tasks = [self.image_pool.submit(copy_context().run, fetch, targets[0])]
-            origins = {tasks[0]: targets[0]}
+            tasks, origins, started = [], {}, {}
+            def launch(url, *, speculative=False):
+                host = urlsplit(url).netloc
+                def release_slot(done=None):
+                    with self.image_preference_lock:
+                        self.image_hedge_hosts.discard(host)
+                        self.image_hedge_slots.release()
+                if speculative:
+                    with self.image_preference_lock:
+                        if host in self.image_hedge_hosts or not self.image_hedge_slots.acquire(blocking=False):
+                            return None
+                        self.image_hedge_hosts.add(host)
+                try:
+                    task = self.image_pool.submit(copy_context().run, fetch, url)
+                except BaseException:
+                    if speculative:
+                        release_slot()
+                    raise
+                if speculative:
+                    task.add_done_callback(release_slot)
+                tasks.append(task);origins[task] = url;started[task] = time.monotonic()
+                return task
             def successful(task):
                 value = task.result()
                 with self.image_preference_lock:
                     self.image_preferred_host = (urlsplit(origins[task]).netloc, time.monotonic() + 300)
+                    self.image_preferred_delay = max(.35, min(1.5, (time.monotonic() - started[task]) * 1.5))
                 return value
+            first = launch(targets[0])
             try:
-                done, _ = wait(tasks, timeout=0.35)
-                if done and tasks[0].result() is not None:
-                    return successful(tasks[0])
-                # A stalled original must not consume its full timeout before
-                # another source-provided CDN can deliver the same page.
-                for url in targets[1:]:
-                    task = self.image_pool.submit(copy_context().run, fetch, url)
-                    tasks.append(task)
-                    origins[task] = url
-                remaining = set(tasks)
-                while remaining:
-                    done, remaining = wait(remaining, return_when=FIRST_COMPLETED)
+                done, remaining = wait([first], timeout=head_start)
+                if done and first.result() is not None:
+                    return successful(first)
+                alternatives = list(targets[1:])
+                while remaining or alternatives:
+                    # Stagger source-provided alternatives, with at most four
+                    # speculative requests globally and one per host. A single
+                    # bad CDN cannot consume the entire fallback budget.
+                    for url in alternatives:
+                        task = launch(url, speculative=bool(remaining))
+                        if task is not None:
+                            remaining.add(task);alternatives.remove(url);break
+                    done, remaining = wait(remaining, timeout=.35 if alternatives else None,
+                                           return_when=FIRST_COMPLETED)
                     for task in done:
                         value = task.result()
                         if value is not None:
