@@ -10,12 +10,14 @@ import json
 import math
 import secrets
 import time
+import zlib
 from contextlib import contextmanager
 from contextvars import ContextVar
 from uuid import UUID
 
 import redis
 from itsdangerous import BadData, URLSafeSerializer
+from itsdangerous.encoding import base64_decode
 from config import config
 
 PREFIX = "mh:access:v2:"
@@ -123,8 +125,11 @@ def _signer_for(client):
         key = client.get(PREFIX + "signing-key")
     if not key:
         raise Unavailable("Không thể cấp phiên truy cập. Vui lòng thử lại.")
-    return URLSafeSerializer(key,
-                             salt="mangahub-website-session-v2",
+    return _signer_with_key(key)
+
+
+def _signer_with_key(key):
+    return URLSafeSerializer(key, salt="mangahub-website-session-v2",
                              signer_kwargs={"digest_method": hashlib.sha256})
 
 
@@ -136,6 +141,10 @@ def _registered_session(client, who, *, ticket=False):
     # Read the session and every revocation guard in one atomic Redis MGET.
     # There is still a fresh revocation check on EVERY request.
     values = client.mget([_session_key(who["uid"], who["sid"]), *_guards(who["uid"], who["sid"])])
+    return _checked_session_snapshot(values, who, ticket=ticket)
+
+
+def _checked_session_snapshot(values, who, *, ticket=False):
     raw = values[0]
     if ticket and not raw:
         raise Rejected("Unregistered access ticket")
@@ -174,23 +183,61 @@ def encode(record):
         raise Unavailable("Không thể cấp phiên truy cập. Vui lòng thử lại.") from error
 
 
+def _ticket_routing_identity(value):
+    """Read bounded, UNTRUSTED IDs only to address the atomic Redis snapshot.
+
+    Neither these IDs nor any other unsigned claim authorize access. The
+    original cookie must still verify against the freshly read signing key
+    before any session, role or permission in that snapshot can be accepted.
+    """
+    body, signature = value.rsplit(".", 1)
+    if not body or not signature:
+        raise Rejected("Invalid access ticket")
+    compressed = body.startswith(".")
+    raw = base64_decode((body[1:] if compressed else body).encode("ascii"))
+    if compressed:
+        inflater = zlib.decompressobj()
+        # Check before deserializing: a tiny unsigned cookie must not expand
+        # into an unbounded JSON document while choosing lookup keys.
+        raw = inflater.decompress(raw, 2049)
+        if len(raw) > 2048 or not inflater.eof or inflater.unused_data:
+            raise Rejected("Invalid access ticket")
+    elif len(raw) > 2048:
+        raise Rejected("Invalid access ticket")
+    payload = json.loads(raw)
+    if (not isinstance(payload, dict) or set(payload) != {"uid", "sid", "jti", "exp"}
+            or not isinstance(payload["uid"], str) or not isinstance(payload["sid"], str)):
+        raise Rejected("Invalid access ticket")
+    return {"uid": str(UUID(payload["uid"])), "sid": str(UUID(payload["sid"])), "iat": float("inf")}
+
+
 def decode(value):
     if not value or not isinstance(value, str) or len(value) > 2048:
         raise Rejected("Missing access ticket")
     try:
-        payload = _signer().loads(value)
+        who = _ticket_routing_identity(value)
+        client = _db()
+        # One fresh, atomic read for the key, registered session and ALL
+        # revocation guards. No completed verdict or signing key is cached.
+        values = client.mget([PREFIX + "signing-key", _session_key(who["uid"], who["sid"]),
+                              *_guards(who["uid"], who["sid"])])
+        if not values[0]:
+            raise Unavailable("Access signing key unavailable")
+        payload = _signer_with_key(values[0]).loads(value)
         if not isinstance(payload, dict) or set(payload) != {"uid", "sid", "jti", "exp"}:
             raise Rejected("Invalid access ticket")
-        who = {"uid": str(UUID(payload["uid"])), "sid": str(UUID(payload["sid"])), "iat": float("inf")}
+        verified_who = {"uid": str(UUID(payload["uid"])), "sid": str(UUID(payload["sid"])), "iat": float("inf")}
+        if verified_who != who:
+            raise Rejected("Session identity mismatch")
         # The registered record supplies the original verified issuance time;
         # never accept an iat, role or revocation exception from the cookie.
-        record = _registered_session(_db(), who, ticket=True)
+        record = _checked_session_snapshot(values[1:], verified_who, ticket=True)
         if not record or not hmac.compare_digest(str(record["jti"]), str(payload["jti"])) or _payload(record) != payload:
             raise Rejected("Expired, changed or revoked access ticket")
         return record
     except redis.RedisError as error:
         raise Unavailable("Không thể kiểm tra phiên truy cập. Vui lòng thử lại.") from error
-    except (BadData, KeyError, TypeError, ValueError) as error:
+    except (BadData, KeyError, TypeError, ValueError, zlib.error, RecursionError) as error:
         raise Rejected("Invalid access ticket") from error
 
 

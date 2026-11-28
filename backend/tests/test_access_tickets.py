@@ -3,6 +3,7 @@ import asyncio
 import json
 import time
 import uuid
+import zlib
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -10,6 +11,7 @@ from unittest.mock import Mock
 import jwt
 import pytest
 import redis
+from itsdangerous.encoding import base64_encode
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import Depends, Request
 from fastapi.responses import Response
@@ -129,10 +131,91 @@ def test_each_read_checks_every_revocation_guard_with_one_atomic_session_read(en
     assert len(calls) == 1 and len(calls[0]) == 9
     calls.clear()
     assert tickets.decode(saved)['role'] == 'reader'
-    assert len(calls) == 1 and len(calls[0]) == 9
+    assert calls == [[tickets.PREFIX + 'signing-key', tickets._session_key(READER, SID),
+                      *tickets._guards(READER, SID)]]
     who = tickets.identity(jwt.decode(token(), options={'verify_signature': False}))
     tickets.revoke_sessions(who)
     with pytest.raises(tickets.Rejected): tickets.decode(saved)
+
+
+@pytest.mark.parametrize('compressed', [False, True])
+def test_cookie_signature_and_revocation_snapshot_need_one_redis_round_trip(environment, monkeypatch, compressed):
+    _, token = environment
+    c = client(); c.get('/api/site-access', headers=bearer(token()))
+    signer = tickets._signer()
+    payload = signer.loads(c.cookies.get(tickets.cookie_name()))
+    raw = json.dumps(payload).encode()
+    body = b'.' + base64_encode(zlib.compress(raw)) if compressed else base64_encode(raw)
+    saved = signer.make_signer().sign(body).decode()
+    execute = Mock(wraps=tickets._client.execute_command)
+    monkeypatch.setattr(tickets._client, 'execute_command', execute)
+    assert tickets.decode(saved)['uid'] == READER
+    assert execute.call_count == 1, 'Every image still pays multiple sequential security-store round trips'
+    command, *keys = execute.call_args.args
+    assert command == 'MGET'
+    assert keys == [tickets.PREFIX + 'signing-key', tickets._session_key(READER, SID), *tickets._guards(READER, SID)]
+    execute.reset_mock()
+    tickets._client.set(tickets._key('blocked-session', SID), '1')
+    execute.reset_mock()
+    with pytest.raises(tickets.Rejected):
+        tickets.decode(saved)
+    assert execute.call_count == 1, 'A new request must read revocation state again'
+
+
+@pytest.mark.parametrize('payload', [
+    [], {'uid': 123, 'sid': SID, 'jti': 'untrusted', 'exp': 9999999999},
+    {'uid': READER, 'sid': 'not-a-session-id', 'jti': 'untrusted', 'exp': 9999999999},
+    {'uid': READER, 'sid': SID, 'jti': 'untrusted', 'exp': 9999999999, 'role': 'admin'},
+    {'uid': READER, 'sid': SID, 'jti': 'x' * 1_000_000, 'exp': 9999999999},
+])
+def test_untrusted_ticket_routing_data_is_bounded_and_cannot_trigger_security_reads(environment, monkeypatch, payload):
+    body = b'.' + base64_encode(zlib.compress(json.dumps(payload).encode()))
+    saved = (body + b'.untrusted-signature').decode()
+    assert len(saved) <= 2048
+    execute = Mock(side_effect=AssertionError('Malformed routing payload reached Redis'))
+    monkeypatch.setattr(tickets._client, 'execute_command', execute)
+    with pytest.raises(tickets.Rejected):
+        tickets.decode(saved)
+    execute.assert_not_called()
+
+
+@pytest.mark.parametrize('raw', [
+    b'bad-json', b'.' + base64_encode(zlib.compress(b'[' * 1000 + b']' * 1000)),
+    b'.' + base64_encode(b'broken-zlib-stream'),
+    b'.' + base64_encode(zlib.compress(b'{}') + b'unexpected-trailing-bytes'),
+])
+def test_malformed_cookie_payloads_fail_closed_before_any_redis_lookup(environment, monkeypatch, raw):
+    # Plain invalid JSON and compressed invalid, deep or trailing payloads.
+    body = raw if raw.startswith(b'.') else base64_encode(raw)
+    saved = (body + b'.untrusted-signature').decode()
+    execute = Mock(side_effect=AssertionError('Malformed routing payload reached Redis'))
+    monkeypatch.setattr(tickets._client, 'execute_command', execute)
+    with pytest.raises(tickets.Rejected):
+        tickets.decode(saved)
+    execute.assert_not_called()
+
+
+def test_routing_ids_and_a_registered_ticket_id_never_replace_signature_verification(environment):
+    from itsdangerous import URLSafeSerializer
+    _, token = environment
+    c = client(); c.get('/api/site-access', headers=bearer(token()))
+    payload = tickets._signer().loads(c.cookies.get(tickets.cookie_name()))
+    forged = URLSafeSerializer('attacker-key', salt='mangahub-website-session-v2',
+                              signer_kwargs={'digest_method': tickets.hashlib.sha256}).dumps(payload)
+    with pytest.raises(tickets.Rejected):
+        tickets.decode(forged)
+
+
+def test_missing_cookie_signing_key_fails_closed_without_recreating_a_secret_on_image_reads(environment, monkeypatch):
+    _, token = environment
+    c = client(); c.get('/api/site-access', headers=bearer(token()))
+    saved = c.cookies.get(tickets.cookie_name())
+    tickets._client.delete(tickets.PREFIX + 'signing-key')
+    write = Mock(side_effect=AssertionError('An image read initialized a signing secret'))
+    monkeypatch.setattr(tickets._client, 'set', write)
+    with pytest.raises(tickets.Unavailable):
+        tickets.decode(saved)
+    write.assert_not_called()
 
 
 def test_first_check_issues_a_host_only_http_only_ticket_and_next_reads_do_not_query_supabase(environment):
